@@ -60,6 +60,7 @@ def _create_coordinate_dataframe(height: int, width: int, fixed_index_value: int
     return df
 
 def _apply_transforms_to_points(points: np.ndarray, coord_transform: CoordinateTransform, experiment_meta: ExperimentMetadata, warp: np.ndarray):
+    # apply inverse affine to points in input space
     affine_transformed_points = apply_transforms_to_points(
         ants_pts=points,
         transforms=[str(experiment_meta.ls_to_template_affine_matrix_path)],
@@ -67,15 +68,22 @@ def _apply_transforms_to_points(points: np.ndarray, coord_transform: CoordinateT
     )
     displacements = np.zeros((len(affine_transformed_points), 3))
 
+    # interpolate warp field at affine transformed points
+    # for each displacement axis, interpolate at x, y, z coords
     for component in range(3):
         displacements[:, component] = map_coordinates(
             warp[:, :, :, component],
-            affine_transformed_points.T,
+            affine_transformed_points.T,    # (n_points, 3) -> (3, n_points)
             order=1,
             mode='nearest',
             prefilter=False
         )
 
+    # let T = template_position for input
+    # I = input location
+    # T = I - inverse_warp[T]
+    # T on both sides, use approximation T ≈ I - inverse_warp[I]
+    # where affine_transformed_points are input_points in template space
     transformed_points = affine_transformed_points - displacements
 
     transformed_points = convert_from_ants_space(
