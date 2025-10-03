@@ -59,32 +59,40 @@ def _create_coordinate_dataframe(height: int, width: int, fixed_index_value: int
 
     return df
 
-def _apply_transforms_to_points(points: np.ndarray, coord_transform: CoordinateTransform, experiment_meta: ExperimentMetadata, warp: np.ndarray):
+def _apply_transforms_to_points(
+    points: np.ndarray,
+    coord_transform: CoordinateTransform,
+    experiment_meta: ExperimentMetadata,
+    warp: tensorstore.TensorStore
+):
     # apply inverse affine to points in input space
     affine_transformed_points = apply_transforms_to_points(
         ants_pts=points,
         transforms=[str(experiment_meta.ls_to_template_affine_matrix_path)],
         invert=(True,)
     )
+
+    # convert physical points to voxels,
+    # so we can index into the displacement field
+    voxel_indices = convert_from_ants_space(
+        template_parameters=coord_transform.ls_template_info,
+        physical_pts=affine_transformed_points
+    )
+
     displacements = np.zeros((len(affine_transformed_points), 3))
 
-    # interpolate warp field at affine transformed points
-    # for each displacement axis, interpolate at x, y, z coords
+    # interpolate displacement field at affine transformed points for each displacement axis
     for component in range(3):
         displacements[:, component] = map_coordinates(
-            warp[:, :, :, component],
-            affine_transformed_points.T,    # (n_points, 3) -> (3, n_points)
+            warp[:, :, :, component].read().result(),
+            voxel_indices.T,    # (n_points, 3) -> (3, n_points)
             order=1,
             mode='nearest',
             prefilter=False
         )
 
-    # let T = template_position for input
-    # I = input location
-    # T = I - inverse_warp[T]
-    # T on both sides, use approximation T ≈ I - inverse_warp[I]
-    # where affine_transformed_points are input_points in template space
-    transformed_points = affine_transformed_points - displacements
+    # apply displacement vector to affine transformed points
+    transformed_points = affine_transformed_points + displacements
 
     transformed_points = convert_from_ants_space(
         coord_transform.ls_template_info, transformed_points
@@ -106,13 +114,19 @@ class SliceDataset(Dataset):
         logger.info('Loading light sheet template')
         self._ls_template = ants.image_read(str(ls_template_path))
 
-    def _load_warps(self) -> list[np.ndarray]:
-        logger.info('Loading warps')
-
+    def _load_warps(self) -> list[tensorstore.TensorStore]:
         warps = []
         for experiment_meta in self._dataset_meta:
-            warp = ants.image_read(str(experiment_meta.ls_to_template_inverse_warp_path))
-            warp = warp.numpy()
+            warp = tensorstore.open(
+                spec={
+                    'driver': 'zarr3',
+                    'kvstore': {
+                        'driver': 'file',
+                        'path': str(experiment_meta.ls_to_template_inverse_warp_path)
+                    }
+                },
+                read=True
+            ).result()
             warps.append(warp)
         return warps
 
@@ -123,7 +137,7 @@ class SliceDataset(Dataset):
         slice_idx = int(idx - num_slices_cumsum[dataset_idx])
         return dataset_idx, slice_idx
 
-    def _get_slice_axis(self, axes: list[AcquisitionAxis]):
+    def _get_slice_axis(self, axes: list[AcquisitionAxis]) -> AcquisitionAxis:
         if self._orientation == SliceOrientation.SAGITTAL:
             slice_axis = [i for i in range(len(axes)) if axes[i].direction in (AcquisitionDirection.LEFT_TO_RIGHT, AcquisitionDirection.RIGHT_TO_LEFT)]
             if len(slice_axis) != 1:
@@ -186,8 +200,9 @@ class SliceDataset(Dataset):
         ).result()
         input_slice = volume[tuple(volume_slice)].read().result()
 
-        output_points = ls_template_points.values.reshape((height, width, 3))
-        return input_slice, output_points
+        #output_points = ls_template_points.values.reshape((height, width, 3))
+        output_points = ls_template_points.values
+        return input_slice, output_points, dataset_idx, slice_idx
 
     def __len__(self):
         num_slices = [x.registered_shape[self._get_slice_axis(axes=x.axes).dimension] for x in self._dataset_meta]

@@ -1,11 +1,12 @@
 import ants
 import numpy as np
 import pandas as pd
+import torch
 from matplotlib import pyplot as plt
 from skimage.exposure import rescale_intensity
 
 
-def visualize_alignment(input_slice: np.ndarray, template_points: pd.DataFrame, template: ants.ANTsImage):
+def visualize_alignment(input_slice: torch.Tensor, template_points: torch.Tensor, template: ants.ANTsImage):
     raw_rgb = np.zeros_like(input_slice, shape=(*input_slice.shape, 3))
     raw_rgb[:, :, 0] = input_slice
 
@@ -14,15 +15,15 @@ def visualize_alignment(input_slice: np.ndarray, template_points: pd.DataFrame, 
         template_points=template_points
     )
     template_on_input_rgb = np.zeros_like(template_on_input,
-                                             shape=(*template_on_input.shape, 3))
-    template_on_input_rgb[:, :, 2] = template_on_input_rgb
+                                             shape=(*input_slice.shape, 3))
+    template_on_input_rgb[:, :, 2] = template_on_input.reshape(input_slice.shape)
 
     fig, ax = plt.subplots(figsize=(10, 10), ncols=3)
     ax[0].imshow(rescale_intensity(raw_rgb, out_range=(0, 1)), alpha=0.8)
     ax[0].imshow(rescale_intensity(template_on_input_rgb, out_range=(0, 1)), alpha=0.4)
     ax[1].imshow(input_slice, cmap='gray')
     ax[1].set_title('input')
-    ax[2].imshow(template_on_input, cmap='gray')
+    ax[2].imshow(template_on_input.reshape(input_slice.shape), cmap='gray')
     ax[2].set_title('Template')
     return fig
 
@@ -55,8 +56,13 @@ def create_3d_plot(points: pd.DataFrame, space: ants.ANTsImage) -> plt.Figure:
     plt.tight_layout()
     return fig
 
-def sample_template_at_points(template_points: pd.DataFrame, template: ants.ANTsImage, interpolation='nearest') -> np.ndarray:
-    template_points = template_points.values
+def sample_template_at_points(
+    template_points: torch.Tensor,
+    template: ants.ANTsImage,
+    interpolation='nearest'
+) -> np.ndarray:
+    # flatten
+    #template_points = template_points.reshape((-1, 3))
 
     # Check bounds
     valid_mask = (
@@ -69,8 +75,8 @@ def sample_template_at_points(template_points: pd.DataFrame, template: ants.ANTs
 
     if interpolation == 'nearest':
         # Round to nearest integer
-        template_points = np.floor(template_points[valid_mask]).astype(int)
-        values[valid_mask] = template[
+        template_points = template_points[valid_mask].floor().int().cpu().numpy()
+        values[valid_mask.cpu().numpy()] = template.numpy()[
             template_points[:, 0],
             template_points[:, 1],
             template_points[:, 2]
