@@ -1,4 +1,3 @@
-import time
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -7,6 +6,7 @@ import ants
 import numpy as np
 import pandas as pd
 import tensorstore
+import torch
 from aind_smartspim_transform_utils.CoordinateTransform import CoordinateTransform
 from aind_smartspim_transform_utils.utils.utils import AcquisitionAxis, AcquisitionDirection, \
     apply_transforms_to_points, convert_from_ants_space
@@ -14,6 +14,8 @@ from loguru import logger
 from pydantic import BaseModel
 from scipy.ndimage import map_coordinates
 from torch.utils.data import Dataset
+import torch.nn.functional as F
+
 
 class SliceOrientation(Enum):
     SAGITTAL = 'sagittal'
@@ -29,6 +31,7 @@ class ExperimentMetadata(BaseModel):
     registered_resolution: tuple[float, float, float]
     ls_to_template_affine_matrix_path: Path
     ls_to_template_inverse_warp_path: Path
+
 
 def _create_coordinate_dataframe(height: int, width: int, fixed_index_value: int) -> pd.DataFrame:
     """
@@ -59,12 +62,15 @@ def _create_coordinate_dataframe(height: int, width: int, fixed_index_value: int
 
     return df
 
+
 def _apply_transforms_to_points(
-    points: np.ndarray,
-    coord_transform: CoordinateTransform,
-    experiment_meta: ExperimentMetadata,
-    warp: tensorstore.TensorStore
+        points: np.ndarray,
+        coord_transform: CoordinateTransform,
+        experiment_meta: ExperimentMetadata,
+        warp: tensorstore.TensorStore
 ):
+    warp_shape = warp.shape
+
     # apply inverse affine to points in input space
     affine_transformed_points = apply_transforms_to_points(
         ants_pts=points,
@@ -79,17 +85,42 @@ def _apply_transforms_to_points(
         physical_pts=affine_transformed_points
     )
 
-    displacements = np.zeros((len(affine_transformed_points), 3))
+    # Convert warp to torch tensor with shape (1, 3, D, H, W)
+    # grid_sample expects (batch, channels, depth, height, width)
+    warp = torch.from_numpy(warp[:].read().result())
+    warp = warp.permute(3, 0, 1, 2).unsqueeze(0)  # (1, 3, D, H, W)
 
-    # interpolate displacement field at affine transformed points for each displacement axis
-    for component in range(3):
-        displacements[:, component] = map_coordinates(
-            warp[:, :, :, component].read().result(),
-            voxel_indices.T,    # (n_points, 3) -> (3, n_points)
-            order=1,
-            mode='nearest',
-            prefilter=False
-        )
+    # Convert voxel indices to normalized coordinates [-1, 1]
+    # grid_sample expects coordinates in (x, y, z) order for the last dimension
+    warp_shape = np.array(warp_shape[:3])
+    normalized_coords = 2.0 * voxel_indices / (warp_shape - 1) - 1.0
+
+    # grid_sample expects coordinates in (W, H, D) order, but our voxels are in (D, H, W)
+    # So we need to reorder: [D, H, W] -> [W, H, D]
+    normalized_coords = normalized_coords[:, [2, 1, 0]]  # Reorder to (W, H, D)
+
+    # Reshape for grid_sample: (1, N, 1, 1, 3) for 3D sampling
+    # where N is the number of points
+    n_points = len(normalized_coords)
+    grid = torch.from_numpy(normalized_coords)
+
+    if warp.dtype == torch.float16:
+        grid = grid.half()
+    else:
+        grid = grid.float()
+
+    grid = grid.reshape(1, n_points, 1, 1, 3)
+
+    sampled = F.grid_sample(
+        input=warp,
+        grid=grid,
+        mode='bilinear',
+        padding_mode='border',
+        align_corners=True
+    )
+
+    # Extract displacements: (1, 3, N, 1, 1) -> (N, 3)
+    displacements = sampled.squeeze().T.numpy()
 
     # apply displacement vector to affine transformed points
     transformed_points = affine_transformed_points + displacements
@@ -103,8 +134,11 @@ def _apply_transforms_to_points(
     )
     return transformed_df
 
+
 class SliceDataset(Dataset):
-    def __init__(self, dataset_meta: list[ExperimentMetadata], ls_template_path: Path, orientation: Optional[SliceOrientation] = None, registration_downsample_factor: int = 3):
+    def __init__(self, dataset_meta: list[ExperimentMetadata], ls_template_path: Path,
+                 orientation: Optional[SliceOrientation] = None,
+                 registration_downsample_factor: int = 3):
         super().__init__()
         self._dataset_meta = dataset_meta
         self._orientation = orientation
@@ -131,7 +165,8 @@ class SliceDataset(Dataset):
         return warps
 
     def _get_slice_from_idx(self, idx: int) -> tuple[int, int]:
-        num_slices = [x.registered_shape[self._get_slice_axis(axes=x.axes).dimension] for x in self._dataset_meta]
+        num_slices = [x.registered_shape[self._get_slice_axis(axes=x.axes).dimension] for x in
+                      self._dataset_meta]
         num_slices_cumsum = np.cumsum([0] + num_slices)
         dataset_idx = int(np.searchsorted(num_slices_cumsum[1:], idx, side='right'))
         slice_idx = int(idx - num_slices_cumsum[dataset_idx])
@@ -139,7 +174,9 @@ class SliceDataset(Dataset):
 
     def _get_slice_axis(self, axes: list[AcquisitionAxis]) -> AcquisitionAxis:
         if self._orientation == SliceOrientation.SAGITTAL:
-            slice_axis = [i for i in range(len(axes)) if axes[i].direction in (AcquisitionDirection.LEFT_TO_RIGHT, AcquisitionDirection.RIGHT_TO_LEFT)]
+            slice_axis = [i for i in range(len(axes)) if
+                          axes[i].direction in (AcquisitionDirection.LEFT_TO_RIGHT,
+                                                AcquisitionDirection.RIGHT_TO_LEFT)]
             if len(slice_axis) != 1:
                 raise ValueError(f'expected to find 1 sagittal axis but found {len(slice_axis)}')
             slice_axis = axes[slice_axis[0]]
@@ -153,8 +190,10 @@ class SliceDataset(Dataset):
         acquisition_axes = experiment_meta.axes
 
         slice_axis = self._get_slice_axis(axes=acquisition_axes)
-        height = experiment_meta.registered_shape[[x.dimension for x in acquisition_axes if x.name != slice_axis.name][0]]
-        width = experiment_meta.registered_shape[[x.dimension for x in acquisition_axes if x.name != slice_axis.name][1]]
+        height = experiment_meta.registered_shape[
+            [x.dimension for x in acquisition_axes if x.name != slice_axis.name][0]]
+        width = experiment_meta.registered_shape[
+            [x.dimension for x in acquisition_axes if x.name != slice_axis.name][1]]
 
         point_grid = _create_coordinate_dataframe(
             height=height,
@@ -187,23 +226,23 @@ class SliceDataset(Dataset):
             warp=self._warps[dataset_idx]
         )
 
-
         volume_slice = [0, 0, slice(None), slice(None), slice(None)]
         volume_slice[slice_axis.dimension + 2] = slice_idx
 
         volume = tensorstore.open(
             spec={
                 'driver': 'file',
-                'path': str(experiment_meta.stitched_volume_path / str(self._registration_downsample_factor))
+                'path': str(experiment_meta.stitched_volume_path / str(
+                    self._registration_downsample_factor))
             },
             read=True
         ).result()
         input_slice = volume[tuple(volume_slice)].read().result()
 
-        #output_points = ls_template_points.values.reshape((height, width, 3))
-        output_points = ls_template_points.values
+        output_points = ls_template_points.values.reshape((height, width, 3))
         return input_slice, output_points, dataset_idx, slice_idx
 
     def __len__(self):
-        num_slices = [x.registered_shape[self._get_slice_axis(axes=x.axes).dimension] for x in self._dataset_meta]
+        num_slices = [x.registered_shape[self._get_slice_axis(axes=x.axes).dimension] for x in
+                      self._dataset_meta]
         return len(self._dataset_meta) * sum(num_slices)

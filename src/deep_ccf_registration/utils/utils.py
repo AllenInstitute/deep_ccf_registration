@@ -62,7 +62,7 @@ def sample_template_at_points(
     interpolation='nearest'
 ) -> np.ndarray:
     # flatten
-    #template_points = template_points.reshape((-1, 3))
+    template_points = template_points.reshape((-1, 3))
 
     # Check bounds
     valid_mask = (
