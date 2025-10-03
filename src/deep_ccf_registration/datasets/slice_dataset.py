@@ -63,14 +63,13 @@ def _create_coordinate_dataframe(height: int, width: int, fixed_index_value: int
     return df
 
 
-def _apply_transforms_to_points(
-        points: np.ndarray,
-        coord_transform: CoordinateTransform,
-        experiment_meta: ExperimentMetadata,
-        warp: tensorstore.TensorStore
-):
-    warp_shape = warp.shape
 
+def _apply_transforms_to_points(
+    points: np.ndarray,
+    coord_transform: CoordinateTransform,
+    experiment_meta: ExperimentMetadata,
+    warp: tensorstore.TensorStore
+):
     # apply inverse affine to points in input space
     affine_transformed_points = apply_transforms_to_points(
         ants_pts=points,
@@ -85,42 +84,17 @@ def _apply_transforms_to_points(
         physical_pts=affine_transformed_points
     )
 
-    # Convert warp to torch tensor with shape (1, 3, D, H, W)
-    # grid_sample expects (batch, channels, depth, height, width)
-    warp = torch.from_numpy(warp[:].read().result())
-    warp = warp.permute(3, 0, 1, 2).unsqueeze(0)  # (1, 3, D, H, W)
+    displacements = np.zeros((len(affine_transformed_points), 3))
 
-    # Convert voxel indices to normalized coordinates [-1, 1]
-    # grid_sample expects coordinates in (x, y, z) order for the last dimension
-    warp_shape = np.array(warp_shape[:3])
-    normalized_coords = 2.0 * voxel_indices / (warp_shape - 1) - 1.0
-
-    # grid_sample expects coordinates in (W, H, D) order, but our voxels are in (D, H, W)
-    # So we need to reorder: [D, H, W] -> [W, H, D]
-    normalized_coords = normalized_coords[:, [2, 1, 0]]  # Reorder to (W, H, D)
-
-    # Reshape for grid_sample: (1, N, 1, 1, 3) for 3D sampling
-    # where N is the number of points
-    n_points = len(normalized_coords)
-    grid = torch.from_numpy(normalized_coords)
-
-    if warp.dtype == torch.float16:
-        grid = grid.half()
-    else:
-        grid = grid.float()
-
-    grid = grid.reshape(1, n_points, 1, 1, 3)
-
-    sampled = F.grid_sample(
-        input=warp,
-        grid=grid,
-        mode='bilinear',
-        padding_mode='border',
-        align_corners=True
-    )
-
-    # Extract displacements: (1, 3, N, 1, 1) -> (N, 3)
-    displacements = sampled.squeeze().T.numpy()
+    # interpolate displacement field at affine transformed points for each displacement axis
+    for component in range(3):
+        displacements[:, component] = map_coordinates(
+            warp[:, :, :, component].read().result(),
+            voxel_indices.T,    # (n_points, 3) -> (3, n_points)
+            order=1,
+            mode='nearest',
+            prefilter=False
+        )
 
     # apply displacement vector to affine transformed points
     transformed_points = affine_transformed_points + displacements
@@ -133,6 +107,7 @@ def _apply_transforms_to_points(
         transformed_points, columns=["ML", "AP", "DV"]
     )
     return transformed_df
+
 
 
 class SliceDataset(Dataset):
@@ -239,7 +214,8 @@ class SliceDataset(Dataset):
         ).result()
         input_slice = volume[tuple(volume_slice)].read().result()
 
-        output_points = ls_template_points.values.reshape((height, width, 3))
+        # output_points = ls_template_points.values.reshape((height, width, 3))
+        output_points = ls_template_points.values
         return input_slice, output_points, dataset_idx, slice_idx
 
     def __len__(self):
