@@ -1,13 +1,16 @@
+import json
 from enum import Enum
 from pathlib import Path
 from typing import Optional
 
+import aind_smartspim_transform_utils
 import ants
 import numpy as np
 import pandas as pd
 import tensorstore
 import torch
 from aind_smartspim_transform_utils.CoordinateTransform import CoordinateTransform
+from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from aind_smartspim_transform_utils.utils.utils import AcquisitionAxis, AcquisitionDirection, \
     apply_transforms_to_points, convert_from_ants_space
 from loguru import logger
@@ -103,9 +106,9 @@ def _prepare_grid_sample(warp: np.ndarray, affine_transformed_voxels: np.ndarray
 
 def _apply_transforms_to_points(
         points: np.ndarray,
-        coord_transform: CoordinateTransform,
         experiment_meta: ExperimentMetadata,
-        warp: tensorstore.TensorStore | np.ndarray
+        warp: tensorstore.TensorStore | np.ndarray,
+        template_parameters: AntsImageParameters,
 ):
     # apply inverse affine to points in input space
     # this returns points in physical space
@@ -118,7 +121,7 @@ def _apply_transforms_to_points(
     # convert physical points to voxels,
     # so we can index into the displacement field
     affine_transformed_voxels = convert_from_ants_space(
-        template_parameters=coord_transform.ls_template_info,
+        template_parameters=template_parameters,
         physical_pts=affine_transformed_points
     )
 
@@ -142,7 +145,7 @@ def _apply_transforms_to_points(
     transformed_points = affine_transformed_points + displacements
 
     transformed_points = convert_from_ants_space(
-        coord_transform.ls_template_info, transformed_points
+        template_parameters, transformed_points
     )
 
     transformed_df = pd.DataFrame(
@@ -150,6 +153,43 @@ def _apply_transforms_to_points(
     )
     return transformed_df
 
+
+def _transform_points_to_template_ants_space(
+    acquisition_axes: list[AcquisitionAxis],
+    ls_template_info: AntsImageParameters,
+    points: pd.DataFrame,
+    points_resolution: list[float],
+    input_volume_shape: tuple[int, int, int],
+    template_resolution: int = 25,
+) -> np.ndarray:
+    # order columns to align with imaging
+    col_order = ["", "", ""]
+    for dim in acquisition_axes:
+        col_order[dim.dimension] = dim.name.value.lower()
+
+    points = points[col_order].values
+
+    # flip axis based on the template orientation relative to input image
+    orient = aind_smartspim_transform_utils.utils.utils.get_orientation([json.loads(x.model_dump_json()) for x in acquisition_axes])
+
+    _, swapped, mat = aind_smartspim_transform_utils.utils.utils.get_orientation_transform(
+        orient, ls_template_info.orientation
+    )
+
+    for idx, dim_orient in enumerate(mat.sum(axis=1)):
+        if dim_orient < 0:
+            points[:, idx] = input_volume_shape[idx] - points[:, idx]
+
+    # scale points and orient axes to template
+    scaling = [res_1 / res_2 for res_1, res_2 in zip(points_resolution, [template_resolution] * 3)]
+    scaled_pts = aind_smartspim_transform_utils.utils.utils.scale_points(points, scaling)
+    orient_pts = scaled_pts[:, swapped]
+
+    # convert points into ccf space
+    ants_pts = aind_smartspim_transform_utils.utils.utils.convert_to_ants_space(
+        ls_template_info, orient_pts
+    )
+    return ants_pts
 
 class SliceDataset(Dataset):
     def __init__(self, dataset_meta: list[ExperimentMetadata], ls_template_path: Path,
@@ -209,6 +249,15 @@ class SliceDataset(Dataset):
         experiment_meta = self._dataset_meta[dataset_idx]
         acquisition_axes = experiment_meta.axes
 
+        volume = tensorstore.open(
+            spec={
+                'driver': 'file',
+                'path': str(experiment_meta.stitched_volume_path / str(
+                    self._registration_downsample_factor))
+            },
+            read=True
+        ).result()
+
         slice_axis = self._get_slice_axis(axes=acquisition_axes)
         height, width = [experiment_meta.registered_shape[i] for i in range(3) if i != slice_axis.dimension]
 
@@ -220,27 +269,17 @@ class SliceDataset(Dataset):
             slice_axis=slice_axis
         )
 
-        coord_transform = CoordinateTransform(
-            name='smartspim_lca',
-            dataset_transforms={
-                'points_to_ccf': [
-                    str(experiment_meta.ls_to_template_affine_matrix_path),
-                    str(experiment_meta.ls_to_template_inverse_warp_path),
-                ]
-            },
-            acquisition_axes=acquisition_axes,
-            image_metadata={'shape': experiment_meta.registered_shape},
-            ls_template=self._ls_template
-        )
-
-        points = coord_transform.prepare_points_for_forward_transform(
+        points = _transform_points_to_template_ants_space(
             points=point_grid,
-            points_resolution=list(experiment_meta.registered_resolution)
+            points_resolution=list(experiment_meta.registered_resolution),
+            input_volume_shape=volume.shape[2:],
+            acquisition_axes=experiment_meta.axes,
+            ls_template_info=AntsImageParameters.from_ants_image(image=self._ls_template)
         )
 
         ls_template_points = _apply_transforms_to_points(
             points=points,
-            coord_transform=coord_transform,
+            template_parameters=AntsImageParameters.from_ants_image(image=self._ls_template),
             experiment_meta=experiment_meta,
             warp=self._warps[dataset_idx]
         )
@@ -248,14 +287,6 @@ class SliceDataset(Dataset):
         volume_slice = [0, 0, slice(None), slice(None), slice(None)]
         volume_slice[slice_axis.dimension + 2] = slice_idx
 
-        volume = tensorstore.open(
-            spec={
-                'driver': 'file',
-                'path': str(experiment_meta.stitched_volume_path / str(
-                    self._registration_downsample_factor))
-            },
-            read=True
-        ).result()
         input_slice = volume[tuple(volume_slice)].read().result()
 
         output_points = ls_template_points.values.reshape((height, width, 3))
