@@ -23,16 +23,12 @@ class SliceOrientation(Enum):
     CORONAL = 'coronal'
     HORIZONTAL = 'horizontal'
 
-class AxisResolution(BaseModel):
-    value: float
-    unit: str
-
 class AcquisitionAxis(BaseModel):
     dimension: int
     direction: AcquisitionDirection
     name: AcqusitionAxesName
     unit: str
-    resolution: AxisResolution
+    resolution: float
 
 class SubjectMetadata(BaseModel):
     subject_id: str
