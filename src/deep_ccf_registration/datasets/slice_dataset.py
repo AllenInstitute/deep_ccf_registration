@@ -34,8 +34,8 @@ class AcquisitionAxis(BaseModel):
     unit: str
     resolution: AxisResolution
 
-class ExperimentMetadata(BaseModel):
-    experiment_id: str
+class SubjectMetadata(BaseModel):
+    subject_id: str
     stitched_volume_path: Path
     axes: list[AcquisitionAxis]
     registered_shape: tuple[int, int, int]
@@ -103,7 +103,7 @@ def _prepare_grid_sample(warp: np.ndarray, affine_transformed_voxels: np.ndarray
 
 def _apply_transforms_to_points(
         points: np.ndarray,
-        experiment_meta: ExperimentMetadata,
+        experiment_meta: SubjectMetadata,
         warp: tensorstore.TensorStore | np.ndarray,
         template_parameters: AntsImageParameters,
 ):
@@ -189,7 +189,7 @@ def _transform_points_to_template_ants_space(
     return ants_pts
 
 class SliceDataset(Dataset):
-    def __init__(self, dataset_meta: list[ExperimentMetadata], ls_template_path: Path,
+    def __init__(self, dataset_meta: list[SubjectMetadata], ls_template_path: Path,
                  orientation: Optional[SliceOrientation] = None,
                  registration_downsample_factor: int = 3):
         super().__init__()

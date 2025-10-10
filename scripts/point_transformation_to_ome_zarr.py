@@ -8,7 +8,7 @@ import aind_smartspim_transform_utils.utils
 from aind_smartspim_transform_utils.utils.utils import AntsImageParameters
 import numpy as np
 
-from deep_ccf_registration.datasets.slice_dataset import ExperimentMetadata
+from deep_ccf_registration.datasets.slice_dataset import SubjectMetadata
 
 LIGHT_SHEET_COORDINATE_SYSTEM = {
     "name": "light_sheet_template",
@@ -33,7 +33,7 @@ LIGHT_SHEET_COORDINATE_SYSTEM = {
 
 
 def _get_input_space_to_light_sheet_transform(
-    experiment_meta: ExperimentMetadata,
+    experiment_meta: SubjectMetadata,
     light_sheet_template_path: Path,
     input_coordinate_system: dict,
     template_resolution: float = 25
@@ -114,8 +114,8 @@ def main(dataset_metadata_path: Path, experiment_id: str, output_path: str, temp
          light_sheet_template_path: Path):
     with open(dataset_metadata_path) as f:
         dataset_metadata = json.load(f)
-    dataset_metadata = [ExperimentMetadata.model_validate(x) for x in dataset_metadata]
-    dataset_metadata = [x for x in dataset_metadata if x.experiment_id == experiment_id]
+    dataset_metadata = [SubjectMetadata.model_validate(x) for x in dataset_metadata]
+    dataset_metadata = [x for x in dataset_metadata if x.subject_id == experiment_id]
     if len(dataset_metadata) != 1:
         raise ValueError(
             f'expected 1 instance in dataset_metadata of exp id {experiment_id} but got {len(dataset_metadata)}')
