@@ -9,10 +9,9 @@ import numpy as np
 import pandas as pd
 import tensorstore
 import torch
-from aind_smartspim_transform_utils.CoordinateTransform import CoordinateTransform
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
-from aind_smartspim_transform_utils.utils.utils import AcquisitionAxis, AcquisitionDirection, \
-    apply_transforms_to_points, convert_from_ants_space
+from aind_smartspim_transform_utils.utils.utils import AcquisitionDirection, \
+    apply_transforms_to_points, convert_from_ants_space, AcqusitionAxesName
 from loguru import logger
 from pydantic import BaseModel
 from torch.utils.data import Dataset
@@ -24,6 +23,16 @@ class SliceOrientation(Enum):
     CORONAL = 'coronal'
     HORIZONTAL = 'horizontal'
 
+class AxisResolution(BaseModel):
+    value: float
+    unit: str
+
+class AcquisitionAxis(BaseModel):
+    dimension: int
+    direction: AcquisitionDirection
+    name: AcqusitionAxesName
+    unit: str
+    resolution: AxisResolution
 
 class ExperimentMetadata(BaseModel):
     experiment_id: str
@@ -36,18 +45,6 @@ class ExperimentMetadata(BaseModel):
 
 
 def _create_coordinate_dataframe(height: int, width: int, fixed_index_value: int, slice_axis: AcquisitionAxis, axes: list[AcquisitionAxis]) -> pd.DataFrame:
-    """
-    Create a DataFrame with all pixel coordinates from a slice.
-
-    Parameters:
-    height: Height of the image (y dimension)
-    width: Width of the image (x dimension)
-    fixed_index_value: Fixed index value
-
-    Returns:
-    pd.DataFrame: DataFrame with columns [z, y, x]
-    """
-    # Create coordinate arrays
     y_coords, x_coords = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
 
     # Flatten the coordinate arrays
