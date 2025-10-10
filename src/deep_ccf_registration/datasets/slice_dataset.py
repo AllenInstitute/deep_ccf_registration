@@ -32,7 +32,7 @@ class AcquisitionAxis(BaseModel):
     direction: AcquisitionDirection
     name: AcqusitionAxesName
     unit: str
-    base_resolution: AxisResolution
+    resolution: AxisResolution
 
 class SubjectMetadata(BaseModel):
     subject_id: str
