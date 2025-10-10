@@ -32,14 +32,14 @@ class AcquisitionAxis(BaseModel):
     direction: AcquisitionDirection
     name: AcqusitionAxesName
     unit: str
-    resolution: AxisResolution
+    base_resolution: AxisResolution
 
 class SubjectMetadata(BaseModel):
     subject_id: str
     stitched_volume_path: Path
     axes: list[AcquisitionAxis]
     registered_shape: tuple[int, int, int]
-    registered_resolution: tuple[float, float, float]
+    registration_downsample: int
     ls_to_template_affine_matrix_path: Path
     ls_to_template_inverse_warp_path: Path
 
