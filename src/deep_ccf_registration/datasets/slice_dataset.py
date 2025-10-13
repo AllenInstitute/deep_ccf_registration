@@ -1,3 +1,4 @@
+import datetime
 import json
 from enum import Enum
 from pathlib import Path
@@ -38,6 +39,7 @@ class SubjectMetadata(BaseModel):
     registration_downsample: int
     ls_to_template_affine_matrix_path: Path
     ls_to_template_inverse_warp_path: Path
+    registration_date: datetime.datetime
 
 
 def _create_coordinate_dataframe(height: int, width: int, fixed_index_value: int, slice_axis: AcquisitionAxis, axes: list[AcquisitionAxis]) -> pd.DataFrame:
