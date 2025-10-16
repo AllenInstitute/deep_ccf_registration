@@ -23,7 +23,9 @@ dependencies = [
 dev = [
     "notebook>=7.4.5",
 ]
-scripts = []
+scripts = [
+    "codeocean"
+]
 
 [tool.setuptools.dynamic]
 version = {attr = "deep_ccf_registration.__version__"}

@@ -39,27 +39,31 @@ class SubjectMetadata(BaseModel):
     registration_downsample: int
     ls_to_template_affine_matrix_path: Path
     ls_to_template_inverse_warp_path: Path
-    registration_date: datetime.datetime
+    #registration_date: datetime.datetime
 
 
 def _create_coordinate_dataframe(height: int, width: int, fixed_index_value: int, slice_axis: AcquisitionAxis, axes: list[AcquisitionAxis]) -> pd.DataFrame:
-    y_coords, x_coords = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
+    axis1_coords, axis2_coords = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
 
-    # Flatten the coordinate arrays
-    y_flat = y_coords.flatten()
-    x_flat = x_coords.flatten()
+    axis1_flat = axis1_coords.flatten()
+    axis2_flat = axis2_coords.flatten()
 
-    slice_index = np.full(len(y_flat), fixed_index_value)
+    n_points = len(axis1_flat)
 
-    axes = sorted([x for x in axes if x != slice_axis], key=lambda x: x.dimension)
+    slice_index = np.full(n_points, fixed_index_value)
 
-    df = pd.DataFrame({
-        slice_axis.name.value.lower(): slice_index,
-        axes[0].name.value.lower(): y_flat,
-        axes[1].name.value.lower(): x_flat
-    }).astype(float)
+    axes = sorted(axes, key=lambda x: x.dimension)
+
+    points = np.zeros((n_points, 3))
+
+    points[:, slice_axis.dimension] = slice_index
+    points[:, [x for x in axes if x != slice_axis][0].dimension] = axis1_flat
+    points[:, [x for x in axes if x != slice_axis][1].dimension] = axis2_flat
+
+    df = pd.DataFrame(data=points, columns=[x.name.value.lower() for x in axes]).astype(float)
 
     return df
+
 
 
 def _prepare_grid_sample(warp: np.ndarray, affine_transformed_voxels: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
