@@ -157,31 +157,32 @@ def _transform_points_to_template_ants_space(
     acquisition_axes: list[AcquisitionAxis],
     ls_template_info: AntsImageParameters,
     points: pd.DataFrame,
-    points_resolution: list[float],
     input_volume_shape: tuple[int, int, int],
     template_resolution: int = 25,
+    registration_downsample: float = 3.0,
 ) -> np.ndarray:
+    acquisition_axes = sorted(acquisition_axes, key=lambda x: x.dimension)
+
     # order columns to align with imaging
-    col_order = ["", "", ""]
-    for dim in acquisition_axes:
-        col_order[dim.dimension] = dim.name.value.lower()
+    points = points[[x.name.value.lower() for x in acquisition_axes]].values
 
-    points = points[col_order].values
-
-    # flip axis based on the template orientation relative to input image
     orient = aind_smartspim_transform_utils.utils.utils.get_orientation([json.loads(x.model_dump_json()) for x in acquisition_axes])
 
     _, swapped, mat = aind_smartspim_transform_utils.utils.utils.get_orientation_transform(
         orient, ls_template_info.orientation
     )
 
+    # flip axis based on the template orientation relative to input image
     for idx, dim_orient in enumerate(mat.sum(axis=1)):
         if dim_orient < 0:
             points[:, idx] = input_volume_shape[idx] - points[:, idx]
 
-    # scale points and orient axes to template
+    # scale points
+    points_resolution = [x.resolution * 2 ** registration_downsample for x in acquisition_axes]
     scaling = [res_1 / res_2 for res_1, res_2 in zip(points_resolution, [template_resolution] * 3)]
     scaled_pts = aind_smartspim_transform_utils.utils.utils.scale_points(points, scaling)
+
+    # orient axes to template
     orient_pts = scaled_pts[:, swapped]
 
     # convert points into ccf space
@@ -269,10 +270,10 @@ class SliceDataset(Dataset):
 
         points = _transform_points_to_template_ants_space(
             points=point_grid,
-            points_resolution=list([x.resolution * 2 ** experiment_meta.registration_downsample for x in experiment_meta.axes]),
             input_volume_shape=volume.shape[2:],
             acquisition_axes=experiment_meta.axes,
-            ls_template_info=AntsImageParameters.from_ants_image(image=self._ls_template)
+            ls_template_info=AntsImageParameters.from_ants_image(image=self._ls_template),
+            registration_downsample=experiment_meta.registration_downsample
         )
 
         ls_template_points = _apply_transforms_to_points(
