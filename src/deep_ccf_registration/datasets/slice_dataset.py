@@ -191,7 +191,7 @@ def _transform_points_to_template_ants_space(
     return ants_pts
 
 class SliceDataset(Dataset):
-    def __init__(self, dataset_meta: list[SubjectMetadata], ls_template_path: Path,
+    def __init__(self, dataset_meta: list[SubjectMetadata], ls_template: ants.ANTsImage,
                  orientation: Optional[SliceOrientation] = None,
                  registration_downsample_factor: int = 3):
         super().__init__()
@@ -200,8 +200,7 @@ class SliceDataset(Dataset):
         self._registration_downsample_factor = registration_downsample_factor
         self._warps = self._load_warps()
 
-        logger.info('Loading light sheet template')
-        self._ls_template = ants.image_read(str(ls_template_path))
+        self._ls_template = ls_template
 
     def _load_warps(self) -> list[tensorstore.TensorStore]:
         warps = []
