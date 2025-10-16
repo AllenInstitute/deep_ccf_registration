@@ -269,7 +269,7 @@ class SliceDataset(Dataset):
 
         points = _transform_points_to_template_ants_space(
             points=point_grid,
-            points_resolution=list(experiment_meta.registered_resolution),
+            points_resolution=list([x.resolution * 2 ** experiment_meta.registration_downsample for x in experiment_meta.axes]),
             input_volume_shape=volume.shape[2:],
             acquisition_axes=experiment_meta.axes,
             ls_template_info=AntsImageParameters.from_ants_image(image=self._ls_template)
