@@ -19,7 +19,13 @@ def visualize_alignment(input_slice: torch.Tensor, template_points: torch.Tensor
                                              shape=(*input_slice.shape, 3))
     template_on_input_rgb[:, :, 2] = np.array(template_on_input).reshape(input_slice.shape)
 
-    fig, ax = plt.subplots(figsize=(36, 6), ncols=3, dpi=100)
+    height, width = input_slice.shape
+    if width > height:
+        figsize = (30, 15)
+    else:
+        figsize = (15, 30)
+
+    fig, ax = plt.subplots(figsize=figsize, ncols=3, dpi=100)
     ax[0].imshow(rescale_intensity(raw_rgb, out_range=(0, 1)), alpha=0.8)
     ax[0].imshow(rescale_intensity(template_on_input_rgb, out_range=(0, 1)), alpha=0.4)
     ax[1].imshow(input_slice, cmap='gray')
