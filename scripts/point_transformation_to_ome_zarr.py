@@ -1,4 +1,13 @@
+"""
+This script converts the inverse transforms needed for transforming a point in input space to
+light sheet template space into ome-zarr. This serves 2 purposes:
+
+1. Accessing the niftii warp file is slow compared to zarr
+2. This serves as a prototype for implementing RFC-4 and RFC-5 under https://ngff.openmicroscopy.org/rfc/
+
+"""
 import json
+import os
 from pathlib import Path
 
 import ants
@@ -7,6 +16,9 @@ import zarr
 import aind_smartspim_transform_utils.utils
 from aind_smartspim_transform_utils.utils.utils import AntsImageParameters
 import numpy as np
+from loguru import logger
+from obstore.store import from_url
+from zarr.storage import ObjectStore, LocalStore
 
 from deep_ccf_registration.datasets.slice_dataset import SubjectMetadata
 
@@ -14,23 +26,25 @@ LIGHT_SHEET_COORDINATE_SYSTEM = {
     "name": "light_sheet_template",
     "axes": [
         {
-            "name": "Right_to_left",
+            "name": "x",
+            "orientation": {"type": "anatomical", "value": "right-to-left"},
             "type": "space",
             "unit": "micrometer"
         },
         {
-            "name": "Anterior_to_posterior",
+            "name": "y",
+            "orientation": {"type": "anatomical", "value": "anterior-to-posterior"},
             "type": "space",
             "unit": "micrometer"
         },
         {
-            "name": "Superior_to_inferior",
+            "name": "z",
+            "orientation": {"type": "anatomical", "value": "superior-to-inferior"},
             "type": "space",
             "unit": "micrometer"
         }
     ]
 }
-
 
 def _get_input_space_to_light_sheet_transform(
     experiment_meta: SubjectMetadata,
@@ -62,8 +76,7 @@ def _get_input_space_to_light_sheet_transform(
         {
             "name": "light sheet raw -> light sheet template resolution",
             "type": "scale",
-            "scale": (np.array(
-                experiment_meta.registered_resolution) / template_resolution).tolist()
+            "scale": (np.array([x.resolution * 2 ** experiment_meta.registration_downsample for x in sorted(experiment_meta.axes, key=lambda x: x.dimension)]) / template_resolution).tolist()
         },
 
         {
@@ -79,11 +92,11 @@ def _get_input_space_to_light_sheet_transform(
     return coordinate_transformations
 
 
-@click.command(help="Convert point transformations to ome zarr for an experiment id")
+@click.command(help="Convert point transformations to ome zarr for an subject id")
 @click.option(
     '--dataset-metadata-path',
     type=click.Path(exists=True, file_okay=True, path_type=Path),
-    help="Path to file containing metadata that conforms with `list[ExperimentMetadata]`",
+    help="Path to file containing metadata that conforms with `list[SubjectMetadata]`",
     required=True
 )
 @click.option(
@@ -93,7 +106,7 @@ def _get_input_space_to_light_sheet_transform(
     required=True
 )
 @click.option(
-    '--experiment-id',
+    '--subject-id',
     type=str,
     help="Experiment id to process",
     required=True
@@ -110,27 +123,33 @@ def _get_input_space_to_light_sheet_transform(
     default=25,
     help='Template resolution in micrometers',
 )
-def main(dataset_metadata_path: Path, experiment_id: str, output_path: str, template_resolution: int,
+def main(dataset_metadata_path: Path, subject_id: str, output_path: str, template_resolution: int,
          light_sheet_template_path: Path):
     with open(dataset_metadata_path) as f:
         dataset_metadata = json.load(f)
     dataset_metadata = [SubjectMetadata.model_validate(x) for x in dataset_metadata]
-    dataset_metadata = [x for x in dataset_metadata if x.subject_id == experiment_id]
+    dataset_metadata = [x for x in dataset_metadata if x.subject_id == subject_id]
     if len(dataset_metadata) != 1:
         raise ValueError(
-            f'expected 1 instance in dataset_metadata of exp id {experiment_id} but got {len(dataset_metadata)}')
+            f'expected 1 instance in dataset_metadata of exp id {subject_id} but got {len(dataset_metadata)}')
     experiment_meta = dataset_metadata[0]
 
+    logger.info('Loading inverse warp')
     inverse_warp = ants.image_read(
         str('data' / experiment_meta.ls_to_template_inverse_warp_path)).numpy()
     affine = ants.read_transform(
         str('data' / experiment_meta.ls_to_template_affine_matrix_path)).parameters
 
-    root = zarr.create_group(store=output_path)
-    zarr.create_array(store=output_path,
+    logger.info('creating zarr arrays')
+    if output_path.startswith('s3://'):
+        store = ObjectStore(store=from_url(url=output_path, region=os.environ['AWS_REGION']))
+    else:
+        store = LocalStore(root=output_path)
+    root = zarr.create_group(store=store)
+    zarr.create_array(store=store,
                       name='coordinateTransformations/ls_to_template_SyN_1InverseWarp',
                       data=inverse_warp)
-    zarr.create_array(store=output_path,
+    zarr.create_array(store=store,
                       name='coordinateTransformations/ls_to_template_SyN_0GenericAffine',
                       data=affine.reshape((3, 4)))
 
@@ -138,13 +157,15 @@ def main(dataset_metadata_path: Path, experiment_id: str, output_path: str, temp
         "name": "light_sheet_raw",
         "axes": [
             {
-                "name": x.direction.value,
+                "name": x.name.value,
+                "orientation": {"type": "anatomical", "value": x.direction.value},
                 "type": "space",
                 "unit": "micrometer"
             }
             for x in sorted(experiment_meta.axes, key=lambda x: x.dimension)]
     }
 
+    logger.info('getting input to light sheet transforms')
     input_to_ls_transform = _get_input_space_to_light_sheet_transform(
         experiment_meta=experiment_meta,
         light_sheet_template_path=light_sheet_template_path,
@@ -153,10 +174,14 @@ def main(dataset_metadata_path: Path, experiment_id: str, output_path: str, temp
 
     )
 
+    logger.info('writing ome-zarr metadata')
     root.attrs['coordinateSystems'] = [
         input_coordinate_system,
         LIGHT_SHEET_COORDINATE_SYSTEM
     ]
+
+    # Note: the bijection is not given in the forward direction as this direction
+    # was not used
 
     root.attrs['coordinateTransformations'] = [
         {
