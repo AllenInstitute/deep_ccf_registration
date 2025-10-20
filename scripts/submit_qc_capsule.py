@@ -6,7 +6,8 @@ import pandas as pd
 import requests
 from PIL import Image
 from codeocean import CodeOcean
-from codeocean.computation import RunParams, NamedRunParam, ComputationState
+from codeocean.computation import RunParams, NamedRunParam, ComputationState, Computation, \
+    ComputationEndStatus
 from matplotlib import pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from tqdm import tqdm
@@ -31,11 +32,8 @@ def catch_code_ocean_error():
             message = err.response.text
         raise CodeOceanError(message)
 
-def submit_jobs():
+def submit_jobs(qc_subjects: list[dict]):
     co_client = CodeOcean(domain="https://codeocean.allenneuraldynamics.org", token=co_token)
-
-    with open('/Users/adam.amster/Downloads/qc_subjects.json') as f:
-        qc_subjects = json.load(f)
 
     errors = []
     jobs = []
@@ -69,9 +67,7 @@ def submit_jobs():
     print('errors')
     print(errors)
 
-    logger.info('writing jobs meta to /tmp/qc_jobs.json')
-    with open('/tmp/qc_jobs.json', 'w') as f:
-        f.write(json.dumps(jobs, indent=2))
+    return jobs
 
 def get_job_statuses():
     co_client = CodeOcean(domain="https://codeocean.allenneuraldynamics.org",
@@ -80,11 +76,28 @@ def get_job_statuses():
     with open('/tmp/qc_jobs.json') as f:
         qc_jobs = json.load(f)
 
+    computation_responses: dict[str, Computation] = {}
     for qc_job in qc_jobs:
         computation_response = co_client.computations.get_computation(
             computation_id=qc_job['computation_id']
         )
-        assert computation_response.state == ComputationState.Completed and computation_response.exit_code == 0, f'{qc_job["subject_id"]} is not done'
+        computation_responses[qc_job['subject_id']] = computation_response
+
+    running_jobs = [x for _, x in computation_responses.items() if x.state == ComputationState.Running]
+    if running_jobs:
+        logger.warning(f'{len(running_jobs)} still running')
+        return
+
+    failed_jobs: dict[str, str] = {}
+    for subject_id, computation_response in computation_responses.items():
+        if computation_response.state == ComputationState.Failed or computation_response.exit_code == 1 or computation_response.end_status != ComputationEndStatus.Succeeded:
+            failed_jobs[subject_id] = computation_response.id
+    if failed_jobs:
+        for failed_subject_id, failed_job_id in failed_jobs.items():
+            logger.error(f'{failed_subject_id} failed')
+        raise RuntimeError(f'{len(failed_jobs)} jobs failed')
+
+    assert all([x.state == ComputationState.Completed and x.exit_code == 0 for _, x in computation_responses.items()])
 
 def get_distance_metrics():
     co_client = CodeOcean(domain="https://codeocean.allenneuraldynamics.org",
@@ -154,17 +167,18 @@ def create_pdf():
 
     dataset = [SubjectMetadata.model_validate(x) for x in dataset]
 
-    with open('/tmp/distances.json') as f:
-        distances = json.load(f)
-
-    distances = pd.DataFrame(distances)
-    distances['orientation'] = distances['subject_id'].apply(lambda subject_id: _parse_orientation(
-        axes=[x for x in dataset if x.subject_id == subject_id][0].axes))
-    distances = distances.sort_values('roundtrip_distance')
+    # with open('/tmp/distances.json') as f:
+    #     distances = json.load(f)
+    #
+    # distances = pd.DataFrame(distances)
+    # distances['orientation'] = distances['subject_id'].apply(lambda subject_id: _parse_orientation(
+    #     axes=[x for x in dataset if x.subject_id == subject_id][0].axes))
+    # distances = distances.sort_values('roundtrip_distance')
 
     with PdfPages('/tmp/smartspim_qc.pdf') as pdf:
-        for i, row in enumerate(distances.itertuples()):
-            img = images[row.subject_id]
+        for i, (subject_id, _) in enumerate(subject_id_computation_map.items()):
+            subject = [x for x in dataset if x.subject_id == subject_id][0]
+            img = images[subject.subject_id]
             print(f"Adding image {i + 1}/{len(images)} to PDF")
 
             # Create figure with size matching image aspect ratio
@@ -176,7 +190,8 @@ def create_pdf():
                 figsize = (15, 30)
 
             fig, ax = plt.subplots(figsize=figsize)
-            ax.set_title(f'subject id {row.subject_id} orientation {row.orientation} roundtrip distance {row.roundtrip_distance:.3f}')
+            orientation = _parse_orientation(axes=subject.axes)
+            ax.set_title(f'subject id {subject.subject_id} orientation {orientation}')
 
             # Display image
             ax.imshow(img)
@@ -185,9 +200,40 @@ def create_pdf():
             pdf.savefig(fig, bbox_inches='tight', pad_inches=0)
             plt.close(fig)
 
+def rerun_failed_jobs(subject_ids):
+    co_client = CodeOcean(domain="https://codeocean.allenneuraldynamics.org",
+                          token=co_token)
+
+    with open('/Users/adam.amster/Downloads/qc_subjects.json') as f:
+        qc_subjects = json.load(f)
+
+    qc_subjects = [x for x in qc_subjects if x["subject_id"] in subject_ids]
+
+    rerun_jobs = submit_jobs(qc_subjects=qc_subjects)
+
+    with open('/tmp/qc_jobs.json') as f:
+        jobs = json.load(f)
+
+    jobs = [x for x in jobs if x['subject_id'] not in subject_ids]
+
+    jobs += rerun_jobs
+
+    return jobs
+
 if __name__ == '__main__':
     co_token = os.environ['CODEOCEAN_TOKEN']
-    #submit_jobs(co_token=co_token)
-    #get_job_statuses(co_token=co_token)
-    get_distance_metrics()
+
+    # with open('/Users/adam.amster/Downloads/qc_subjects.json') as f:
+    #     qc_subjects = json.load(f)
+    # jobs = submit_jobs(qc_subjects=qc_subjects)
+
+    #get_job_statuses()
+
+    # jobs = rerun_failed_jobs(subject_ids=['774923'])
+    #
+    # logger.info('writing jobs meta to /tmp/qc_jobs.json')
+    # with open('/tmp/qc_jobs.json', 'w') as f:
+    #     f.write(json.dumps(jobs, indent=2))
+
+    #get_distance_metrics()
     create_pdf()
