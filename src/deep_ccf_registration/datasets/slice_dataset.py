@@ -33,7 +33,7 @@ class AcquisitionAxis(BaseModel):
 
 class SubjectMetadata(BaseModel):
     subject_id: str
-    stitched_volume_path: Path
+    stitched_volume_path: str | Path
     axes: list[AcquisitionAxis]
     registered_shape: tuple[int, int, int]
     registration_downsample: int
