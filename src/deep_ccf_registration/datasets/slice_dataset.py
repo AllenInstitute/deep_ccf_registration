@@ -240,7 +240,8 @@ class SliceDataset(Dataset):
     def _load_warps(self, tensorstore_aws_credentials_method: str = "default") -> list[tensorstore.TensorStore]:
         warps = []
         for experiment_meta in self._dataset_meta:
-            if experiment_meta.ls_to_template_inverse_warp_path.name.endswith('.nii.gz'):
+            if (isinstance(experiment_meta.ls_to_template_inverse_warp_path, Path) and
+                    experiment_meta.ls_to_template_inverse_warp_path.name.endswith('.nii.gz')):
                 logger.info('Loading .nii.gz (slow!)')
                 warp = ants.image_read(str(experiment_meta.ls_to_template_inverse_warp_path)).numpy()
             else:
