@@ -333,6 +333,7 @@ class SliceDataset(Dataset):
         acquisition_axes = experiment_meta.axes
 
         can_load_volume = False
+        e = None
         for driver in ('zarr3', 'zarr'):
             try:
                 volume = tensorstore.open(
@@ -347,10 +348,10 @@ class SliceDataset(Dataset):
                 ).result()
                 can_load_volume = True
                 break
-            except ValueError:
+            except ValueError as e:
                 pass
         if not can_load_volume:
-            raise RuntimeError('Unable to load volume')
+            raise e
 
         slice_axis = self._get_slice_axis(axes=acquisition_axes)
         height, width = [experiment_meta.registered_shape[i] for i in range(3) if i != slice_axis.dimension]
