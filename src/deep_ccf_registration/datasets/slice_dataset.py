@@ -3,6 +3,7 @@ import json
 from enum import Enum
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 import aind_smartspim_transform_utils
 import ants
@@ -153,6 +154,38 @@ def _apply_transforms_to_points(
     return transformed_df
 
 
+def _create_kvstore(path: str, aws_credentials_method: str = "default"):
+    """
+    Create tensorstore kvstore
+
+    Parameters
+    ----------
+    path
+    aws_credentials_method
+
+    Returns
+    -------
+
+    """
+
+    def parse_s3_uri(s3_uri):
+        parsed = urlparse(s3_uri)
+        bucket = parsed.netloc
+        key = parsed.path.lstrip('/')
+        return bucket, key
+
+    if path.startswith("s3://"):
+        bucket, key = parse_s3_uri(s3_uri=path)
+        kvstore = {
+            "driver": "s3",
+            "bucket": bucket,
+            "path": key,
+            "aws_credentials": {"type": aws_credentials_method},
+        }
+    else:
+        kvstore = {"driver": "file", "path": path}
+    return kvstore
+
 def _transform_points_to_template_ants_space(
     acquisition_axes: list[AcquisitionAxis],
     ls_template_info: AntsImageParameters,
@@ -194,16 +227,18 @@ def _transform_points_to_template_ants_space(
 class SliceDataset(Dataset):
     def __init__(self, dataset_meta: list[SubjectMetadata], ls_template: ants.ANTsImage,
                  orientation: Optional[SliceOrientation] = None,
-                 registration_downsample_factor: int = 3):
+                 registration_downsample_factor: int = 3,
+                 tensorstore_aws_credentials_method: str = "default"
+                 ):
         super().__init__()
         self._dataset_meta = dataset_meta
         self._orientation = orientation
         self._registration_downsample_factor = registration_downsample_factor
-        self._warps = self._load_warps()
+        self._warps = self._load_warps(tensorstore_aws_credentials_method=tensorstore_aws_credentials_method)
 
         self._ls_template = ls_template
 
-    def _load_warps(self) -> list[tensorstore.TensorStore]:
+    def _load_warps(self, tensorstore_aws_credentials_method: str = "default") -> list[tensorstore.TensorStore]:
         warps = []
         for experiment_meta in self._dataset_meta:
             if experiment_meta.ls_to_template_inverse_warp_path.name.endswith('.nii.gz'):
@@ -213,10 +248,10 @@ class SliceDataset(Dataset):
                 warp = tensorstore.open(
                     spec={
                         'driver': 'zarr3',
-                        'kvstore': {
-                            'driver': 'file',
-                            'path': str(experiment_meta.ls_to_template_inverse_warp_path)
-                        }
+                        'kvstore': _create_kvstore(
+                            path=str(experiment_meta.ls_to_template_inverse_warp_path),
+                            aws_credentials_method=tensorstore_aws_credentials_method
+                        )
                     },
                     read=True
                 ).result()
