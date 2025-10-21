@@ -333,7 +333,7 @@ class SliceDataset(Dataset):
         acquisition_axes = experiment_meta.axes
 
         can_load_volume = False
-        for driver in ('zarr3', 'zarr2'):
+        for driver in ('zarr3', 'zarr'):
             try:
                 volume = tensorstore.open(
                     spec={
