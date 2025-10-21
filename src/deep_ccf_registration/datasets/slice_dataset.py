@@ -124,7 +124,7 @@ def _get_cropped_region_from_warp(warp: tensorstore.TensorStore | np.ndarray,
 
     # Clamp to warp dimensions
     min_coords = np.maximum(min_coords, 0)
-    max_coords = np.minimum(max_coords, warp.shape)
+    max_coords = np.minimum(max_coords, warp.shape[:-1])
 
     # Crop the warp
     if isinstance(warp, tensorstore.TensorStore):
@@ -332,16 +332,25 @@ class SliceDataset(Dataset):
         experiment_meta = self._dataset_meta[dataset_idx]
         acquisition_axes = experiment_meta.axes
 
-        volume = tensorstore.open(
-            spec={
-                'driver': 'zarr',
-                'kvstore': _create_kvstore(
-                    path=str(experiment_meta.stitched_volume_path) + f'/{self._registration_downsample_factor}',
-                    aws_credentials_method="anonymous"
-                )
-            },
-            read=True
-        ).result()
+        can_load_volume = False
+        for driver in ('zarr3', 'zarr2'):
+            try:
+                volume = tensorstore.open(
+                    spec={
+                        'driver': 'zarr3',
+                        'kvstore': _create_kvstore(
+                            path=str(experiment_meta.stitched_volume_path) + f'/{self._registration_downsample_factor}',
+                            aws_credentials_method="anonymous"
+                        )
+                    },
+                    read=True
+                ).result()
+                can_load_volume = True
+                break
+            except ValueError:
+                pass
+        if not can_load_volume:
+            raise RuntimeError('Unable to load volume')
 
         slice_axis = self._get_slice_axis(axes=acquisition_axes)
         height, width = [experiment_meta.registered_shape[i] for i in range(3) if i != slice_axis.dimension]
