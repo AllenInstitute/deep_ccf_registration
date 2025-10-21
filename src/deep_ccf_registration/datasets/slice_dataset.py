@@ -103,11 +103,54 @@ def _prepare_grid_sample(warp: np.ndarray, affine_transformed_voxels: np.ndarray
 
     return warp, normalized_affine_transformed_voxels
 
+def _get_cropped_region_from_warp(warp: tensorstore.TensorStore | np.ndarray,
+                                  affine_transformed_voxels: np.ndarray,
+                                  warp_interpolation_padding: int = 5) -> np.ndarray:
+    """
+    This crops the warp to the region bounded by the min/max coordinates after applying the
+    affine transformation. This is so that we don't have to load the entire warp, but only the
+    region that we need.
+
+    This also modifies affine_transformed_voxels inplace to set offset to 0 so that it can index into
+    the cropped warp
+
+    :param warp:
+    :param affine_transformed_voxels: voxels after applying inverse affine to input points
+    :param warp_interpolation_padding: padding around the min/max coords to crop for interpolation
+    :return: cropped warp
+    """
+    min_coords = np.floor(affine_transformed_voxels.min(axis=0)).astype(int) - warp_interpolation_padding
+    max_coords = np.ceil(affine_transformed_voxels.max(axis=0)).astype(int) + warp_interpolation_padding
+
+    # Clamp to warp dimensions
+    min_coords = np.maximum(min_coords, 0)
+    max_coords = np.minimum(max_coords, warp.shape)
+
+    # Crop the warp
+    if isinstance(warp, tensorstore.TensorStore):
+        cropped_warp = warp[
+            min_coords[0]:max_coords[0],
+            min_coords[1]:max_coords[1],
+            min_coords[2]:max_coords[2]
+        ].read().result()
+    else:
+        cropped_warp = warp[
+            min_coords[0]:max_coords[0],
+            min_coords[1]:max_coords[1],
+            min_coords[2]:max_coords[2]
+        ]
+
+    # Adjust voxel coordinates relative to cropped region
+    affine_transformed_voxels -= min_coords
+
+    return cropped_warp
+
 def _apply_transforms_to_points(
         points: np.ndarray,
         experiment_meta: SubjectMetadata,
         warp: tensorstore.TensorStore | np.ndarray,
         template_parameters: AntsImageParameters,
+        warp_interpolation_padding: int = 5
 ):
     # apply inverse affine to points in input space
     # this returns points in physical space
@@ -124,13 +167,19 @@ def _apply_transforms_to_points(
         physical_pts=affine_transformed_points
     )
 
-    warp, affine_transformed_voxels = _prepare_grid_sample(
-        warp=warp[:].read().result() if isinstance(warp, tensorstore.TensorStore) else warp,
+    cropped_warp = _get_cropped_region_from_warp(
+        warp=warp,
+        affine_transformed_voxels=affine_transformed_voxels,
+        warp_interpolation_padding=warp_interpolation_padding
+    )
+
+    cropped_warp, affine_transformed_voxels = _prepare_grid_sample(
+        warp=cropped_warp,
         affine_transformed_voxels=affine_transformed_voxels
     )
 
     displacements = F.grid_sample(
-        input=warp,
+        input=cropped_warp,
         grid=affine_transformed_voxels,
         mode='bilinear',
         padding_mode='border',
