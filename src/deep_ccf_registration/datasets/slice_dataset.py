@@ -1,4 +1,3 @@
-import datetime
 import json
 from enum import Enum
 from pathlib import Path
@@ -39,7 +38,7 @@ class SubjectMetadata(BaseModel):
     registered_shape: tuple[int, int, int]
     registration_downsample: int
     ls_to_template_affine_matrix_path: Path
-    ls_to_template_inverse_warp_path: Path
+    ls_to_template_inverse_warp_path: str | Path
     #registration_date: datetime.datetime
 
 
