@@ -337,7 +337,7 @@ class SliceDataset(Dataset):
             try:
                 volume = tensorstore.open(
                     spec={
-                        'driver': 'zarr3',
+                        'driver': driver,
                         'kvstore': _create_kvstore(
                             path=str(experiment_meta.stitched_volume_path) + f'/{self._registration_downsample_factor}',
                             aws_credentials_method="anonymous"
