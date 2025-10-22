@@ -318,7 +318,7 @@ class SliceDataset(Dataset):
                  registration_downsample_factor: int = 3,
                  tensorstore_aws_credentials_method: str = "default",
                  crop_warp_to_bounding_box: bool = True,
-                 patch_size: int = 256,
+                 patch_size: Optional[tuple[int, int]] = (256, 256),
                  mode: str = 'train'
                  ):
         """
@@ -344,8 +344,9 @@ class SliceDataset(Dataset):
         self._ls_template = ls_template
 
         if mode == 'inference':
-            # Pre-compute all (volume_idx, slice_idx, patch_x, patch_y) combinations
-            self._patch_index = self._build_patch_index()
+            # TODO Pre-compute all (volume_idx, slice_idx, patch_x, patch_y) combinations
+            # self._patch_index = self._build_patch_index()
+            pass
 
     def _build_patch_index(self):
         """Build index of all patches for inference"""
@@ -425,7 +426,8 @@ class SliceDataset(Dataset):
                     slice_2d=volume[tuple(volume_slice)]
                 )
             else:
-                raise NotImplementedError
+                if self._patch_size is None:
+                    input_slice, patch_x, patch_y = volume[tuple(volume_slice)][:].read().result(), 0, 0
 
         height, width = input_slice.shape
 
@@ -466,7 +468,7 @@ class SliceDataset(Dataset):
     def _get_random_patch(self, slice_2d: tensorstore.TensorStore):
         """Extract random patch from slice"""
         h, w = slice_2d.shape
-        ph, pw = self._patch_size, self._patch_size
+        ph, pw = self._patch_size
 
         # Adjust patch size to what's available
         ph = min(h, ph)
@@ -487,7 +489,7 @@ class SliceDataset(Dataset):
     def _pad_patch_to_size(self, patch):
         """Pad extracted patch to patch_size if needed"""
         h, w = patch.shape
-        ph, pw = self._patch_size, self._patch_size
+        ph, pw = self._patch_size
 
         pad_h = max(0, ph - h)
         pad_w = max(0, pw - w)
