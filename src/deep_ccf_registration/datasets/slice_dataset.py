@@ -18,6 +18,8 @@ from pydantic import BaseModel
 from torch.utils.data import Dataset
 import torch.nn.functional as F
 
+from deep_ccf_registration.utils.logging_utils import timed, timed_func
+
 
 class SliceOrientation(Enum):
     SAGITTAL = 'sagittal'
@@ -66,7 +68,9 @@ def _create_coordinate_dataframe(height: int, width: int, fixed_index_value: int
 
 
 
-def _prepare_grid_sample(warp: np.ndarray, affine_transformed_voxels: np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
+def _prepare_grid_sample(warp: np.ndarray,
+                         affine_transformed_voxels: np.ndarray
+                         ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     This takes the affine_transformed_voxels and warp and converts to a format suitable
     for grid_sample
@@ -145,6 +149,7 @@ def _get_cropped_region_from_warp(warp: tensorstore.TensorStore | np.ndarray,
 
     return cropped_warp
 
+@timed_func
 def _apply_transforms_to_points(
         points: np.ndarray,
         experiment_meta: SubjectMetadata,
@@ -168,12 +173,15 @@ def _apply_transforms_to_points(
         physical_pts=affine_transformed_points
     )
 
-    if crop_warp_to_bounding_box:
-        warp = _get_cropped_region_from_warp(
-            warp=warp,
-            affine_transformed_voxels=affine_transformed_voxels,
-            warp_interpolation_padding=warp_interpolation_padding
-        )
+    with timed():
+        if crop_warp_to_bounding_box:
+            warp = _get_cropped_region_from_warp(
+                warp=warp,
+                affine_transformed_voxels=affine_transformed_voxels,
+                warp_interpolation_padding=warp_interpolation_padding
+            )
+        else:
+            warp = warp[:].read().result()
 
     warp, affine_transformed_voxels = _prepare_grid_sample(
         warp=warp,
@@ -236,6 +244,7 @@ def _create_kvstore(path: str, aws_credentials_method: str = "default"):
         kvstore = {"driver": "file", "path": path}
     return kvstore
 
+@timed_func
 def _transform_points_to_template_ants_space(
     acquisition_axes: list[AcquisitionAxis],
     ls_template_info: AntsImageParameters,
@@ -331,6 +340,7 @@ class SliceDataset(Dataset):
             raise NotImplementedError(f'{self._orientation} not supported')
         return slice_axis
 
+    @timed_func
     def __getitem__(self, idx):
         dataset_idx, slice_idx = self._get_slice_from_idx(idx=idx)
         experiment_meta = self._dataset_meta[dataset_idx]
@@ -378,7 +388,8 @@ class SliceDataset(Dataset):
         volume_slice = [0, 0, slice(None), slice(None), slice(None)]
         volume_slice[slice_axis.dimension + 2] = slice_idx
 
-        input_slice = volume[tuple(volume_slice)].read().result()
+        with timed():
+            input_slice = volume[tuple(volume_slice)].read().result()
 
         output_points = ls_template_points.values.reshape((height, width, 3))
         return input_slice, output_points, dataset_idx, slice_idx
