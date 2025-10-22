@@ -1,4 +1,5 @@
 import json
+import random
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -44,8 +45,33 @@ class SubjectMetadata(BaseModel):
     #registration_date: datetime.datetime
 
 
-def _create_coordinate_dataframe(height: int, width: int, fixed_index_value: int, slice_axis: AcquisitionAxis, axes: list[AcquisitionAxis]) -> pd.DataFrame:
-    axis1_coords, axis2_coords = np.meshgrid(np.arange(height), np.arange(width), indexing='ij')
+def _create_coordinate_dataframe(
+        patch_height: int,
+        patch_width: int,
+        start_x: int,
+        start_y: int,
+        fixed_index_value: int,
+        slice_axis: AcquisitionAxis,
+        axes: list[AcquisitionAxis]
+) -> pd.DataFrame:
+    """
+    Create coordinate dataframe for a patch at specific position
+
+    :param patch_height:
+    :param patch_width:
+    :param start_x:
+    :param start_y:
+    :param fixed_index_value:
+    :param slice_axis:
+    :param axes:
+    :return:
+    """
+    # Create meshgrid with actual coordinates
+    axis1_coords, axis2_coords = np.meshgrid(
+        np.arange(start_x, start_x + patch_height),
+        np.arange(start_y, start_y + patch_width),
+        indexing='ij'
+    )
 
     axis1_flat = axis1_coords.flatten()
     axis2_flat = axis2_coords.flatten()
@@ -284,20 +310,50 @@ def _transform_points_to_template_ants_space(
     return ants_pts
 
 class SliceDataset(Dataset):
+    """
+    Loads a slice and the mapped points in template space
+    """
     def __init__(self, dataset_meta: list[SubjectMetadata], ls_template: ants.ANTsImage,
                  orientation: Optional[SliceOrientation] = None,
                  registration_downsample_factor: int = 3,
                  tensorstore_aws_credentials_method: str = "default",
-                 crop_warp_to_bounding_box: bool = True
+                 crop_warp_to_bounding_box: bool = True,
+                 patch_size: int = 256,
+                 mode: str = 'train'
                  ):
+        """
+
+        :param dataset_meta: `list[SubjectMetadata]`
+        :param ls_template: the smartSPIM light sheet template
+        :param orientation: what orientation to load a slice
+        :param registration_downsample_factor: downsample used during registration
+        :param tensorstore_aws_credentials_method: credentials lookup method for tensorstore. see ts docs
+        :param crop_warp_to_bounding_box: whether to load a cropped region of warp (faster) rather than full warp
+        :param patch_size: patch size
+        :param mode: 'train' or 'inference'
+        """
         super().__init__()
         self._dataset_meta = dataset_meta
         self._orientation = orientation
         self._registration_downsample_factor = registration_downsample_factor
         self._warps = self._load_warps(tensorstore_aws_credentials_method=tensorstore_aws_credentials_method)
         self._crop_warp_to_bounding_box = crop_warp_to_bounding_box
+        self._patch_size = patch_size
+        self._mode = mode
 
         self._ls_template = ls_template
+
+        if mode == 'inference':
+            # Pre-compute all (volume_idx, slice_idx, patch_x, patch_y) combinations
+            self._patch_index = self._build_patch_index()
+
+    def _build_patch_index(self):
+        """Build index of all patches for inference"""
+        raise NotImplementedError
+
+    def _get_patch_positions(self, slice_shape):
+        """Get all patch positions to tile the entire slice"""
+        raise NotImplementedError
 
     def _load_warps(self, tensorstore_aws_credentials_method: str = "default") -> list[tensorstore.TensorStore]:
         warps = []
@@ -346,6 +402,8 @@ class SliceDataset(Dataset):
         experiment_meta = self._dataset_meta[dataset_idx]
         acquisition_axes = experiment_meta.axes
 
+        slice_axis = self._get_slice_axis(axes=acquisition_axes)
+
         volume = tensorstore.open(
             spec={
                 'driver': 'auto',
@@ -358,12 +416,24 @@ class SliceDataset(Dataset):
         ).result()
 
 
-        slice_axis = self._get_slice_axis(axes=acquisition_axes)
-        height, width = [experiment_meta.registered_shape[i] for i in range(3) if i != slice_axis.dimension]
+        volume_slice = [0, 0, slice(None), slice(None), slice(None)]
+        volume_slice[slice_axis.dimension + 2] = slice_idx  # +2 because first 2 axes unused
+
+        with timed():
+            if self._mode == 'train':
+                input_slice, patch_x, patch_y = self._get_random_patch(
+                    slice_2d=volume[tuple(volume_slice)]
+                )
+            else:
+                raise NotImplementedError
+
+        height, width = input_slice.shape
 
         point_grid = _create_coordinate_dataframe(
-            height=height,
-            width=width,
+            patch_height=height,
+            patch_width=width,
+            start_x=patch_x,
+            start_y=patch_y,
             fixed_index_value=slice_idx,
             axes=experiment_meta.axes,
             slice_axis=slice_axis
@@ -385,12 +455,6 @@ class SliceDataset(Dataset):
             crop_warp_to_bounding_box=self._crop_warp_to_bounding_box
         )
 
-        volume_slice = [0, 0, slice(None), slice(None), slice(None)]
-        volume_slice[slice_axis.dimension + 2] = slice_idx
-
-        with timed():
-            input_slice = volume[tuple(volume_slice)].read().result()
-
         output_points = ls_template_points.values.reshape((height, width, 3))
         return input_slice, output_points, dataset_idx, slice_idx
 
@@ -398,3 +462,43 @@ class SliceDataset(Dataset):
         num_slices = [x.registered_shape[self._get_slice_axis(axes=x.axes).dimension] for x in
                       self._dataset_meta]
         return sum(num_slices)
+
+    def _get_random_patch(self, slice_2d: tensorstore.TensorStore):
+        """Extract random patch from slice"""
+        h, w = slice_2d.shape
+        ph, pw = self._patch_size, self._patch_size
+
+        # Adjust patch size to what's available
+        ph = min(h, ph)
+        pw = min(w, pw)
+
+        # Random position (0 if slice is smaller than patch)
+        x = random.randint(0, max(0, h - ph))
+        y = random.randint(0, max(0, w - pw))
+
+        # Extract what we can
+        patch = torch.from_numpy(slice_2d[x:x + ph, y:y + pw].read().result())
+
+        # Pad to patch_size if needed
+        patch = self._pad_patch_to_size(patch)
+
+        return patch, x, y
+
+    def _pad_patch_to_size(self, patch):
+        """Pad extracted patch to patch_size if needed"""
+        h, w = patch.shape
+        ph, pw = self._patch_size, self._patch_size
+
+        pad_h = max(0, ph - h)
+        pad_w = max(0, pw - w)
+
+        if pad_h > 0 or pad_w > 0:
+            patch = torch.nn.functional.pad(
+                patch,
+                (0, pad_w, 0, pad_h),
+                mode='constant',
+                value=0
+            )
+
+        return patch
+
