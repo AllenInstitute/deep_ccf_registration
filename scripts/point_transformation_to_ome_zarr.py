@@ -135,10 +135,17 @@ def _get_input_space_to_light_sheet_transform(
     default='float32',
     help='Warp precision',
 )
+@click.option(
+    '--chunks-per-shard-dim',
+    type=int,
+    default=2,
+    help='How many chunks per each spatial dim to group into a shard'
+)
 def main(dataset_metadata_path: Path, subject_id: str, output_path: str, template_resolution: int,
          light_sheet_template_path: Path,
          chunk_size: int = 256,
-         warp_precision: str = 'float32'):
+         warp_precision: str = 'float32',
+         chunks_per_shard_dim: int =2):
     with open(dataset_metadata_path) as f:
         dataset_metadata = json.load(f)
     dataset_metadata = [SubjectMetadata.model_validate(x) for x in dataset_metadata]
@@ -164,16 +171,12 @@ def main(dataset_metadata_path: Path, subject_id: str, output_path: str, templat
     root = zarr.create_group(store=store)
 
     chunks = (chunk_size, chunk_size, chunk_size, 3)
-    shard_shape = tuple(
-        (inverse_warp.shape[i] // chunks[i]) * chunks[i]
-        for i in range(len(chunks))
-    )
 
     zarr.create_array(store=store,
                       name='coordinateTransformations/ls_to_template_SyN_1InverseWarp',
                       data=inverse_warp,
                       chunks=chunks,
-                      shards=shard_shape,
+                      shards=(chunks[0] * chunks_per_shard_dim, chunks[1] * chunks_per_shard_dim, chunks[2] * chunks_per_shard_dim, chunks[-1]),
                       )
     zarr.create_array(store=store,
                       name='coordinateTransformations/ls_to_template_SyN_0GenericAffine',

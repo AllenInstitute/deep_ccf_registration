@@ -428,7 +428,8 @@ class SliceDataset(Dataset):
             else:
                 if self._patch_size is None:
                     input_slice, patch_x, patch_y = volume[tuple(volume_slice)][:].read().result(), 0, 0
-
+                else:
+                    raise NotImplementedError
         height, width = input_slice.shape
 
         point_grid = _create_coordinate_dataframe(
