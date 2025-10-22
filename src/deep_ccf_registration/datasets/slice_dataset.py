@@ -150,7 +150,8 @@ def _apply_transforms_to_points(
         experiment_meta: SubjectMetadata,
         warp: tensorstore.TensorStore | np.ndarray,
         template_parameters: AntsImageParameters,
-        warp_interpolation_padding: int = 5
+        warp_interpolation_padding: int = 5,
+        crop_warp_to_bounding_box: bool = True
 ):
     # apply inverse affine to points in input space
     # this returns points in physical space
@@ -167,19 +168,20 @@ def _apply_transforms_to_points(
         physical_pts=affine_transformed_points
     )
 
-    cropped_warp = _get_cropped_region_from_warp(
-        warp=warp,
-        affine_transformed_voxels=affine_transformed_voxels,
-        warp_interpolation_padding=warp_interpolation_padding
-    )
+    if crop_warp_to_bounding_box:
+        warp = _get_cropped_region_from_warp(
+            warp=warp,
+            affine_transformed_voxels=affine_transformed_voxels,
+            warp_interpolation_padding=warp_interpolation_padding
+        )
 
-    cropped_warp, affine_transformed_voxels = _prepare_grid_sample(
-        warp=cropped_warp,
+    warp, affine_transformed_voxels = _prepare_grid_sample(
+        warp=warp,
         affine_transformed_voxels=affine_transformed_voxels
     )
 
     displacements = F.grid_sample(
-        input=cropped_warp,
+        input=warp,
         grid=affine_transformed_voxels,
         mode='bilinear',
         padding_mode='border',
@@ -276,13 +278,15 @@ class SliceDataset(Dataset):
     def __init__(self, dataset_meta: list[SubjectMetadata], ls_template: ants.ANTsImage,
                  orientation: Optional[SliceOrientation] = None,
                  registration_downsample_factor: int = 3,
-                 tensorstore_aws_credentials_method: str = "default"
+                 tensorstore_aws_credentials_method: str = "default",
+                 crop_warp_to_bounding_box: bool = True
                  ):
         super().__init__()
         self._dataset_meta = dataset_meta
         self._orientation = orientation
         self._registration_downsample_factor = registration_downsample_factor
         self._warps = self._load_warps(tensorstore_aws_credentials_method=tensorstore_aws_credentials_method)
+        self._crop_warp_to_bounding_box = crop_warp_to_bounding_box
 
         self._ls_template = ls_template
 
@@ -367,7 +371,8 @@ class SliceDataset(Dataset):
             points=points,
             template_parameters=AntsImageParameters.from_ants_image(image=self._ls_template),
             experiment_meta=experiment_meta,
-            warp=self._warps[dataset_idx]
+            warp=self._warps[dataset_idx],
+            crop_warp_to_bounding_box=self._crop_warp_to_bounding_box
         )
 
         volume_slice = [0, 0, slice(None), slice(None), slice(None)]
