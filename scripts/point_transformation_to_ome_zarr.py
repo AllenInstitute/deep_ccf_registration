@@ -123,8 +123,22 @@ def _get_input_space_to_light_sheet_transform(
     default=25,
     help='Template resolution in micrometers',
 )
+@click.option(
+    '--chunk-size',
+    type=int,
+    default=256,
+    help='Cubic chunk size for warp',
+)
+@click.option(
+    '--warp-precision',
+    type=str,
+    default='float32',
+    help='Warp precision',
+)
 def main(dataset_metadata_path: Path, subject_id: str, output_path: str, template_resolution: int,
-         light_sheet_template_path: Path):
+         light_sheet_template_path: Path,
+         chunk_size: int = 256,
+         warp_precision: str = 'float32'):
     with open(dataset_metadata_path) as f:
         dataset_metadata = json.load(f)
     dataset_metadata = [SubjectMetadata.model_validate(x) for x in dataset_metadata]
@@ -136,7 +150,9 @@ def main(dataset_metadata_path: Path, subject_id: str, output_path: str, templat
 
     logger.info('Loading inverse warp')
     inverse_warp = ants.image_read(
-        str('data' / experiment_meta.ls_to_template_inverse_warp_path)).numpy()
+        str('data' / Path(experiment_meta.ls_to_template_inverse_warp_path))).numpy()
+    if inverse_warp.dtype != warp_precision:
+        inverse_warp = inverse_warp.astype(warp_precision)
     affine = ants.read_transform(
         str('data' / experiment_meta.ls_to_template_affine_matrix_path)).parameters
 
@@ -146,9 +162,20 @@ def main(dataset_metadata_path: Path, subject_id: str, output_path: str, templat
     else:
         store = LocalStore(root=output_path)
     root = zarr.create_group(store=store)
+
+    chunks = (chunk_size, chunk_size, chunk_size, 3)
+    shard_shape = tuple(
+        (inverse_warp.shape[i] // chunks[i]) * chunks[i]
+        for i in range(len(chunks))
+    )
+
     zarr.create_array(store=store,
                       name='coordinateTransformations/ls_to_template_SyN_1InverseWarp',
-                      data=inverse_warp)
+                      data=inverse_warp,
+                      chunks=chunks,
+                      shards=shard_shape,
+                      dtype=inverse_warp.dtype
+                      )
     zarr.create_array(store=store,
                       name='coordinateTransformations/ls_to_template_SyN_0GenericAffine',
                       data=affine.reshape((3, 4)))
