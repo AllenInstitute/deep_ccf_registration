@@ -174,7 +174,6 @@ def main(dataset_metadata_path: Path, subject_id: str, output_path: str, templat
                       data=inverse_warp,
                       chunks=chunks,
                       shards=shard_shape,
-                      dtype=inverse_warp.dtype
                       )
     zarr.create_array(store=store,
                       name='coordinateTransformations/ls_to_template_SyN_0GenericAffine',
