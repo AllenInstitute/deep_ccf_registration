@@ -1,20 +1,21 @@
+from typing import Optional
+
 import ants
 import numpy as np
 import pandas as pd
 import torch
 from matplotlib import pyplot as plt
-from scipy.ndimage import map_coordinates
 from skimage.exposure import rescale_intensity
 
 
-def visualize_alignment(input_slice: torch.Tensor, template_points: torch.Tensor, template: ants.ANTsImage):
+def visualize_alignment(
+    input_slice: torch.Tensor,
+    template_on_input: np.ndarray,
+    registered_slice: Optional[np.ndarray] = None,
+):
     raw_rgb = np.zeros_like(input_slice, shape=(*input_slice.shape, 3))
     raw_rgb[:, :, 0] = input_slice
 
-    template_on_input = map_coordinates(
-        input=template.numpy(),
-        coordinates=template_points.reshape((-1, 3)).T.numpy()
-    )
     template_on_input_rgb = np.zeros_like(template_on_input,
                                              shape=(*input_slice.shape, 3))
     template_on_input_rgb[:, :, 2] = np.array(template_on_input).reshape(input_slice.shape)
@@ -25,13 +26,20 @@ def visualize_alignment(input_slice: torch.Tensor, template_points: torch.Tensor
     else:
         figsize = (15, 30)
 
-    fig, ax = plt.subplots(figsize=figsize, ncols=3, dpi=100)
+    ncols = 3
+    if registered_slice is not None:
+        ncols += 1
+    fig, ax = plt.subplots(figsize=figsize, ncols=ncols, dpi=100)
     ax[0].imshow(rescale_intensity(raw_rgb, out_range=(0, 1)), alpha=0.8)
     ax[0].imshow(rescale_intensity(template_on_input_rgb, out_range=(0, 1)), alpha=0.4)
     ax[1].imshow(input_slice, cmap='gray')
     ax[1].set_title('input')
     ax[2].imshow(np.array(template_on_input).reshape(input_slice.shape), cmap='gray')
     ax[2].set_title('Template')
+
+    if registered_slice is not None:
+        ax[3].imshow(registered_slice, cmap='gray')
+        ax[3].set_title('registered slice')
     return fig
 
 def create_3d_plot(points: pd.DataFrame, space: ants.ANTsImage) -> plt.Figure:
