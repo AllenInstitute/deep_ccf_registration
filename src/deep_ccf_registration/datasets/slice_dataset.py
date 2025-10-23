@@ -42,6 +42,7 @@ class SubjectMetadata(BaseModel):
     registration_downsample: int
     ls_to_template_affine_matrix_path: Path
     ls_to_template_inverse_warp_path: str | Path
+    ls_to_template_inverse_warp_path_original: Optional[Path] = None
     #registration_date: datetime.datetime
 
 

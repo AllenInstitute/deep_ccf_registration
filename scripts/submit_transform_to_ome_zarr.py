@@ -266,7 +266,8 @@ def get_already_processed():
         capsule_id='378af6e0-a21d-496b-9184-cb0175d8e0d5'
     )
 
-    computations = [x for x in computations if 'transform_to_ome_zarr' in  x.name and x.state == ComputationState.Completed]
+    computations = [x for x in computations if 'transform_to_ome_zarr' in  x.name and
+                    x.state == ComputationState.Completed and x.exit_code == 0 and x.end_status == ComputationEndStatus.Succeeded]
 
     # return subject ids
     return [x.name.split('_')[0] for x in computations]
