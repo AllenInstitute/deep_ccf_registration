@@ -3,7 +3,6 @@ import random
 from enum import Enum
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlparse
 
 import aind_smartspim_transform_utils
 import ants
@@ -20,6 +19,7 @@ from torch.utils.data import Dataset
 import torch.nn.functional as F
 
 from deep_ccf_registration.utils.logging_utils import timed, timed_func
+from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 
 
 class SliceOrientation(Enum):
@@ -239,38 +239,6 @@ def _apply_transforms_to_points(
     return transformed_df
 
 
-def _create_kvstore(path: str, aws_credentials_method: str = "default"):
-    """
-    Create tensorstore kvstore
-
-    Parameters
-    ----------
-    path
-    aws_credentials_method
-
-    Returns
-    -------
-
-    """
-
-    def parse_s3_uri(s3_uri):
-        parsed = urlparse(s3_uri)
-        bucket = parsed.netloc
-        key = parsed.path.lstrip('/')
-        return bucket, key
-
-    if path.startswith("s3://"):
-        bucket, key = parse_s3_uri(s3_uri=path)
-        kvstore = {
-            "driver": "s3",
-            "bucket": bucket,
-            "path": key,
-            "aws_credentials": {"type": aws_credentials_method},
-        }
-    else:
-        kvstore = {"driver": "file", "path": path}
-    return kvstore
-
 @timed_func
 def _transform_points_to_template_ants_space(
     acquisition_axes: list[AcquisitionAxis],
@@ -368,7 +336,7 @@ class SliceDataset(Dataset):
                 warp = tensorstore.open(
                     spec={
                         'driver': 'zarr3',
-                        'kvstore': _create_kvstore(
+                        'kvstore': create_kvstore(
                             path=str(experiment_meta.ls_to_template_inverse_warp_path),
                             aws_credentials_method=tensorstore_aws_credentials_method
                         )
@@ -409,7 +377,7 @@ class SliceDataset(Dataset):
         volume = tensorstore.open(
             spec={
                 'driver': 'auto',
-                'kvstore': _create_kvstore(
+                'kvstore': create_kvstore(
                     path=str(experiment_meta.stitched_volume_path) + f'/{self._registration_downsample_factor}',
                     aws_credentials_method="anonymous"
                 )
