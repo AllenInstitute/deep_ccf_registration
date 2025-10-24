@@ -10,6 +10,7 @@ import ants
 import click
 import numpy as np
 from scipy.ndimage import map_coordinates
+from skimage.exposure import rescale_intensity
 from skimage.filters import threshold_otsu
 
 from deep_ccf_registration.datasets.slice_dataset import AcquisitionDirection, SliceDataset, \
@@ -20,6 +21,24 @@ from loguru import logger
 logger.remove()
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logger.add(sys.stderr, level=log_level)
+
+def _calc_dice_metric(template_on_input: np.ndarray, input_slice: np.ndarray):
+    input_slice = rescale_intensity(
+        input_slice,
+        in_range=tuple(np.percentile(input_slice, (1, 99))),
+        out_range=(0, 1)
+    )
+
+    thresh_template = threshold_otsu(template_on_input)
+    thresh_input_slice = threshold_otsu(input_slice)
+
+    mask_template = template_on_input > thresh_template
+    mask_input = input_slice > thresh_input_slice
+
+    intersection = np.sum(mask_template & mask_input)
+    dice_metric = 2 * intersection / (np.sum(mask_template) + np.sum(mask_input))
+
+    return dice_metric
 
 @click.command()
 @click.option('--subject-id', required=True)
@@ -68,14 +87,10 @@ def main(subject_id: str,
 
     template_on_input = template_on_input.reshape(input_slice.shape)
 
-    thresh_template = threshold_otsu(template_on_input)
-    thresh_input_slice = threshold_otsu(input_slice)
-
-    mask_template = template_on_input > thresh_template
-    mask_input = input_slice > thresh_input_slice
-
-    intersection = np.sum(mask_template & mask_input)
-    dice_metric = 2 * intersection / (np.sum(mask_template) + np.sum(mask_input))
+    dice_metric = _calc_dice_metric(
+        template_on_input=template_on_input,
+        input_slice=input_slice
+    )
 
     fig = visualize_alignment(
         input_slice=input_slice,
