@@ -15,7 +15,12 @@ def visualize_alignment(
 ):
     if isinstance(input_slice, torch.Tensor):
         input_slice = input_slice.numpy()
-    input_slice = rescale_intensity(input_slice, out_range=(0, 1))
+
+    input_slice = rescale_intensity(
+        input_slice,
+        in_range=tuple(np.percentile(input_slice, (1, 99))),
+        out_range=(0, 1)
+    )
     template_on_input = np.array(template_on_input).reshape(input_slice.shape)
     template_on_input = rescale_intensity(template_on_input, out_range=(0, 1))
 
