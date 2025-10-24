@@ -92,13 +92,21 @@ def main(
             # Using the s3 uri is faster than using s3fs
             stitched_volume_path = f's3://aind-open-data/{str(stitched_volume_path).replace("/data/aind_open_data/", "")}'
 
+            if not (image_atlas_alignment_dir / 'metadata' / 'processing.json').exists():
+                logger.warning('no processing.json. skipping')
+                continue
+
             with open(image_atlas_alignment_dir / 'metadata' / 'processing.json') as f:
                 registration_processing_meta = json.load(f)
 
-            alignment_step = \
-            [x for x in registration_processing_meta['processing_pipeline']['data_processes'] if
-             x['name'] == 'Image atlas alignment'][0]
-            alignment_downsample_factor = int(Path(alignment_step['input_location']).name)
+            try:
+                alignment_step = \
+                [x for x in registration_processing_meta['processing_pipeline']['data_processes'] if
+                 x['name'] == 'Image atlas alignment'][0]
+                alignment_downsample_factor = int(Path(alignment_step['input_location']).name)
+            except KeyError:
+                logger.warning('registration_processing_meta invalid. skipping...')
+                continue
 
             try:
                 volume = tensorstore.open(
@@ -141,17 +149,21 @@ def main(
             # use the zarr array instead, since much faster
             ls_to_template_inverse_warp_path = f's3://marmot-development-802451596237-us-west-2/transforms/{str(ls_to_template_inverse_warp_path).replace("/data/aind_open_data/", "")}'
 
-            # try to open zarr array to make sure it exists
-            tensorstore.open(
-                spec={
-                    'driver': 'zarr3',
-                    'kvstore': create_kvstore(
-                        path=str(ls_to_template_inverse_warp_path),
-                        aws_credentials_method='ecs'
-                    )
-                },
-                read=True
-            ).result()
+            try:
+                # try to open zarr array to make sure it exists
+                tensorstore.open(
+                    spec={
+                        'driver': 'zarr3',
+                        'kvstore': create_kvstore(
+                            path=str(ls_to_template_inverse_warp_path),
+                            aws_credentials_method='ecs'
+                        )
+                    },
+                    read=True
+                ).result()
+            except ValueError:
+                logger.warning(f'{ls_to_template_inverse_warp_path} does not exist')
+                continue
 
             experiment_meta = SubjectMetadata(
                 subject_id=subject_id,

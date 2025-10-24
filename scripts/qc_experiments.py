@@ -9,8 +9,8 @@ from pathlib import Path
 import ants
 import click
 import numpy as np
-import torch
 from scipy.ndimage import map_coordinates
+from skimage.filters import threshold_otsu
 
 from deep_ccf_registration.datasets.slice_dataset import AcquisitionDirection, SliceDataset, \
     SliceOrientation, SubjectMetadata
@@ -20,21 +20,6 @@ from loguru import logger
 logger.remove()
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logger.add(sys.stderr, level=log_level)
-
-def _calc_dice_metric(input_slice: np.ndarray, template_on_input: np.ndarray):
-    input_slice_mask = (input_slice != 0).astype(int)
-    template_on_input_mask = (template_on_input != 0).astype(int)
-
-    # Calculate Dice coefficient
-    intersection = np.sum(input_slice_mask * template_on_input_mask)
-    sum_masks = np.sum(input_slice_mask) + np.sum(template_on_input_mask)
-
-    # Avoid division by zero
-    if sum_masks == 0:
-        return 1.0 if intersection == 0 else 0.0
-
-    dice = (2.0 * intersection) / sum_masks
-    return dice
 
 @click.command()
 @click.option('--subject-id', required=True)
@@ -81,10 +66,16 @@ def main(subject_id: str,
         coordinates=output_points.reshape((-1, 3)).T
     )
 
-    dice_metric = _calc_dice_metric(
-        input_slice=input_slice,
-        template_on_input=template_on_input.reshape(input_slice.shape)
-    )
+    template_on_input = template_on_input.reshape(input_slice.shape)
+
+    thresh_template = threshold_otsu(template_on_input)
+    thresh_input_slice = threshold_otsu(input_slice)
+
+    mask_template = template_on_input > thresh_template
+    mask_input = input_slice > thresh_input_slice
+
+    intersection = np.sum(mask_template & mask_input)
+    dice_metric = 2 * intersection / (np.sum(mask_template) + np.sum(mask_input))
 
     fig = visualize_alignment(
         input_slice=input_slice,

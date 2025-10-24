@@ -9,16 +9,22 @@ from skimage.exposure import rescale_intensity
 
 
 def visualize_alignment(
-    input_slice: torch.Tensor,
+    input_slice: np.ndarray | torch.Tensor,
     template_on_input: np.ndarray,
     registered_slice: Optional[np.ndarray] = None,
 ):
+    if isinstance(input_slice, torch.Tensor):
+        input_slice = input_slice.numpy()
+    input_slice = rescale_intensity(input_slice, out_range=(0, 1))
+    template_on_input = np.array(template_on_input).reshape(input_slice.shape)
+    template_on_input = rescale_intensity(template_on_input, out_range=(0, 1))
+
     raw_rgb = np.zeros_like(input_slice, shape=(*input_slice.shape, 3))
     raw_rgb[:, :, 0] = input_slice
 
     template_on_input_rgb = np.zeros_like(template_on_input,
                                              shape=(*input_slice.shape, 3))
-    template_on_input_rgb[:, :, 2] = np.array(template_on_input).reshape(input_slice.shape)
+    template_on_input_rgb[:, :, 2] = template_on_input
 
     height, width = input_slice.shape
     if width > height:
@@ -30,11 +36,11 @@ def visualize_alignment(
     if registered_slice is not None:
         ncols += 1
     fig, ax = plt.subplots(figsize=figsize, ncols=ncols, dpi=100)
-    ax[0].imshow(rescale_intensity(raw_rgb, out_range=(0, 1)), alpha=0.8)
-    ax[0].imshow(rescale_intensity(template_on_input_rgb, out_range=(0, 1)), alpha=0.4)
+    ax[0].imshow(input_slice, alpha=0.8)
+    ax[0].imshow(template_on_input_rgb, alpha=0.4)
     ax[1].imshow(input_slice, cmap='gray')
     ax[1].set_title('input')
-    ax[2].imshow(np.array(template_on_input).reshape(input_slice.shape), cmap='gray')
+    ax[2].imshow(template_on_input, cmap='gray')
     ax[2].set_title('Template')
 
     if registered_slice is not None:

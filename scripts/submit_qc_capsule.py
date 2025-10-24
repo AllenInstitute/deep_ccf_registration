@@ -1,7 +1,10 @@
 import json
 import os
+import time
 from contextlib import contextmanager
 from io import BytesIO
+
+import codeocean.error
 import pandas as pd
 import requests
 from PIL import Image
@@ -58,10 +61,15 @@ def submit_jobs(qc_subjects: list[dict]):
             errors.append(subject)
             continue
 
-        co_client.computations.rename_computation(
-            run_response.id,
-            name=f'{subject["subject_id"]}_qc',
-        )
+        while True:
+            try:
+                co_client.computations.rename_computation(
+                    run_response.id,
+                    name=f'{subject["subject_id"]}_qc',
+                )
+                break
+            except codeocean.error.Error:
+                time.sleep(30)
 
         jobs.append({'subject_id': subject['subject_id'], "computation_id": run_response.id})
     print('errors')
@@ -99,7 +107,7 @@ def get_job_statuses():
 
     assert all([x.state == ComputationState.Completed and x.exit_code == 0 for _, x in computation_responses.items()])
 
-def get_distance_metrics():
+def get_metrics():
     co_client = CodeOcean(domain="https://codeocean.allenneuraldynamics.org",
                           token=co_token)
 
@@ -115,21 +123,21 @@ def get_distance_metrics():
 
     subject_id_computation_map = {x.name.split('_')[0]: x.id for x in computations}
 
-    distances = []
+    metrics = []
     for subject_id, computation_id in tqdm(subject_id_computation_map.items()):
         download_url = co_client.computations.get_result_file_download_url(
             computation_id=computation_id,
-            path=f'{subject_id}_roundtrip_distance.json'
+            path='dice_metric.json'
         )
 
         response = requests.get(download_url.url)
         response.raise_for_status()  # Check for errors
 
-        distance = response.json()
-        distances.append({'subject_id': subject_id, **distance})
+        metric = response.json()
+        metrics.append({'subject_id': subject_id, **metric})
 
-    with open('/tmp/distances.json', 'w') as f:
-        f.write(json.dumps(distances, indent=2))
+    with open('/tmp/metric.json', 'w') as f:
+        f.write(json.dumps(metrics, indent=2))
 
 def _parse_orientation(axes: list[AcquisitionAxis]):
     axes = sorted(axes, key=lambda x: x.dimension)
@@ -167,17 +175,17 @@ def create_pdf():
 
     dataset = [SubjectMetadata.model_validate(x) for x in dataset]
 
-    # with open('/tmp/distances.json') as f:
-    #     distances = json.load(f)
-    #
-    # distances = pd.DataFrame(distances)
-    # distances['orientation'] = distances['subject_id'].apply(lambda subject_id: _parse_orientation(
-    #     axes=[x for x in dataset if x.subject_id == subject_id][0].axes))
-    # distances = distances.sort_values('roundtrip_distance')
+    with open('/tmp/metric.json') as f:
+        metrics = json.load(f)
+
+    metrics = pd.DataFrame(metrics)
+    metrics['orientation'] = metrics['subject_id'].apply(lambda subject_id: _parse_orientation(
+        axes=[x for x in dataset if x.subject_id == subject_id][0].axes))
+    metrics = metrics.sort_values('dice_metric', ascending=False)
 
     with PdfPages('/tmp/smartspim_qc.pdf') as pdf:
-        for i, (subject_id, _) in enumerate(subject_id_computation_map.items()):
-            subject = [x for x in dataset if x.subject_id == subject_id][0]
+        for i, row in enumerate(metrics.itertuples()):
+            subject = [x for x in dataset if x.subject_id == row.subject_id][0]
             img = images[subject.subject_id]
             print(f"Adding image {i + 1}/{len(images)} to PDF")
 
@@ -191,7 +199,7 @@ def create_pdf():
 
             fig, ax = plt.subplots(figsize=figsize)
             orientation = _parse_orientation(axes=subject.axes)
-            ax.set_title(f'subject id {subject.subject_id} orientation {orientation}')
+            ax.set_title(f'subject id {subject.subject_id} orientation {orientation} dice {row.dice_metric:.3f}')
 
             # Display image
             ax.imshow(img)
@@ -223,9 +231,9 @@ def rerun_failed_jobs(subject_ids):
 if __name__ == '__main__':
     co_token = os.environ['CODEOCEAN_TOKEN']
 
-    # with open('/Users/adam.amster/Downloads/qc_subjects.json') as f:
-    #     qc_subjects = json.load(f)
-    # jobs = submit_jobs(qc_subjects=qc_subjects)
+    with open('/Users/adam.amster/Downloads/qc_subjects (1).json') as f:
+        qc_subjects = json.load(f)
+    #jobs = submit_jobs(qc_subjects=qc_subjects)
 
     #get_job_statuses()
 
@@ -235,5 +243,5 @@ if __name__ == '__main__':
     # with open('/tmp/qc_jobs.json', 'w') as f:
     #     f.write(json.dumps(jobs, indent=2))
 
-    #get_distance_metrics()
+    get_metrics()
     create_pdf()

@@ -53,7 +53,7 @@ def submit_jobs(
     subjects = [x for x in subjects if x.subject_id not in exclude_subjects]
 
     for subject in tqdm(subjects):
-        output_path = subject.ls_to_template_inverse_warp_path.replace('/data/aind_open_data/', '')
+        output_path = subject.ls_to_template_inverse_warp_path_original.replace('/data/aind_open_data/', '')
         output_path = Path(output_path).parent / 'transforms.zarr'
 
         run_params = RunParams(
