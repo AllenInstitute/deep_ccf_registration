@@ -278,6 +278,10 @@ def _transform_points_to_template_ants_space(
     )
     return ants_pts
 
+class TrainMode(Enum):
+    TRAIN = 0
+    TEST = 1
+
 class SliceDataset(Dataset):
     """
     Loads a slice and the mapped points in template space
@@ -288,7 +292,8 @@ class SliceDataset(Dataset):
                  tensorstore_aws_credentials_method: str = "default",
                  crop_warp_to_bounding_box: bool = True,
                  patch_size: Optional[tuple[int, int]] = (256, 256),
-                 mode: str = 'train'
+                 mode: TrainMode = TrainMode.TRAIN,
+                 normalize_orientation_map: Optional[dict[SliceOrientation: list[AcquisitionDirection]]] = None
                  ):
         """
 
@@ -299,16 +304,32 @@ class SliceDataset(Dataset):
         :param tensorstore_aws_credentials_method: credentials lookup method for tensorstore. see ts docs
         :param crop_warp_to_bounding_box: whether to load a cropped region of warp (faster) rather than full warp
         :param patch_size: patch size
-        :param mode: 'train' or 'inference'
+        :param mode: `TrainMode``
+        :param normalize_orientation_map: Map between slice axis and desired normalized orientation
+            Example: {SliceOrientation.SAGITTAL: [AcquisitionDirection.Superior, AcquisitionDirection.Anterior]}. 3 different slices with orientations
+            SAL, RPI, SPR.
+            SA -> SA
+            PI -> SA
+            SP -> SA
         """
         super().__init__()
         self._dataset_meta = dataset_meta
+        if orientation is None:
+            orientation = [SliceOrientation.SAGITTAL, SliceOrientation.CORONAL, SliceOrientation.HORIZONTAL]
+        else:
+            orientation = [orientation]
         self._orientation = orientation
         self._registration_downsample_factor = registration_downsample_factor
         self._warps = self._load_warps(tensorstore_aws_credentials_method=tensorstore_aws_credentials_method)
         self._crop_warp_to_bounding_box = crop_warp_to_bounding_box
         self._patch_size = patch_size
         self._mode = mode
+
+        if normalize_orientation_map is not None:
+            for axis, orientation in normalize_orientation_map.items():
+                if len(orientation) != 2:
+                    raise ValueError('Orientation must be 2d for a 2d slice')
+        self._normalize_orientation_map = normalize_orientation_map
 
         self._ls_template = ls_template
 
@@ -346,16 +367,16 @@ class SliceDataset(Dataset):
             warps.append(warp)
         return warps
 
-    def _get_slice_from_idx(self, idx: int) -> tuple[int, int]:
-        num_slices = [x.registered_shape[self._get_slice_axis(axes=x.axes).dimension] for x in
+    def _get_slice_from_idx(self, idx: int, orientation: SliceOrientation) -> tuple[int, int]:
+        num_slices = [x.registered_shape[self._get_slice_axis(axes=x.axes, orientation=orientation).dimension] for x in
                       self._dataset_meta]
         num_slices_cumsum = np.cumsum([0] + num_slices)
         dataset_idx = int(np.searchsorted(num_slices_cumsum[1:], idx, side='right'))
         slice_idx = int(idx - num_slices_cumsum[dataset_idx])
         return dataset_idx, slice_idx
 
-    def _get_slice_axis(self, axes: list[AcquisitionAxis]) -> AcquisitionAxis:
-        if self._orientation == SliceOrientation.SAGITTAL:
+    def _get_slice_axis(self, axes: list[AcquisitionAxis], orientation: SliceOrientation) -> AcquisitionAxis:
+        if orientation == SliceOrientation.SAGITTAL:
             slice_axis = [i for i in range(len(axes)) if
                           axes[i].direction in (AcquisitionDirection.LEFT_TO_RIGHT,
                                                 AcquisitionDirection.RIGHT_TO_LEFT)]
@@ -368,11 +389,18 @@ class SliceDataset(Dataset):
 
     @timed_func
     def __getitem__(self, idx):
-        dataset_idx, slice_idx = self._get_slice_from_idx(idx=idx)
+        if self._mode == TrainMode.TRAIN:
+            orientation = random.choice(self._orientation)
+        else:
+            if len(self._orientation) != 1:
+                raise ValueError('Must provide single orientation if not train')
+            orientation = self._orientation[0]
+
+        dataset_idx, slice_idx = self._get_slice_from_idx(idx=idx, orientation=orientation)
         experiment_meta = self._dataset_meta[dataset_idx]
         acquisition_axes = experiment_meta.axes
 
-        slice_axis = self._get_slice_axis(axes=acquisition_axes)
+        slice_axis = self._get_slice_axis(axes=acquisition_axes, orientation=orientation)
 
         volume = tensorstore.open(
             spec={
@@ -390,7 +418,7 @@ class SliceDataset(Dataset):
         volume_slice[slice_axis.dimension + 2] = slice_idx  # +2 because first 2 axes unused
 
         with timed():
-            if self._mode == 'train':
+            if self._mode == TrainMode.TRAIN:
                 input_slice, patch_x, patch_y = self._get_random_patch(
                     slice_2d=volume[tuple(volume_slice)]
                 )
@@ -428,12 +456,24 @@ class SliceDataset(Dataset):
         )
 
         output_points = ls_template_points.values.reshape((height, width, 3))
+
+        if self._normalize_orientation_map is not None:
+            input_slice, output_points = self._normalize_orientation(
+                slice=input_slice,
+                template_points=output_points,
+                acquisition_axes=acquisition_axes,
+                orientation=orientation,
+                slice_axis=slice_axis
+            )
+
         return input_slice, output_points, dataset_idx, slice_idx
 
     def __len__(self):
-        num_slices = [x.registered_shape[self._get_slice_axis(axes=x.axes).dimension] for x in
-                      self._dataset_meta]
-        return sum(num_slices)
+        num_slices = 0
+        for orientation in self._orientation:
+            num_slices += sum([x.registered_shape[self._get_slice_axis(axes=x.axes, orientation=orientation).dimension] for x in
+                          self._dataset_meta])
+        return num_slices
 
     def _get_random_patch(self, slice_2d: tensorstore.TensorStore):
         """Extract random patch from slice"""
@@ -473,4 +513,54 @@ class SliceDataset(Dataset):
             )
 
         return patch
+
+    def _normalize_orientation(
+        self,
+        slice: np.ndarray,
+        template_points: np.ndarray,
+        acquisition_axes: list[AcquisitionAxis],
+        orientation: SliceOrientation,
+        slice_axis: AcquisitionAxis,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        Transforms slice and template points to have a uniform
+        orientation
+
+        :param slice:
+        :param template_points:
+        :param acquisition_axes:
+        :param orientation:
+        :param slice_axis:
+        :return: transformed slice and template_points
+        """
+        desired_orientation: list[AcquisitionDirection] = self._normalize_orientation_map[orientation]
+        acquisition_axes = sorted(acquisition_axes, key=lambda x: x.dimension)
+
+        desired_orientation = desired_orientation.copy()
+        desired_orientation.insert(slice_axis.dimension, slice_axis.direction)
+
+        _, swapped, mat = aind_smartspim_transform_utils.utils.utils.get_orientation_transform(
+            orientation_in=''.join([x.direction.value.lower()[0] for x in acquisition_axes]),
+            orientation_out=''.join([x.value.lower()[0] for x in desired_orientation])
+        )
+
+        # exclude the slice axis, since just dealing with 2d slices
+        mat = mat[[x for x in range(3) if x != slice_axis.dimension]]
+        mat = mat[:, [x for x in range(3) if x != slice_axis.dimension]]
+
+        # flip axis to desired orientation
+        for idx, dim_orient in enumerate(mat.sum(axis=1)):
+            if dim_orient < 0:
+                if idx == 0:
+                    slice = np.flipud(slice)
+                    template_points = np.flipud(template_points)
+                else:
+                    slice = np.fliplr(slice)
+                    template_points = np.fliplr(template_points)
+
+        if swapped.tolist() != range(3):
+            slice = np.transpose(slice)
+            template_points = np.permute_dims(template_points, axes=[1, 0, 2])
+
+        return slice, template_points
 

@@ -5,6 +5,7 @@ from contextlib import contextmanager
 from io import BytesIO
 
 import codeocean.error
+import numpy as np
 import pandas as pd
 import requests
 from PIL import Image
@@ -35,12 +36,14 @@ def catch_code_ocean_error():
             message = err.response.text
         raise CodeOceanError(message)
 
-def submit_jobs(qc_subjects: list[dict]):
+def submit_jobs(subjects: list[dict], job_limit: int = 100):
     co_client = CodeOcean(domain="https://codeocean.allenneuraldynamics.org", token=co_token)
 
     errors = []
     jobs = []
-    for subject in tqdm(qc_subjects):
+    job_count = 0
+
+    for subject in tqdm(subjects):
         run_params = RunParams(
             capsule_id='1c2ed940-5f63-450f-83e9-5500308c2bf6',
             named_parameters=[
@@ -72,50 +75,50 @@ def submit_jobs(qc_subjects: list[dict]):
                 time.sleep(30)
 
         jobs.append({'subject_id': subject['subject_id'], "computation_id": run_response.id})
+
+        job_count += 1
+
+        if job_count == job_limit or len(jobs) == len(subjects):
+            with open('/tmp/qc_jobs.json', 'w') as f:
+                f.write(json.dumps(jobs, indent=2))
+
+            logger.info('Job count reached. Waiting until all running jobs finish')
+            while True:
+                job_statuses = get_job_statuses()
+                running_count = sum([x.state == ComputationState.Running for _, x in job_statuses.items()])
+                if running_count != 0:
+                    logger.info(f'Running count: {running_count}')
+                    time.sleep(30)
+                else:
+                    job_count = 0
+                    break
     print('errors')
     print(errors)
 
     return jobs
 
-def get_job_statuses():
+def get_job_statuses() -> dict[str, Computation]:
     co_client = CodeOcean(domain="https://codeocean.allenneuraldynamics.org",
                           token=co_token)
 
-    with open('/tmp/qc_jobs.json') as f:
-        qc_jobs = json.load(f)
+    with open('/tmp/transforms_to_ome_zarr_jobs.json') as f:
+        jobs = json.load(f)
 
     computation_responses: dict[str, Computation] = {}
-    for qc_job in qc_jobs:
+    for job in jobs:
         computation_response = co_client.computations.get_computation(
-            computation_id=qc_job['computation_id']
+            computation_id=job['computation_id']
         )
-        computation_responses[qc_job['subject_id']] = computation_response
+        computation_responses[job['subject_id']] = computation_response
 
-    running_jobs = [x for _, x in computation_responses.items() if x.state == ComputationState.Running]
-    if running_jobs:
-        logger.warning(f'{len(running_jobs)} still running')
-        return
+    return computation_responses
 
-    failed_jobs: dict[str, str] = {}
-    for subject_id, computation_response in computation_responses.items():
-        if computation_response.state == ComputationState.Failed or computation_response.exit_code == 1 or computation_response.end_status != ComputationEndStatus.Succeeded:
-            failed_jobs[subject_id] = computation_response.id
-    if failed_jobs:
-        for failed_subject_id, failed_job_id in failed_jobs.items():
-            logger.error(f'{failed_subject_id} failed')
-        raise RuntimeError(f'{len(failed_jobs)} jobs failed')
-
-    assert all([x.state == ComputationState.Completed and x.exit_code == 0 for _, x in computation_responses.items()])
-
-def get_metrics():
+def get_metrics(qc_jobs):
     co_client = CodeOcean(domain="https://codeocean.allenneuraldynamics.org",
                           token=co_token)
 
-    with open('/tmp/qc_jobs.json') as f:
-        qc_jobs = json.load(f)
-
     computations = []
-    for qc_job in qc_jobs:
+    for qc_job in tqdm(qc_jobs, desc='getting computation ids'):
         computation_response = co_client.computations.get_computation(
             computation_id=qc_job['computation_id']
         )
@@ -124,31 +127,37 @@ def get_metrics():
     subject_id_computation_map = {x.name.split('_')[0]: x.id for x in computations}
 
     metrics = []
+    errors = []
     for subject_id, computation_id in tqdm(subject_id_computation_map.items()):
-        download_url = co_client.computations.get_result_file_download_url(
-            computation_id=computation_id,
-            path='dice_metric.json'
-        )
+        try:
+            download_url = co_client.computations.get_result_file_download_url(
+                computation_id=computation_id,
+                path='dice_metric.json'
+            )
+            response = requests.get(download_url.url)
+            response.raise_for_status()  # Check for errors
 
-        response = requests.get(download_url.url)
-        response.raise_for_status()  # Check for errors
 
-        metric = response.json()
-        metrics.append({'subject_id': subject_id, **metric})
+            metric = response.json()
+            metrics.append({'subject_id': subject_id, **metric})
+        except codeocean.error.Error:
+            errors.append(subject_id)
+            continue
 
     with open('/tmp/metric.json', 'w') as f:
         f.write(json.dumps(metrics, indent=2))
+
+
+    print('errors')
+    print(errors)
 
 def _parse_orientation(axes: list[AcquisitionAxis]):
     axes = sorted(axes, key=lambda x: x.dimension)
     return ''.join([x.direction.value[0] for x in axes])
 
-def create_pdf():
+def create_pdf(qc_jobs):
     co_client = CodeOcean(domain="https://codeocean.allenneuraldynamics.org",
                           token=co_token)
-
-    with open('/tmp/qc_jobs.json') as f:
-        qc_jobs = json.load(f)
 
     computations = []
     for qc_job in qc_jobs:
@@ -178,6 +187,7 @@ def create_pdf():
     with open('/tmp/metric.json') as f:
         metrics = json.load(f)
 
+    metrics = [x for x in metrics if x['subject_id'] in images.keys()]
     metrics = pd.DataFrame(metrics)
     metrics['orientation'] = metrics['subject_id'].apply(lambda subject_id: _parse_orientation(
         axes=[x for x in dataset if x.subject_id == subject_id][0].axes))
@@ -217,7 +227,7 @@ def rerun_failed_jobs(subject_ids):
 
     qc_subjects = [x for x in qc_subjects if x["subject_id"] in subject_ids]
 
-    rerun_jobs = submit_jobs(qc_subjects=qc_subjects)
+    rerun_jobs = submit_jobs(subjects=qc_subjects)
 
     with open('/tmp/qc_jobs.json') as f:
         jobs = json.load(f)
@@ -231,9 +241,9 @@ def rerun_failed_jobs(subject_ids):
 if __name__ == '__main__':
     co_token = os.environ['CODEOCEAN_TOKEN']
 
-    with open('/Users/adam.amster/Downloads/qc_subjects (1).json') as f:
-        qc_subjects = json.load(f)
-    #jobs = submit_jobs(qc_subjects=qc_subjects)
+    with open('/Users/adam.amster/Downloads/subject_metadata.json') as f:
+        subjects = json.load(f)
+    #jobs = submit_jobs(subjects=subjects)
 
     #get_job_statuses()
 
@@ -243,5 +253,36 @@ if __name__ == '__main__':
     # with open('/tmp/qc_jobs.json', 'w') as f:
     #     f.write(json.dumps(jobs, indent=2))
 
-    get_metrics()
-    create_pdf()
+    with open('/tmp/qc_jobs.json') as f:
+        qc_jobs = json.load(f)
+
+    with open('/tmp/metric.json') as f:
+        metrics = json.load(f)
+
+    rng = np.random.default_rng(1234)
+    good_subjects = [x['subject_id'] for x in metrics if x['dice_metric'] >= 0.9]
+    idxs = np.arange(len(good_subjects))
+    np.random.shuffle(idxs)
+    idxs = idxs[:100]
+
+    qc_subjects = [good_subjects[i] for i in idxs]
+    qc_jobs = [x for x in qc_jobs if x['subject_id'] in qc_subjects]
+
+    #get_metrics(qc_jobs=qc_jobs)
+    #create_pdf(qc_jobs=qc_jobs)
+
+
+
+    metrics = pd.DataFrame(metrics)
+    metrics['dice_metric'].plot.hist()
+    plt.show()
+
+    fig, ax = plt.subplots()
+    sorted_dice = np.sort(metrics['dice_metric'])
+    cdf = np.arange(1, len(sorted_dice) + 1) / len(sorted_dice)
+    ax.plot(sorted_dice, cdf)
+    ax.set_xlabel('Dice Score')
+    ax.set_ylabel('Cumulative Probability')
+    ax.grid(True)
+
+    plt.show()
