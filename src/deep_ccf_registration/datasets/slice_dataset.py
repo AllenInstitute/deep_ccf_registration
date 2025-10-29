@@ -41,7 +41,9 @@ class SubjectMetadata(BaseModel):
     registered_shape: tuple[int, int, int]
     registration_downsample: int
     ls_to_template_affine_matrix_path: Path
+    # the inverse warp was converted to ome-zarr via `point_transformation_to_ome_zarr.py`
     ls_to_template_inverse_warp_path: str | Path
+    # this is the original niftii inverse warp just in case
     ls_to_template_inverse_warp_path_original: Optional[Path] = None
     # The index that splits the 2 hemispheres in voxels the same dim as the sagittal axis in the registered volume
     # obtained via `get_input_space_midline.py`
@@ -294,7 +296,8 @@ class SliceDataset(Dataset):
                  crop_warp_to_bounding_box: bool = True,
                  patch_size: Optional[tuple[int, int]] = (256, 256),
                  mode: TrainMode = TrainMode.TRAIN,
-                 normalize_orientation_map: Optional[dict[SliceOrientation: list[AcquisitionDirection]]] = None
+                 normalize_orientation_map: Optional[dict[SliceOrientation: list[AcquisitionDirection]]] = None,
+                 limit_sagittal_slices_to_hemisphere: bool = True,
                  ):
         """
 
@@ -312,6 +315,9 @@ class SliceDataset(Dataset):
             SA -> SA
             PI -> SA
             SP -> SA
+        :param limit_sagittal_slices_to_hemisphere: Due to the symmetry of the brain, the model
+            won't be able to differentiate sagittal slices from each hemisphere. Use this to limit
+            sampling to the LEFT hemisphere
         """
         super().__init__()
         self._dataset_meta = dataset_meta
@@ -325,6 +331,7 @@ class SliceDataset(Dataset):
         self._crop_warp_to_bounding_box = crop_warp_to_bounding_box
         self._patch_size = patch_size
         self._mode = mode
+        self._limit_sagittal_slices_to_hemisphere = limit_sagittal_slices_to_hemisphere
 
         if normalize_orientation_map is not None:
             for axis, orientation in normalize_orientation_map.items():
@@ -369,12 +376,45 @@ class SliceDataset(Dataset):
         return warps
 
     def _get_slice_from_idx(self, idx: int, orientation: SliceOrientation) -> tuple[int, int]:
-        num_slices = [x.registered_shape[self._get_slice_axis(axes=x.axes, orientation=orientation).dimension] for x in
-                      self._dataset_meta]
+        num_slices = self._get_num_slices_in_axis(
+            orientation=orientation
+        )
         num_slices_cumsum = np.cumsum([0] + num_slices)
         dataset_idx = int(np.searchsorted(num_slices_cumsum[1:], idx, side='right'))
         slice_idx = int(idx - num_slices_cumsum[dataset_idx])
+
+        # For sagittal slices, adjust the slice index to sample from left hemisphere
+        if orientation == SliceOrientation.SAGITTAL and self._limit_sagittal_slices_to_hemisphere:
+                subject = self._dataset_meta[dataset_idx]
+                sagittal_axis = self._get_slice_axis(
+                    axes=subject.axes,
+                    orientation=orientation
+                )
+                # invert to get slice in left hemisphere
+                if sagittal_axis.direction == AcquisitionDirection.RIGHT_TO_LEFT:
+                    slice_idx = slice_idx + subject.sagittal_midline
+
         return dataset_idx, slice_idx
+
+    def _get_num_slices_in_axis(self, orientation: SliceOrientation) -> list[int]:
+        num_slices = []
+        if orientation == SliceOrientation.SAGITTAL and self._limit_sagittal_slices_to_hemisphere:
+            for subject in self._dataset_meta:
+                sagittal_axis = self._get_slice_axis(
+                    axes=subject.axes,
+                    orientation=orientation
+                )
+                sagittal_dim = subject.registered_shape[sagittal_axis.dimension]
+                # always sample from the left hemisphere due to brain symmetry,
+                # the model would have no way to know which hemisphere a slice was sampled from
+                if sagittal_axis.direction == AcquisitionDirection.LEFT_TO_RIGHT:
+                    num_slices.append(subject.sagittal_midline)
+                else:
+                    num_slices.append(sagittal_dim - subject.sagittal_midline)
+        else:
+            num_slices = [x.registered_shape[self._get_slice_axis(axes=x.axes, orientation=orientation).dimension] for x in
+                      self._dataset_meta]
+        return num_slices
 
     def _get_slice_axis(self, axes: list[AcquisitionAxis], orientation: SliceOrientation) -> AcquisitionAxis:
         if orientation == SliceOrientation.SAGITTAL:
@@ -472,8 +512,10 @@ class SliceDataset(Dataset):
     def __len__(self):
         num_slices = 0
         for orientation in self._orientation:
-            num_slices += sum([x.registered_shape[self._get_slice_axis(axes=x.axes, orientation=orientation).dimension] for x in
-                          self._dataset_meta])
+            num_slices_in_axis = self._get_num_slices_in_axis(
+                orientation=orientation
+            )
+            num_slices += sum(num_slices_in_axis)
         return num_slices
 
     def _get_random_patch(self, slice_2d: tensorstore.TensorStore):
