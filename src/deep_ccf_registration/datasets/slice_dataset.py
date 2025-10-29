@@ -137,6 +137,7 @@ def _prepare_grid_sample(warp: np.ndarray,
 
     return warp, normalized_affine_transformed_voxels
 
+
 def _get_cropped_region_from_warp(warp: tensorstore.TensorStore | np.ndarray,
                                   affine_transformed_voxels: np.ndarray,
                                   warp_interpolation_padding: int = 5) -> np.ndarray:
@@ -153,26 +154,41 @@ def _get_cropped_region_from_warp(warp: tensorstore.TensorStore | np.ndarray,
     :param warp_interpolation_padding: padding around the min/max coords to crop for interpolation
     :return: cropped warp
     """
-    min_coords = np.floor(affine_transformed_voxels.min(axis=0)).astype(int) - warp_interpolation_padding
-    max_coords = np.ceil(affine_transformed_voxels.max(axis=0)).astype(int) + warp_interpolation_padding
+    warp_shape = np.array(warp.shape[:-1])
+
+    min_coords = np.floor(affine_transformed_voxels.min(axis=0)).astype(
+        int) - warp_interpolation_padding
+    max_coords = np.ceil(affine_transformed_voxels.max(axis=0)).astype(
+        int) + warp_interpolation_padding
+
+    orig_min, orig_max = min_coords.copy(), max_coords.copy()
 
     # Clamp to warp dimensions
     min_coords = np.maximum(min_coords, 0)
-    max_coords = np.minimum(max_coords, warp.shape[:-1])
+    max_coords = np.minimum(max_coords, warp_shape)
+
+    if np.any(max_coords <= min_coords):
+        raise ValueError(
+            f"Points are completely outside template bounds after affine transform.\n"
+            f"Original bbox: {orig_min} to {orig_max}\n"
+            f"After clamping: {min_coords} to {max_coords}\n"
+            f"Warp shape: {warp_shape}\n"
+            f"This indicates a registration or coordinate system error."
+        )
 
     # Crop the warp
     if isinstance(warp, tensorstore.TensorStore):
         cropped_warp = warp[
-            min_coords[0]:max_coords[0],
-            min_coords[1]:max_coords[1],
-            min_coords[2]:max_coords[2]
-        ].read().result()
+                       min_coords[0]:max_coords[0],
+                       min_coords[1]:max_coords[1],
+                       min_coords[2]:max_coords[2]
+                       ].read().result()
     else:
         cropped_warp = warp[
-            min_coords[0]:max_coords[0],
-            min_coords[1]:max_coords[1],
-            min_coords[2]:max_coords[2]
-        ]
+                       min_coords[0]:max_coords[0],
+                       min_coords[1]:max_coords[1],
+                       min_coords[2]:max_coords[2]
+                       ]
 
     # Adjust voxel coordinates relative to cropped region
     affine_transformed_voxels -= min_coords
@@ -297,7 +313,7 @@ class SliceDataset(Dataset):
                  patch_size: Optional[tuple[int, int]] = (256, 256),
                  mode: TrainMode = TrainMode.TRAIN,
                  normalize_orientation_map: Optional[dict[SliceOrientation: list[AcquisitionDirection]]] = None,
-                 limit_sagittal_slices_to_hemisphere: bool = True,
+                 limit_sagittal_slices_to_hemisphere: bool = False,
                  ):
         """
 
@@ -341,7 +357,7 @@ class SliceDataset(Dataset):
 
         self._ls_template = ls_template
 
-        if mode == 'inference':
+        if mode == TrainMode.TEST:
             # TODO Pre-compute all (volume_idx, slice_idx, patch_x, patch_y) combinations
             # self._patch_index = self._build_patch_index()
             pass
