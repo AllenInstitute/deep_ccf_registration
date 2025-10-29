@@ -51,7 +51,7 @@ def _get_subject_id_registration_channel_map(smartspim_raw_dirs: list[Path]) -> 
               help='Directory to aind-open-data')
 @click.option('--output-path', type=click.Path(file_okay=True, writable=True, path_type=Path),
               help='Path to write json')
-@click.option('--input-space-midline-path', type=click.Path(file_okay=True, writable=True, path_type=Path),
+@click.option('--input-space-midline-path', type=click.Path(file_okay=True, readable=True, path_type=Path),
               help='Path to input space midline found via `get_input_space_midline.py`',
               default='/data/input_space_midline/midline.json')
 def main(
