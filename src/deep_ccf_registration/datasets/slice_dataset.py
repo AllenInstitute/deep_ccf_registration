@@ -43,8 +43,9 @@ class SubjectMetadata(BaseModel):
     ls_to_template_affine_matrix_path: Path
     ls_to_template_inverse_warp_path: str | Path
     ls_to_template_inverse_warp_path_original: Optional[Path] = None
-    #registration_date: datetime.datetime
-
+    # The index that splits the 2 hemispheres in voxels the same dim as the sagittal axis in the registered volume
+    # obtained via `get_input_space_midline.py`
+    sagittal_midline: int
 
 def _create_coordinate_dataframe(
         patch_height: int,

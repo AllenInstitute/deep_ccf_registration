@@ -51,9 +51,13 @@ def _get_subject_id_registration_channel_map(smartspim_raw_dirs: list[Path]) -> 
               help='Directory to aind-open-data')
 @click.option('--output-path', type=click.Path(file_okay=True, writable=True, path_type=Path),
               help='Path to write json')
+@click.option('--input-space-midline-path', type=click.Path(file_okay=True, writable=True, path_type=Path),
+              help='Path to input space midline found via `get_input_space_midline.py`',
+              default='/data/input_space_midline/midline.json')
 def main(
-        output_path: Path,
-        aind_open_data_dir: Path
+    output_path: Path,
+    aind_open_data_dir: Path,
+    input_space_midline_path: Path
 ):
     smartspim_dirs = list(aind_open_data_dir.glob(pattern='SmartSPIM_*'))
     smartspim_stitched_dirs = [x for x in smartspim_dirs if 'stitched' in x.name]
@@ -165,6 +169,12 @@ def main(
                 logger.warning(f'{ls_to_template_inverse_warp_path} does not exist')
                 continue
 
+            with open(input_space_midline_path) as f:
+                midlines = json.load(f)
+            subject_midline = [x for x in midlines if x['subject_id'] == subject_id][0]['midline_mean']
+            # convert to downsampled index
+            subject_midline = int(subject_midline / 2 ** alignment_downsample_factor)
+
             experiment_meta = SubjectMetadata(
                 subject_id=subject_id,
                 stitched_volume_path=stitched_volume_path,
@@ -173,7 +183,8 @@ def main(
                 registration_downsample=alignment_downsample_factor,
                 ls_to_template_affine_matrix_path=ls_to_template_affine_matrix_path,
                 ls_to_template_inverse_warp_path=ls_to_template_inverse_warp_path,
-                ls_to_template_inverse_warp_path_original=ls_to_template_inverse_warp_niftii
+                ls_to_template_inverse_warp_path_original=ls_to_template_inverse_warp_niftii,
+                sagittal_midline=subject_midline
             )
             experiments.append(experiment_meta)
 
