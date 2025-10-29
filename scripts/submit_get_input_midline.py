@@ -4,6 +4,7 @@ import time
 from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path
+from typing import Optional
 
 import codeocean.error
 import numpy as np
@@ -37,24 +38,30 @@ def catch_code_ocean_error():
             message = err.response.text
         raise CodeOceanError(message)
 
-def submit_jobs(subjects: list[dict], job_limit: int = 100):
+def submit_jobs(
+    subjects: list[dict],
+    exclude_subjects: Optional[list[dict]] = None,
+    job_limit: int = 100,
+    jobs: Optional[list] = None
+):
     co_client = CodeOcean(domain="https://codeocean.allenneuraldynamics.org", token=co_token)
 
     errors = []
-    jobs = []
+    jobs = [] if jobs is None else jobs
     job_count = 0
+
+    if exclude_subjects is None:
+        exclude_subjects = []
+
+    subjects = [x for x in subjects if x['subject_id'] not in exclude_subjects]
 
     for subject in tqdm(subjects):
         run_params = RunParams(
-            capsule_id='1c2ed940-5f63-450f-83e9-5500308c2bf6',
+            capsule_id='7945f892-523c-4c94-b0f6-b91cfd3d660a',
             named_parameters=[
                 NamedRunParam(
                     param_name='subject-id',
                     value=subject['subject_id']
-                ),
-                NamedRunParam(
-                    param_name='dataset-meta-path',
-                    value='/data/smartspim_dataset/subject_metadata.json'
                 )
             ]
         )
@@ -79,8 +86,8 @@ def submit_jobs(subjects: list[dict], job_limit: int = 100):
 
         job_count += 1
 
-        if job_count == job_limit or len(jobs) == len(subjects):
-            with open('/tmp/qc_jobs.json', 'w') as f:
+        if job_count == job_limit or job_count == len(subjects):
+            with open('/tmp/input_space_midline_jobs.json', 'w') as f:
                 f.write(json.dumps(jobs, indent=2))
 
             logger.info('Job count reached. Waiting until all running jobs finish')
@@ -102,7 +109,7 @@ def get_job_statuses() -> dict[str, Computation]:
     co_client = CodeOcean(domain="https://codeocean.allenneuraldynamics.org",
                           token=co_token)
 
-    with open('/tmp/transforms_to_ome_zarr_jobs.json') as f:
+    with open('/Users/adam.amster/smartspim-registration/input_space_midline_jobs.json') as f:
         jobs = json.load(f)
 
     computation_responses: dict[str, Computation] = {}
@@ -114,40 +121,39 @@ def get_job_statuses() -> dict[str, Computation]:
 
     return computation_responses
 
-def get_metrics(qc_jobs):
+def get_output(jobs):
     co_client = CodeOcean(domain="https://codeocean.allenneuraldynamics.org",
                           token=co_token)
 
     computations = []
-    for qc_job in tqdm(qc_jobs, desc='getting computation ids'):
+    for job in tqdm(jobs, desc='getting computations'):
         computation_response = co_client.computations.get_computation(
-            computation_id=qc_job['computation_id']
+            computation_id=job['computation_id']
         )
         computations.append(computation_response)
 
     subject_id_computation_map = {x.name.split('_')[0]: x.id for x in computations}
 
-    metrics = []
+    outputs = []
     errors = []
     for subject_id, computation_id in tqdm(subject_id_computation_map.items()):
         try:
             download_url = co_client.computations.get_result_file_download_url(
                 computation_id=computation_id,
-                path='dice_metric.json'
+                path='midline.json'
             )
             response = requests.get(download_url.url)
             response.raise_for_status()  # Check for errors
 
 
-            metric = response.json()
-            metrics.append({'subject_id': subject_id, **metric})
+            output = response.json()
+            outputs.append({'subject_id': subject_id, **output})
         except codeocean.error.Error:
             errors.append(subject_id)
             continue
 
-    with open('/tmp/metric.json', 'w') as f:
-        f.write(json.dumps(metrics, indent=2))
-
+    with open('/tmp/midline.json', 'w') as f:
+        f.write(json.dumps(outputs, indent=2))
 
     print('errors')
     print(errors)
@@ -244,46 +250,56 @@ if __name__ == '__main__':
 
     with open('/Users/adam.amster/Downloads/subject_metadata.json') as f:
         subjects = json.load(f)
-    #jobs = submit_jobs(subjects=subjects)
 
-    #get_job_statuses()
 
+    # with open('/tmp/input_space_midline_jobs.json') as f:
+    #     exclude_subjects = json.load(f)
+
+    # failed_subjects = ['776874', '761405', '730695', '730868', '718453', '796385', '752311', '716868', '790763', '781166', '792096', '765861', '758018', '707541']
+    # failed_subject = [x for x in subjects if x['subject_id'] in failed_subjects]
+    # with open('/Users/adam.amster/smartspim-registration/input_space_midline_jobs.json') as f:
+    #     already_submitted = json.load(f)
+    # jobs = submit_jobs(subjects=failed_subject, jobs=already_submitted)
+
+    # computations = get_job_statuses()
+    # failed_computations = [x for x, c in computations.items() if c.end_status != ComputationEndStatus.Succeeded or c.exit_code != 0 or c.state != ComputationState.Completed]
+    # print(failed_computations)
     # jobs = rerun_failed_jobs(subject_ids=['774923'])
     #
     # logger.info('writing jobs meta to /tmp/qc_jobs.json')
     # with open('/tmp/qc_jobs.json', 'w') as f:
     #     f.write(json.dumps(jobs, indent=2))
 
-    with open('/tmp/qc_jobs.json') as f:
-        qc_jobs = json.load(f)
+    # with open('/tmp/qc_jobs.json') as f:
+    #     qc_jobs = json.load(f)
+    #
+    # with open('/tmp/metric.json') as f:
+    #     metrics = json.load(f)
+    #
+    # rng = np.random.default_rng(1234)
+    # subjects = [x['subject_id'] for x in metrics if x['dice_metric'] < 0.9]
+    # idxs = np.arange(len(subjects))
+    # np.random.shuffle(idxs)
+    # idxs = idxs[:100]
+    #
+    # subjects = [subjects[i] for i in idxs]
+    # qc_jobs = [x for x in qc_jobs if x['subject_id'] in subjects]
 
-    with open('/tmp/metric.json') as f:
-        metrics = json.load(f)
+    with open('/Users/adam.amster/smartspim-registration/input_space_midline_jobs.json') as f:
+        jobs = json.load(f)
+    get_output(jobs=jobs)
+    #create_pdf(qc_jobs=qc_jobs, out_path=Path('/tmp/smartspim_qc_bad.pdf'))
 
-    rng = np.random.default_rng(1234)
-    subjects = [x['subject_id'] for x in metrics if x['dice_metric'] < 0.9]
-    idxs = np.arange(len(subjects))
-    np.random.shuffle(idxs)
-    idxs = idxs[:100]
-
-    subjects = [subjects[i] for i in idxs]
-    qc_jobs = [x for x in qc_jobs if x['subject_id'] in subjects]
-
-    #get_metrics(qc_jobs=qc_jobs)
-    create_pdf(qc_jobs=qc_jobs, out_path=Path('/tmp/smartspim_qc_bad.pdf'))
-
-
-
-    metrics = pd.DataFrame(metrics)
-    metrics['dice_metric'].plot.hist()
-    plt.show()
-
-    fig, ax = plt.subplots()
-    sorted_dice = np.sort(metrics['dice_metric'])
-    cdf = np.arange(1, len(sorted_dice) + 1) / len(sorted_dice)
-    ax.plot(sorted_dice, cdf)
-    ax.set_xlabel('Dice Score')
-    ax.set_ylabel('Cumulative Probability')
-    ax.grid(True)
-
-    plt.show()
+    # metrics = pd.DataFrame(metrics)
+    # metrics['dice_metric'].plot.hist()
+    # plt.show()
+    #
+    # fig, ax = plt.subplots()
+    # sorted_dice = np.sort(metrics['dice_metric'])
+    # cdf = np.arange(1, len(sorted_dice) + 1) / len(sorted_dice)
+    # ax.plot(sorted_dice, cdf)
+    # ax.set_xlabel('Dice Score')
+    # ax.set_ylabel('Cumulative Probability')
+    # ax.grid(True)
+    #
+    # plt.show()
