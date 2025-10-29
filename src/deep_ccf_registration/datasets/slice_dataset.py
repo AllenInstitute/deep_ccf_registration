@@ -390,8 +390,8 @@ class SliceDataset(Dataset):
                     axes=subject.axes,
                     orientation=orientation
                 )
-                # invert to get slice in left hemisphere
                 if sagittal_axis.direction == AcquisitionDirection.RIGHT_TO_LEFT:
+                    # invert to get slice in left hemisphere
                     slice_idx = slice_idx + subject.sagittal_midline
 
         return dataset_idx, slice_idx
