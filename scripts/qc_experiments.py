@@ -72,7 +72,8 @@ def main(subject_id: str,
         dataset_meta=[subject_meta],
         orientation=SliceOrientation.SAGITTAL,
         mode=TrainMode.TEST,
-        patch_size=None
+        patch_size=None,
+        limit_sagittal_slices_to_hemisphere=False
     )
 
     logger.info('forward transform')

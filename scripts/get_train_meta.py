@@ -57,7 +57,7 @@ def _get_subject_id_registration_channel_map(smartspim_raw_dirs: list[Path]) -> 
 @click.option('--dice-metric-path', type=click.Path(file_okay=True, readable=True, path_type=Path),
               help='Path to dice metric per subject. Obtained via `qc_experiments.py`',
               default='/data/metric/metric.json')
-@click.option('--dice-metric-threshold', type=float, default=1.0,
+@click.option('--dice-metric-threshold', type=float, default=0.0,
               help='During QC of the smartSPIM data, many subjects failed registration outright'
                    'or had questionable registration. Use this threshold to exclude subjects which had a dice coefficient below this threshold.'
                    'A dice coefficient of 0.9 was found to be a decent threshold though it is a bit too agressive and excludes some false positives')
@@ -66,7 +66,7 @@ def main(
     aind_open_data_dir: Path,
     input_space_midline_path: Path,
     dice_metric_path: Path,
-    dice_metric_threshold: float = 1.0
+    dice_metric_threshold: float = 0.0
 ):
     smartspim_dirs = list(aind_open_data_dir.glob(pattern='SmartSPIM_*'))
     smartspim_stitched_dirs = [x for x in smartspim_dirs if 'stitched' in x.name]
@@ -183,11 +183,19 @@ def main(
 
             with open(input_space_midline_path) as f:
                 midlines = json.load(f)
-            subject_midline = [x for x in midlines if x['subject_id'] == subject_id][0]['midline_mean']
+            subject_midline = [x for x in midlines if x['subject_id'] == subject_id]
+            if len(subject_midline) != 1:
+                logger.warning(f'expected 1 value for {subject_id} subject_midline but found {len(subject_midline)}')
+                continue
+            subject_midline = subject_midline[0]['midline_mean']
             # convert to downsampled index
             subject_midline = int(subject_midline / 2 ** alignment_downsample_factor)
 
-            subject_dice_metric = [x for x in dice_metric if x['subject_id'] == subject_id][0]['dice_metric']
+            subject_dice_metric = [x for x in dice_metric if x['subject_id'] == subject_id]
+            if len(subject_dice_metric) != 1:
+                logger.warning(f'expected 1 value for {subject_id} dice metric but found {len(subject_dice_metric)}')
+                continue
+            subject_dice_metric = subject_dice_metric[0]['dice_metric']
             if subject_dice_metric < dice_metric_threshold:
                 logger.warning(f'Excluding {subject_id} since dice metric {subject_dice_metric} < threshold {dice_metric_threshold}')
                 continue

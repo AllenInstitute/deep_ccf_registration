@@ -102,7 +102,7 @@ def get_job_statuses() -> dict[str, Computation]:
     co_client = CodeOcean(domain="https://codeocean.allenneuraldynamics.org",
                           token=co_token)
 
-    with open('/tmp/transforms_to_ome_zarr_jobs.json') as f:
+    with open('/tmp/qc_jobs.json') as f:
         jobs = json.load(f)
 
     computation_responses: dict[str, Computation] = {}
@@ -244,7 +244,8 @@ if __name__ == '__main__':
 
     with open('/Users/adam.amster/Downloads/subject_metadata.json') as f:
         subjects = json.load(f)
-    #jobs = submit_jobs(subjects=subjects)
+    subjects = [x for x in subjects if x['subject_id'] in {'750105', '750106', '750108'}]
+    jobs = submit_jobs(subjects=subjects)
 
     #get_job_statuses()
 
@@ -254,36 +255,36 @@ if __name__ == '__main__':
     # with open('/tmp/qc_jobs.json', 'w') as f:
     #     f.write(json.dumps(jobs, indent=2))
 
-    with open('/tmp/qc_jobs.json') as f:
-        qc_jobs = json.load(f)
+    # with open('/tmp/qc_jobs.json') as f:
+    #     qc_jobs = json.load(f)
+    #
+    # with open('/tmp/metric.json') as f:
+    #     metrics = json.load(f)
 
-    with open('/tmp/metric.json') as f:
-        metrics = json.load(f)
-
-    rng = np.random.default_rng(1234)
-    subjects = [x['subject_id'] for x in metrics if x['dice_metric'] < 0.9]
-    idxs = np.arange(len(subjects))
-    np.random.shuffle(idxs)
-    idxs = idxs[:100]
-
-    subjects = [subjects[i] for i in idxs]
-    qc_jobs = [x for x in qc_jobs if x['subject_id'] in subjects]
+    # rng = np.random.default_rng(1234)
+    # subjects = [x['subject_id'] for x in metrics if x['dice_metric'] < 0.9]
+    # idxs = np.arange(len(subjects))
+    # np.random.shuffle(idxs)
+    # idxs = idxs[:100]
+    #
+    # subjects = [subjects[i] for i in idxs]
+    #qc_jobs = [x for x in qc_jobs if x['subject_id'] in subjects]
 
     #get_metrics(qc_jobs=qc_jobs)
-    create_pdf(qc_jobs=qc_jobs, out_path=Path('/tmp/smartspim_qc_bad.pdf'))
-
-
-
-    metrics = pd.DataFrame(metrics)
-    metrics['dice_metric'].plot.hist()
-    plt.show()
-
-    fig, ax = plt.subplots()
-    sorted_dice = np.sort(metrics['dice_metric'])
-    cdf = np.arange(1, len(sorted_dice) + 1) / len(sorted_dice)
-    ax.plot(sorted_dice, cdf)
-    ax.set_xlabel('Dice Score')
-    ax.set_ylabel('Cumulative Probability')
-    ax.grid(True)
-
-    plt.show()
+    # create_pdf(qc_jobs=qc_jobs, out_path=Path('/tmp/smartspim_qc_bad.pdf'))
+    #
+    #
+    #
+    # metrics = pd.DataFrame(metrics)
+    # metrics['dice_metric'].plot.hist()
+    # plt.show()
+    #
+    # fig, ax = plt.subplots()
+    # sorted_dice = np.sort(metrics['dice_metric'])
+    # cdf = np.arange(1, len(sorted_dice) + 1) / len(sorted_dice)
+    # ax.plot(sorted_dice, cdf)
+    # ax.set_xlabel('Dice Score')
+    # ax.set_ylabel('Cumulative Probability')
+    # ax.grid(True)
+    #
+    # plt.show()
