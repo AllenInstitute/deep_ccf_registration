@@ -74,16 +74,29 @@ def _create_coordinate_dataframe(
         axes: list[AcquisitionAxis]
 ) -> pd.DataFrame:
     """
-    Create coordinate dataframe for a patch at specific position
+    Create coordinate dataframe for a patch at specific position.
 
-    :param patch_height:
-    :param patch_width:
-    :param start_x:
-    :param start_y:
-    :param fixed_index_value:
-    :param slice_axis:
-    :param axes:
-    :return:
+    Parameters
+    ----------
+    patch_height : int
+        Height of the patch in pixels.
+    patch_width : int
+        Width of the patch in pixels.
+    start_x : int
+        Starting x coordinate of the patch.
+    start_y : int
+        Starting y coordinate of the patch.
+    fixed_index_value : int
+        Index value for the fixed slice dimension.
+    slice_axis : AcquisitionAxis
+        Axis along which slicing occurs.
+    axes : list[AcquisitionAxis]
+        List of all acquisition axes.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame containing coordinate points for the patch.
     """
     # Create meshgrid with actual coordinates
     axis1_coords, axis2_coords = np.meshgrid(
@@ -117,10 +130,22 @@ def _prepare_grid_sample(warp: np.ndarray,
                          affine_transformed_voxels: np.ndarray
                          ) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    This takes the affine_transformed_voxels and warp and converts to a format suitable
-    for grid_sample
+    Convert affine_transformed_voxels and warp to format suitable for grid_sample.
 
-    :return:
+    Takes the affine_transformed_voxels and warp and converts them to a format
+    suitable for PyTorch's grid_sample function.
+
+    Parameters
+    ----------
+    warp : np.ndarray
+        Displacement field array.
+    affine_transformed_voxels : np.ndarray
+        Voxel coordinates after affine transformation.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        Tuple of (warp_tensor, normalized_voxel_coordinates) ready for grid_sample.
     """
     warp_shape = warp.shape
 
@@ -157,17 +182,30 @@ def _get_cropped_region_from_warp(warp: tensorstore.TensorStore | np.ndarray,
                                   affine_transformed_voxels: np.ndarray,
                                   warp_interpolation_padding: int = 5) -> np.ndarray:
     """
-    This crops the warp to the region bounded by the min/max coordinates after applying the
-    affine transformation. This is so that we don't have to load the entire warp, but only the
-    region that we need.
+    Crop warp to region bounded by min/max coordinates after affine transformation.
 
-    This also modifies affine_transformed_voxels inplace to set offset to 0 so that it can index into
-    the cropped warp
+    This function crops the warp to only the region needed, avoiding loading the
+    entire warp. It also modifies affine_transformed_voxels in-place to set offset
+    to 0 so that it can index into the cropped warp.
 
-    :param warp:
-    :param affine_transformed_voxels: voxels after applying inverse affine to input points
-    :param warp_interpolation_padding: padding around the min/max coords to crop for interpolation
-    :return: cropped warp
+    Parameters
+    ----------
+    warp : tensorstore.TensorStore or np.ndarray
+        Full displacement field.
+    affine_transformed_voxels : np.ndarray
+        Voxels after applying inverse affine to input points. Modified in-place.
+    warp_interpolation_padding : int, default=5
+        Padding around the min/max coords to crop for interpolation.
+
+    Returns
+    -------
+    np.ndarray
+        Cropped displacement field.
+
+    Raises
+    ------
+    ValueError
+        If points are completely outside template bounds after affine transform.
     """
     warp_shape = np.array(warp.shape[:-1])
 
@@ -219,6 +257,32 @@ def _apply_transforms_to_points(
         warp_interpolation_padding: int = 5,
         crop_warp_to_bounding_box: bool = True
 ):
+    """
+    Apply affine and non-linear transformations to points in input space.
+
+    Transforms points from input space to template space by applying inverse affine
+    transformation followed by displacement field warping.
+
+    Parameters
+    ----------
+    points : np.ndarray
+        Points in input space to be transformed.
+    experiment_meta : SubjectMetadata
+        Subject metadata containing transformation parameters.
+    warp : tensorstore.TensorStore or np.ndarray
+        Displacement field for non-linear transformation.
+    template_parameters : AntsImageParameters
+        Template image parameters.
+    warp_interpolation_padding : int, default=5
+        Padding for warp interpolation.
+    crop_warp_to_bounding_box : bool, default=True
+        Whether to crop warp to bounding box of transformed points.
+
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame with transformed points in template space with columns ["ML", "AP", "DV"].
+    """
     # apply inverse affine to points in input space
     # this returns points in physical space
     affine_transformed_points = apply_transforms_to_points(
@@ -282,6 +346,32 @@ def _transform_points_to_template_ants_space(
     template_resolution: int = 25,
     registration_downsample: float = 3.0,
 ) -> np.ndarray:
+    """
+    Transform points from input volume space to template ANTs space.
+
+    Performs orientation alignment, scaling, and coordinate system conversion
+    to map points from acquisition space to template space.
+
+    Parameters
+    ----------
+    acquisition_axes : list[AcquisitionAxis]
+        Acquisition axes defining the input volume orientation.
+    ls_template_info : AntsImageParameters
+        Template image parameters.
+    points : pd.DataFrame
+        Points in input volume coordinates.
+    input_volume_shape : tuple[int, int, int]
+        Shape of the input volume.
+    template_resolution : int, default=25
+        Resolution of the template in micrometers.
+    registration_downsample : float, default=3.0
+        Downsample factor used during registration.
+
+    Returns
+    -------
+    np.ndarray
+        Points in ANTs template space.
+    """
     acquisition_axes = sorted(acquisition_axes, key=lambda x: x.dimension)
 
     # order columns to align with imaging
@@ -318,7 +408,10 @@ class TrainMode(Enum):
 
 class SliceDataset(Dataset):
     """
-    Loads a slice and the mapped points in template space
+    Dataset for loading slices and their mapped points in template space.
+
+    This dataset loads 2D slices from 3D volumes along with their corresponding
+    coordinates in template space after applying registration transformations.
     """
     def __init__(self, dataset_meta: list[SubjectMetadata], ls_template: ants.ANTsImage,
                  orientation: Optional[SliceOrientation] = None,
@@ -331,24 +424,39 @@ class SliceDataset(Dataset):
                  limit_sagittal_slices_to_hemisphere: bool = False,
                  ):
         """
+        Initialize SliceDataset.
 
-        :param dataset_meta: `list[SubjectMetadata]`
-        :param ls_template: the smartSPIM light sheet template
-        :param orientation: what orientation to load a slice
-        :param registration_downsample_factor: downsample used during registration
-        :param tensorstore_aws_credentials_method: credentials lookup method for tensorstore. see ts docs
-        :param crop_warp_to_bounding_box: whether to load a cropped region of warp (faster) rather than full warp
-        :param patch_size: patch size
-        :param mode: `TrainMode``
-        :param normalize_orientation_map: Map between slice axis and desired normalized orientation
-            Example: {SliceOrientation.SAGITTAL: [AcquisitionDirection.Superior, AcquisitionDirection.Anterior]}. 3 different slices with orientations
-            SAL, RPI, SPR.
-            SA -> SA
-            PI -> SA
-            SP -> SA
-        :param limit_sagittal_slices_to_hemisphere: Due to the symmetry of the brain, the model
-            won't be able to differentiate sagittal slices from each hemisphere. Use this to limit
-            sampling to the LEFT hemisphere
+        Parameters
+        ----------
+        dataset_meta : list[SubjectMetadata]
+            List of subject metadata for all subjects in the dataset.
+        ls_template : ants.ANTsImage
+            The smartSPIM light sheet template image.
+        orientation : SliceOrientation, optional
+            What orientation to load slices. If None, loads all orientations
+            (SAGITTAL, CORONAL, HORIZONTAL).
+        registration_downsample_factor : int, default=3
+            Downsample factor used during registration.
+        tensorstore_aws_credentials_method : str, default="default"
+            Credentials lookup method for tensorstore. See tensorstore documentation.
+        crop_warp_to_bounding_box : bool, default=True
+            Whether to load a cropped region of warp (faster) rather than full warp.
+        patch_size : tuple[int, int], optional, default=(256, 256)
+            Patch size (height, width). If None, returns full slice.
+        mode : TrainMode, default=TrainMode.TRAIN
+            Dataset mode (TRAIN or TEST).
+        normalize_orientation_map : dict[SliceOrientation, list[AcquisitionDirection]], optional
+            Map between slice axis and desired normalized orientation.
+            Example: {SliceOrientation.SAGITTAL: [AcquisitionDirection.Superior,
+            AcquisitionDirection.Anterior]}. For 3 different slices with orientations
+            SAL, RPI, SPR:
+                SA -> SA
+                PI -> SA
+                SP -> SA
+        limit_sagittal_slices_to_hemisphere : bool, default=False
+            Due to the symmetry of the brain, the model won't be able to differentiate
+            sagittal slices from each hemisphere. Use this to limit sampling to the
+            LEFT hemisphere.
         """
         super().__init__()
         self._dataset_meta = dataset_meta
@@ -376,7 +484,19 @@ class SliceDataset(Dataset):
             self._patch_index = self._build_patch_index()
 
     def _get_patch_positions(self, slice_shape: tuple[int, int]):
-        """Get all patch positions to tile the entire slice"""
+        """
+        Get all patch positions to tile the entire slice.
+
+        Parameters
+        ----------
+        slice_shape : tuple[int, int]
+            Shape of the slice (height, width).
+
+        Returns
+        -------
+        list[tuple[int, int]]
+            List of (x, y) positions for patch extraction.
+        """
         if self._patch_size is None:
             # Return single patch covering whole slice
             return [(0, 0)]
@@ -400,6 +520,19 @@ class SliceDataset(Dataset):
         return positions
 
     def _load_warps(self, tensorstore_aws_credentials_method: str = "default") -> list[tensorstore.TensorStore]:
+        """
+        Load displacement fields for all subjects in the dataset.
+
+        Parameters
+        ----------
+        tensorstore_aws_credentials_method : str, default="default"
+            Credentials lookup method for tensorstore.
+
+        Returns
+        -------
+        list[tensorstore.TensorStore]
+            List of displacement field arrays/tensorstores for each subject.
+        """
         warps = []
         for experiment_meta in self._dataset_meta:
             if (isinstance(experiment_meta.ls_to_template_inverse_warp_path, Path) and
@@ -421,6 +554,21 @@ class SliceDataset(Dataset):
         return warps
 
     def _get_slice_from_idx(self, idx: int, orientation: SliceOrientation) -> tuple[int, int]:
+        """
+        Convert global slice index to dataset and slice indices.
+
+        Parameters
+        ----------
+        idx : int
+            Global slice index across all subjects.
+        orientation : SliceOrientation
+            Slice orientation.
+
+        Returns
+        -------
+        tuple[int, int]
+            Tuple of (dataset_idx, slice_idx) identifying the specific slice.
+        """
         num_slices = self._get_num_slices_in_axis(
             orientation=orientation
         )
@@ -445,9 +593,17 @@ class SliceDataset(Dataset):
         """
         Get the range of slice indices for a given subject and orientation.
 
-        :param subject: Subject metadata
-        :param orientation: Slice orientation
-        :return: Range of valid slice indices
+        Parameters
+        ----------
+        subject : SubjectMetadata
+            Subject metadata.
+        orientation : SliceOrientation
+            Slice orientation.
+
+        Returns
+        -------
+        range
+            Range of valid slice indices.
         """
         slice_axis = self._get_slice_axis(axes=subject.axes, orientation=orientation)
 
@@ -462,10 +618,44 @@ class SliceDataset(Dataset):
             return range(subject.registered_shape[slice_axis.dimension])
 
     def _get_num_slices_in_axis(self, orientation: SliceOrientation) -> list[int]:
-        """Get number of slices per subject for given orientation"""
+        """
+        Get number of slices per subject for given orientation.
+
+        Parameters
+        ----------
+        orientation : SliceOrientation
+            Slice orientation.
+
+        Returns
+        -------
+        list[int]
+            List of number of slices for each subject.
+        """
         return [len(self._get_slice_range(subject, orientation)) for subject in self._dataset_meta]
 
     def _get_slice_axis(self, axes: list[AcquisitionAxis], orientation: SliceOrientation) -> AcquisitionAxis:
+        """
+        Get the acquisition axis corresponding to the slice orientation.
+
+        Parameters
+        ----------
+        axes : list[AcquisitionAxis]
+            List of acquisition axes.
+        orientation : SliceOrientation
+            Desired slice orientation.
+
+        Returns
+        -------
+        AcquisitionAxis
+            The axis along which slicing occurs.
+
+        Raises
+        ------
+        ValueError
+            If no unique axis matches the orientation.
+        NotImplementedError
+            If orientation other than SAGITTAL is requested.
+        """
         if orientation == SliceOrientation.SAGITTAL:
             slice_axis = [i for i in range(len(axes)) if
                           axes[i].direction in (AcquisitionDirection.LEFT_TO_RIGHT,
@@ -478,7 +668,17 @@ class SliceDataset(Dataset):
         return slice_axis
 
     def _build_patch_index(self) -> list[Patch]:
-        """Build index of all patches for inference"""
+        """
+        Build index of all patches for inference.
+
+        Creates a comprehensive list of all patches across all slices and subjects
+        for deterministic iteration during test mode.
+
+        Returns
+        -------
+        list[Patch]
+            List of Patch objects specifying dataset_idx, slice_idx, x, y, and orientation.
+        """
         patch_index = []
 
         for orientation in self._orientation:
@@ -512,6 +712,27 @@ class SliceDataset(Dataset):
 
     @timed_func
     def __getitem__(self, idx):
+        """
+        Get a single item from the dataset.
+
+        Parameters
+        ----------
+        idx : int
+            Index of the item to retrieve.
+
+        Returns
+        -------
+        tuple
+            Tuple containing:
+            - input_slice : torch.Tensor
+                2D slice from the input volume.
+            - output_points : np.ndarray
+                3D array of shape (height, width, 3) containing template coordinates.
+            - dataset_idx : int
+                Index of the subject/dataset.
+            - slice_idx : int
+                Index of the slice within the subject.
+        """
         # Determine what to load
         if self._mode == TrainMode.TRAIN:
             orientation = random.choice(self._orientation)
@@ -595,6 +816,14 @@ class SliceDataset(Dataset):
         return input_slice, output_points, dataset_idx, slice_idx
 
     def __len__(self):
+        """
+        Get the total number of items in the dataset.
+
+        Returns
+        -------
+        int
+            Number of items (patches in TEST mode, slices in TRAIN mode).
+        """
         if self._mode == TrainMode.TEST:
             return len(self._patch_index)
         else:
@@ -608,7 +837,31 @@ class SliceDataset(Dataset):
 
     def _get_patch(self, slice_2d: tensorstore.TensorStore, patch_x: Optional[int] = None,
                    patch_y: Optional[int] = None):
-        """Extract patch from slice. If patch_x/patch_y are None, choose randomly."""
+        """
+        Extract patch from slice.
+
+        If patch_x/patch_y are None, choose randomly. Pads the patch to patch_size if needed.
+
+        Parameters
+        ----------
+        slice_2d : tensorstore.TensorStore
+            2D slice to extract patch from.
+        patch_x : int, optional
+            Starting x coordinate for patch. If None, chosen randomly.
+        patch_y : int, optional
+            Starting y coordinate for patch. If None, chosen randomly.
+
+        Returns
+        -------
+        tuple
+            Tuple containing:
+            - patch : torch.Tensor
+                Extracted and padded patch.
+            - patch_x : int
+                Actual starting x coordinate used.
+            - patch_y : int
+                Actual starting y coordinate used.
+        """
         h, w = slice_2d.shape
 
         if self._patch_size is None:
@@ -635,7 +888,19 @@ class SliceDataset(Dataset):
         return patch, patch_x, patch_y
 
     def _pad_patch_to_size(self, patch):
-        """Pad extracted patch to patch_size if needed"""
+        """
+        Pad extracted patch to patch_size if needed.
+
+        Parameters
+        ----------
+        patch : torch.Tensor
+            Patch tensor to pad.
+
+        Returns
+        -------
+        torch.Tensor
+            Padded patch with dimensions matching self._patch_size.
+        """
         h, w = patch.shape
         ph, pw = self._patch_size
 
@@ -661,15 +926,28 @@ class SliceDataset(Dataset):
         slice_axis: AcquisitionAxis,
     ) -> tuple[np.ndarray, np.ndarray]:
         """
-        Transforms slice and template points to have a uniform
-        orientation
+        Transform slice and template points to have a uniform orientation.
 
-        :param slice:
-        :param template_points:
-        :param acquisition_axes:
-        :param orientation:
-        :param slice_axis:
-        :return: transformed slice and template_points
+        Applies flipping and transposition to ensure consistent orientation across
+        different acquisition configurations.
+
+        Parameters
+        ----------
+        slice : np.ndarray
+            2D slice array.
+        template_points : np.ndarray
+            3D array of template coordinates with shape (height, width, 3).
+        acquisition_axes : list[AcquisitionAxis]
+            Acquisition axes defining the current orientation.
+        orientation : SliceOrientation
+            Slice orientation.
+        slice_axis : AcquisitionAxis
+            The axis along which slicing occurs.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray]
+            Tuple of (transformed_slice, transformed_template_points).
         """
         desired_orientation: list[AcquisitionDirection] = self._normalize_orientation_map[orientation]
         acquisition_axes = sorted(acquisition_axes, key=lambda x: x.dimension)
@@ -701,4 +979,3 @@ class SliceDataset(Dataset):
             template_points = np.permute_dims(template_points, axes=[1, 0, 2])
 
         return slice, template_points
-

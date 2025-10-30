@@ -12,6 +12,21 @@ from loguru import logger
 def _get_lr(
         iteration: int, warmup_iters: int, learning_rate: float, lr_decay_iters: int, min_lr
 ):
+    """
+    Calculate learning rate with linear warmup and cosine decay.
+
+    Parameters
+    ----------
+    iteration: Current training iteration
+    warmup_iters: Number of warmup iterations
+    learning_rate: Maximum learning rate after warmup
+    lr_decay_iters: Total iterations for learning rate decay
+    min_lr: Minimum learning rate after decay
+
+    Returns
+    -------
+    Learning rate for current iteration
+    """
     # 1) linear warmup for warmup_iters steps
     if iteration < warmup_iters:
         return learning_rate * iteration / warmup_iters
@@ -45,22 +60,27 @@ def train(
     """
     Train a model using MSE loss with early stopping.
 
-    Args:
-        train_dataloader: DataLoader for training data
-        val_dataloader: DataLoader for validation data
-        model: Neural network model to train
-        optimizer: Optimizer for training
-        n_epochs: Number of epochs to train
-        model_weights_out_dir: Directory to save model checkpoints
-        learning_rate: Initial learning rate
-        decay_learning_rate: Whether to decay learning rate during training
-        warmup_iters: Number of warmup iterations for learning rate
-        loss_eval_interval: Evaluate loss every N iterations
-        eval_iters: Number of iterations to average for evaluation
-        patience: Number of evaluations without improvement before stopping
-        min_delta: Minimum change in validation loss to be considered improvement
-        autocast_context: Context manager for mixed precision training
-        device: Device to train on
+    Parameters
+    ----------
+    train_dataloader: DataLoader for training data
+    val_dataloader: DataLoader for validation data
+    model: Neural network model to train
+    optimizer: Optimizer for training
+    n_epochs: Number of epochs to train
+    model_weights_out_dir: Directory to save model checkpoints
+    learning_rate: Initial learning rate
+    decay_learning_rate: Whether to decay learning rate during training
+    warmup_iters: Number of warmup iterations for learning rate
+    loss_eval_interval: Evaluate loss every N iterations
+    eval_iters: Number of iterations to average for evaluation
+    patience: Number of evaluations without improvement before stopping
+    min_delta: Minimum change in validation loss to be considered improvement
+    autocast_context: Context manager for mixed precision training
+    device: Device to train on
+
+    Returns
+    -------
+    Best validation loss achieved during training
     """
     os.makedirs(model_weights_out_dir, exist_ok=True)
 
@@ -201,7 +221,22 @@ def evaluate_loss(
         device: str,
         autocast_context: ContextManager = nullcontext(),
 ) -> float:
-    """Evaluate average loss over eval_iters batches."""
+    """
+    Evaluate average loss over eval_iters batches.
+
+    Parameters
+    ----------
+    model: Neural network model to evaluate
+    dataloader: DataLoader for evaluation data
+    criterion: Loss function
+    eval_iters: Number of batches to evaluate
+    device: Device to evaluate on
+    autocast_context: Context manager for mixed precision evaluation
+
+    Returns
+    -------
+    Average loss over evaluated batches
+    """
     model.eval()
     losses = []
 

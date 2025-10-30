@@ -4,7 +4,6 @@ from torch.utils.data import DataLoader
 from contextlib import nullcontext
 from loguru import logger
 import json
-from typing import Optional
 import ants
 import random
 
@@ -432,22 +431,21 @@ def main(
     logger.info(f"Training completed! Best validation loss: {best_val_loss:.6f}")
     logger.info("=" * 60)
 
-
 def split_train_val(
         subject_metadata: list[SubjectMetadata],
         train_val_split: float,
         seed: int,
 ) -> tuple[list[SubjectMetadata], list[SubjectMetadata]]:
     """
-    Split subject metadata into train and validation sets.
+    Parameters
+    ----------
+    subject_metadata: List of all subject metadata
+    train_val_split:  Fraction of data for training (ignored if subject ID files provided)
+    seed: Random seed for splitting
 
-    Args:
-        subject_metadata: List of all subject metadata
-        train_val_split: Fraction of data for training (ignored if subject ID files provided)
-        seed: Random seed for splitting
-
-    Returns:
-        Tuple of (train_metadata, val_metadata)
+    Return
+    --------
+    Tuple of (train_metadata, val_metadata)
     """
     # Use random split
     logger.info(
