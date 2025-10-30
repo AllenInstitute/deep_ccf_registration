@@ -1,5 +1,6 @@
 import json
 import random
+from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 from typing import Optional
@@ -48,6 +49,20 @@ class SubjectMetadata(BaseModel):
     # The index that splits the 2 hemispheres in voxels the same dim as the sagittal axis in the registered volume
     # obtained via `get_input_space_midline.py`
     sagittal_midline: Optional[int] = None
+
+
+@dataclass
+class Patch:
+    # subject index
+    dataset_idx: int
+    # slice index within subject
+    slice_idx: int
+    # patch start x
+    x: int
+    # patch start y
+    y: int
+    # patch orientation
+    orientation: SliceOrientation
 
 def _create_coordinate_dataframe(
         patch_height: int,
@@ -358,17 +373,31 @@ class SliceDataset(Dataset):
         self._ls_template = ls_template
 
         if mode == TrainMode.TEST:
-            # TODO Pre-compute all (volume_idx, slice_idx, patch_x, patch_y) combinations
-            # self._patch_index = self._build_patch_index()
-            pass
+            self._patch_index = self._build_patch_index()
 
-    def _build_patch_index(self):
-        """Build index of all patches for inference"""
-        raise NotImplementedError
-
-    def _get_patch_positions(self, slice_shape):
+    def _get_patch_positions(self, slice_shape: tuple[int, int]):
         """Get all patch positions to tile the entire slice"""
-        raise NotImplementedError
+        if self._patch_size is None:
+            # Return single patch covering whole slice
+            return [(0, 0)]
+
+        h, w = slice_shape
+        ph, pw = self._patch_size
+
+        positions = []
+
+        # Calculate number of patches needed (with overlap to cover edges)
+        for x in range(0, h, ph):
+            for y in range(0, w, pw):
+                # Adjust position if it would go past the edge
+                x_start = min(x, max(0, h - ph))
+                y_start = min(y, max(0, w - pw))
+
+                # Avoid duplicate patches at the edge
+                if not positions or (x_start, y_start) != positions[-1]:
+                    positions.append((x_start, y_start))
+
+        return positions
 
     def _load_warps(self, tensorstore_aws_credentials_method: str = "default") -> list[tensorstore.TensorStore]:
         warps = []
@@ -412,25 +441,29 @@ class SliceDataset(Dataset):
 
         return dataset_idx, slice_idx
 
-    def _get_num_slices_in_axis(self, orientation: SliceOrientation) -> list[int]:
-        num_slices = []
+    def _get_slice_range(self, subject: SubjectMetadata, orientation: SliceOrientation) -> range:
+        """
+        Get the range of slice indices for a given subject and orientation.
+
+        :param subject: Subject metadata
+        :param orientation: Slice orientation
+        :return: Range of valid slice indices
+        """
+        slice_axis = self._get_slice_axis(axes=subject.axes, orientation=orientation)
+
         if orientation == SliceOrientation.SAGITTAL and self._limit_sagittal_slices_to_hemisphere:
-            for subject in self._dataset_meta:
-                sagittal_axis = self._get_slice_axis(
-                    axes=subject.axes,
-                    orientation=orientation
-                )
-                sagittal_dim = subject.registered_shape[sagittal_axis.dimension]
-                # always sample from the left hemisphere due to brain symmetry,
-                # the model would have no way to know which hemisphere a slice was sampled from
-                if sagittal_axis.direction == AcquisitionDirection.LEFT_TO_RIGHT:
-                    num_slices.append(subject.sagittal_midline)
-                else:
-                    num_slices.append(sagittal_dim - subject.sagittal_midline)
+            sagittal_dim = subject.registered_shape[slice_axis.dimension]
+            # Always sample from the left hemisphere due to brain symmetry
+            if slice_axis.direction == AcquisitionDirection.LEFT_TO_RIGHT:
+                return range(subject.sagittal_midline)
+            else:
+                return range(subject.sagittal_midline, sagittal_dim)
         else:
-            num_slices = [x.registered_shape[self._get_slice_axis(axes=x.axes, orientation=orientation).dimension] for x in
-                      self._dataset_meta]
-        return num_slices
+            return range(subject.registered_shape[slice_axis.dimension])
+
+    def _get_num_slices_in_axis(self, orientation: SliceOrientation) -> list[int]:
+        """Get number of slices per subject for given orientation"""
+        return [len(self._get_slice_range(subject, orientation)) for subject in self._dataset_meta]
 
     def _get_slice_axis(self, axes: list[AcquisitionAxis], orientation: SliceOrientation) -> AcquisitionAxis:
         if orientation == SliceOrientation.SAGITTAL:
@@ -444,46 +477,82 @@ class SliceDataset(Dataset):
             raise NotImplementedError(f'{self._orientation} not supported')
         return slice_axis
 
+    def _build_patch_index(self) -> list[Patch]:
+        """Build index of all patches for inference"""
+        patch_index = []
+
+        for orientation in self._orientation:
+            for dataset_idx, subject_meta in enumerate(self._dataset_meta):
+                slice_axis = self._get_slice_axis(axes=subject_meta.axes, orientation=orientation)
+
+                # Get slice range for this subject
+                slice_range = self._get_slice_range(subject_meta, orientation)
+
+                for slice_idx in slice_range:
+                    # Get slice shape (axes except the slice axis)
+                    axes_except_slice = [ax for ax in subject_meta.axes if ax != slice_axis]
+                    slice_shape = tuple(
+                        subject_meta.registered_shape[ax.dimension] for ax in axes_except_slice)
+
+                    # Get all patch positions for this slice
+                    patch_positions = self._get_patch_positions(slice_shape)
+
+                    for patch_x, patch_y in patch_positions:
+                        patch_index.append(
+                            Patch(
+                                dataset_idx=dataset_idx,
+                                slice_idx=slice_idx,
+                                x=patch_x,
+                                y=patch_y,
+                                orientation=orientation
+                            )
+                        )
+
+        return patch_index
+
     @timed_func
     def __getitem__(self, idx):
+        # Determine what to load
         if self._mode == TrainMode.TRAIN:
             orientation = random.choice(self._orientation)
+            dataset_idx, slice_idx = self._get_slice_from_idx(idx=idx, orientation=orientation)
+            patch_x, patch_y = None, None  # Will be determined randomly
         else:
-            if len(self._orientation) != 1:
-                raise ValueError('Must provide single orientation if not train')
-            orientation = self._orientation[0]
+            # TEST mode - use precomputed patch index
+            patch_info = self._patch_index[idx]
+            dataset_idx = patch_info.dataset_idx
+            slice_idx = patch_info.slice_idx
+            patch_x = patch_info.x
+            patch_y = patch_info.y
+            orientation = patch_info.orientation
 
-        dataset_idx, slice_idx = self._get_slice_from_idx(idx=idx, orientation=orientation)
         experiment_meta = self._dataset_meta[dataset_idx]
         acquisition_axes = experiment_meta.axes
-
         slice_axis = self._get_slice_axis(axes=acquisition_axes, orientation=orientation)
 
+        # Load volume and extract patch
         volume = tensorstore.open(
             spec={
                 'driver': 'auto',
                 'kvstore': create_kvstore(
-                    path=str(experiment_meta.stitched_volume_path) + f'/{self._registration_downsample_factor}',
+                    path=str(
+                        experiment_meta.stitched_volume_path) + f'/{self._registration_downsample_factor}',
                     aws_credentials_method="anonymous"
                 )
             },
             read=True
         ).result()
 
-
         volume_slice = [0, 0, slice(None), slice(None), slice(None)]
-        volume_slice[slice_axis.dimension + 2] = slice_idx  # +2 because first 2 axes unused
+        volume_slice[slice_axis.dimension + 2] = slice_idx  # + 2 since first 2 dims unused
 
         with timed():
-            if self._mode == TrainMode.TRAIN:
-                input_slice, patch_x, patch_y = self._get_random_patch(
-                    slice_2d=volume[tuple(volume_slice)]
-                )
-            else:
-                if self._patch_size is None:
-                    input_slice, patch_x, patch_y = volume[tuple(volume_slice)][:].read().result(), 0, 0
-                else:
-                    raise NotImplementedError
+            input_slice, patch_x, patch_y = self._get_patch(
+                slice_2d=volume[tuple(volume_slice)],
+                patch_x=patch_x,
+                patch_y=patch_y
+            )
+
         height, width = input_slice.shape
 
         point_grid = _create_coordinate_dataframe(
@@ -526,34 +595,44 @@ class SliceDataset(Dataset):
         return input_slice, output_points, dataset_idx, slice_idx
 
     def __len__(self):
-        num_slices = 0
-        for orientation in self._orientation:
-            num_slices_in_axis = self._get_num_slices_in_axis(
-                orientation=orientation
-            )
-            num_slices += sum(num_slices_in_axis)
-        return num_slices
+        if self._mode == TrainMode.TEST:
+            return len(self._patch_index)
+        else:
+            num_slices = 0
+            for orientation in self._orientation:
+                num_slices_in_axis = self._get_num_slices_in_axis(
+                    orientation=orientation
+                )
+                num_slices += sum(num_slices_in_axis)
+            return num_slices
 
-    def _get_random_patch(self, slice_2d: tensorstore.TensorStore):
-        """Extract random patch from slice"""
+    def _get_patch(self, slice_2d: tensorstore.TensorStore, patch_x: Optional[int] = None,
+                   patch_y: Optional[int] = None):
+        """Extract patch from slice. If patch_x/patch_y are None, choose randomly."""
         h, w = slice_2d.shape
+
+        if self._patch_size is None:
+            return slice_2d[:].read().result(), 0, 0
+
         ph, pw = self._patch_size
 
         # Adjust patch size to what's available
         ph = min(h, ph)
         pw = min(w, pw)
 
-        # Random position (0 if slice is smaller than patch)
-        x = random.randint(0, max(0, h - ph))
-        y = random.randint(0, max(0, w - pw))
+        if patch_x is None or patch_y is None:
+            # Random position (0 if slice is smaller than patch)
+            patch_x = random.randint(0, max(0, h - ph))
+            patch_y = random.randint(0, max(0, w - pw))
 
-        # Extract what we can
-        patch = torch.from_numpy(slice_2d[x:x + ph, y:y + pw].read().result())
+        # Extract patch
+        patch = torch.from_numpy(
+            slice_2d[patch_x:patch_x + ph, patch_y:patch_y + pw].read().result())
 
         # Pad to patch_size if needed
         patch = self._pad_patch_to_size(patch)
 
-        return patch, x, y
+        return patch, patch_x, patch_y
 
     def _pad_patch_to_size(self, patch):
         """Pad extracted patch to patch_size if needed"""
