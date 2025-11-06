@@ -116,6 +116,7 @@ class SliceDataset(Dataset):
                  normalize_orientation_map: Optional[dict[
                                                      SliceOrientation: list[AcquisitionDirection]]] = None,
                  limit_sagittal_slices_to_hemisphere: bool = False,
+                 limit_frac: Optional[float] = None
                  ):
         """
         Initialize SliceDataset.
@@ -151,6 +152,7 @@ class SliceDataset(Dataset):
             Due to the symmetry of the brain, the model won't be able to differentiate
             sagittal slices from each hemisphere. Use this to limit sampling to the
             LEFT hemisphere.
+        limit_frac: Fraction of slices to load
         """
         super().__init__()
         self._dataset_meta = dataset_meta
@@ -173,6 +175,7 @@ class SliceDataset(Dataset):
         self._normalize_orientation_map = normalize_orientation_map
 
         self._ls_template_parameters = ls_template_parameters
+        self._limit_frac = limit_frac
 
         if mode == TrainMode.TEST:
             self._patch_index = self._build_patch_index()
@@ -286,7 +289,7 @@ class SliceDataset(Dataset):
 
         return dataset_idx, slice_idx
 
-    def _get_slice_range(self, subject: SubjectMetadata, orientation: SliceOrientation) -> range:
+    def _get_slice_range(self, subject: SubjectMetadata, orientation: SliceOrientation) -> list[int]:
         """
         Get the range of slice indices for a given subject and orientation.
 
@@ -299,20 +302,22 @@ class SliceDataset(Dataset):
 
         Returns
         -------
-        range
-            Range of valid slice indices.
+        list of valid slice indices.
         """
         slice_axis = subject.get_slice_axis(orientation=orientation)
-
         if orientation == SliceOrientation.SAGITTAL and self._limit_sagittal_slices_to_hemisphere:
             sagittal_dim = subject.registered_shape[slice_axis.dimension]
             # Always sample from the left hemisphere due to brain symmetry
             if slice_axis.direction == AcquisitionDirection.LEFT_TO_RIGHT:
-                return range(subject.sagittal_midline)
+                slices = list(range(subject.sagittal_midline))
             else:
-                return range(subject.sagittal_midline, sagittal_dim)
+                slices = list(range(subject.sagittal_midline, sagittal_dim))
         else:
-            return range(subject.registered_shape[slice_axis.dimension])
+            slices = list(range(subject.registered_shape[slice_axis.dimension]))
+
+        if self._limit_frac is not None:
+            slices = random.choices(slices, k=int(self._limit_frac * len(slices)))
+        return slices
 
     def _get_num_slices_in_axis(self, orientation: SliceOrientation) -> list[int]:
         """

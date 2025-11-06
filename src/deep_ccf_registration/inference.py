@@ -36,7 +36,6 @@ def infer_full_volume(
         ccf_template_parameters: AntsImageParameters,
         region_ccf_ids_map: RegionAcronymCCFIdsMap,
         device: str = "cuda",
-        limit: Optional[int] = None
 ) -> tuple[float, dict[str, float], dict[str, float]]:
     """
     :param orientation: What orientation to run inference on
@@ -152,9 +151,6 @@ def infer_full_volume(
                     true_annotations=gt_ccf_annot,
                     class_mapping=small_region_map
                 )
-
-            if limit is not None and batch_idx == limit:
-                break
 
     # Calculate final metrics
     logger.info('Calculating RMSE from accumulated statistics')
