@@ -316,7 +316,7 @@ class SliceDataset(Dataset):
             slices = list(range(subject.registered_shape[slice_axis.dimension]))
 
         if self._limit_frac is not None:
-            slices = random.choices(slices, k=int(self._limit_frac * len(slices)))
+            slices = random.sample(slices, k=int(self._limit_frac * len(slices)))
         return slices
 
     def _get_num_slices_in_axis(self, orientation: SliceOrientation) -> list[int]:
