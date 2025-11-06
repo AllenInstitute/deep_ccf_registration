@@ -20,7 +20,7 @@ from loguru import logger
 from obstore.store import from_url
 from zarr.storage import ObjectStore, LocalStore
 
-from deep_ccf_registration.datasets.slice_dataset import SubjectMetadata
+from deep_ccf_registration.metadata import SubjectMetadata
 
 LIGHT_SHEET_COORDINATE_SYSTEM = {
     "name": "light_sheet_template",

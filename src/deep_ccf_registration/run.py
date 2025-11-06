@@ -11,11 +11,10 @@ from deep_ccf_registration.models.unet import UNet
 from train import train
 from deep_ccf_registration.datasets.slice_dataset import (
     SliceDataset,
-    SubjectMetadata,
-    SliceOrientation,
     TrainMode,
     AcquisitionDirection,
 )
+from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation
 
 
 @click.command()

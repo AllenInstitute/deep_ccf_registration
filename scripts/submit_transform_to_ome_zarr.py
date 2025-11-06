@@ -17,7 +17,7 @@ from matplotlib.backends.backend_pdf import PdfPages
 from tqdm import tqdm
 from loguru import logger
 
-from deep_ccf_registration.datasets.slice_dataset import AcquisitionAxis, SubjectMetadata
+from deep_ccf_registration.metadata import AcquisitionAxis, SubjectMetadata
 
 
 class CodeOceanError(Exception):

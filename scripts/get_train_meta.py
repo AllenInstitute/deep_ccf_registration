@@ -6,7 +6,7 @@ from typing import Any
 import tensorstore
 from loguru import logger
 from tqdm import tqdm
-from deep_ccf_registration.datasets.slice_dataset import SubjectMetadata, AcquisitionAxis
+from deep_ccf_registration.metadata import AcquisitionAxis, SubjectMetadata
 import click
 
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore

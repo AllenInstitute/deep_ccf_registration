@@ -14,7 +14,8 @@ from skimage.exposure import rescale_intensity
 from skimage.filters import threshold_otsu
 
 from deep_ccf_registration.datasets.slice_dataset import AcquisitionDirection, SliceDataset, \
-    SliceOrientation, SubjectMetadata, TrainMode
+    TrainMode
+from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation
 from deep_ccf_registration.utils.utils import visualize_alignment
 from loguru import logger
 

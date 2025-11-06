@@ -7,7 +7,7 @@ import pandas as pd
 import tensorstore
 from aind_smartspim_transform_utils.CoordinateTransform import CoordinateTransform
 
-from deep_ccf_registration.datasets.slice_dataset import SubjectMetadata
+from deep_ccf_registration.metadata import SubjectMetadata
 
 
 def reverse_transform_points(

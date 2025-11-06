@@ -8,7 +8,7 @@ description = "Library for arbitrary modality registration to CCFv3"
 requires-python = ">=3.12"
 dynamic = [ "version"]
 dependencies = [
-    "aind-smartspim-transform-utils @ git+ssh://git@github.com/AllenInstitute/aind-smartspim-transform-utils.git",
+    "aind-smartspim-transform-utils @ https://github.com/AllenInstitute/aind-smartspim-transform-utils.git",
     "click>=8.3.0",
     "loguru>=0.7.3",
     "pydantic>=2.11.9",
