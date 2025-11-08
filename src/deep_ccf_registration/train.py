@@ -1,12 +1,20 @@
 from pathlib import Path
-from typing import Optional, ContextManager
+from typing import ContextManager
 from contextlib import nullcontext
 import os
 import math
+
+import numpy as np
 import torch
 import torch.nn as nn
+from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from torch.utils.data.distributed import DistributedSampler
 from loguru import logger
+
+from deep_ccf_registration.inference import evaluate, RegionAcronymCCFIdsMap
+from deep_ccf_registration.losses.mse import HemisphereAgnosticMSE
+from deep_ccf_registration.models.unet import UNet
+
 
 # https://github.com/karpathy/nanoGPT/blob/master/train.py
 def _get_lr(
@@ -43,22 +51,28 @@ def _get_lr(
 def train(
         train_dataloader,
         val_dataloader,
-        model: nn.Module,
+        model: UNet,
         optimizer,
         n_epochs: int,
         model_weights_out_dir: str,
+        ccf_annotations: np.ndarray,
+        ls_template_to_ccf_affine_path: Path,
+        ls_template_to_ccf_inverse_warp: np.ndarray,
+        ls_template: np.ndarray,
+        ls_template_parameters: AntsImageParameters,
+        ccf_template_parameters: AntsImageParameters,
+        region_ccf_ids_map: RegionAcronymCCFIdsMap,
         learning_rate: float = 0.001,
         decay_learning_rate: bool = True,
         warmup_iters: int = 1000,
         loss_eval_interval: int = 500,
-        eval_iters: int = 100,
         patience: int = 10,
         min_delta: float = 1e-4,
         autocast_context: ContextManager = nullcontext(),
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
 ):
     """
-    Train a model using MSE loss with early stopping.
+    Train slice registration model
 
     Parameters
     ----------
@@ -72,11 +86,17 @@ def train(
     decay_learning_rate: Whether to decay learning rate during training
     warmup_iters: Number of warmup iterations for learning rate
     loss_eval_interval: Evaluate loss every N iterations
-    eval_iters: Number of iterations to average for evaluation
     patience: Number of evaluations without improvement before stopping
     min_delta: Minimum change in validation loss to be considered improvement
     autocast_context: Context manager for mixed precision training
     device: Device to train on
+    ccf_annotations: 25 micron resolution CCF annotation volume
+    ls_template: light sheet template volume
+    ls_template_to_ccf_affine_path: path to ls template to ccf affine
+    ls_template_to_ccf_inverse_warp: ls template to ccf inverse warp
+    ls_template_parameters: ls template AntsImageParameters
+    ccf_template_parameters: ccf template AntsImageParameters
+    region_ccf_ids_map: `RegionAcronymCCFIdsMap`
 
     Returns
     -------
@@ -84,8 +104,10 @@ def train(
     """
     os.makedirs(model_weights_out_dir, exist_ok=True)
 
-    criterion = nn.MSELoss()
-    best_val_loss = float("inf")
+    criterion = HemisphereAgnosticMSE(
+        ml_dim_size=ls_template.shape[0] * ls_template_parameters.scale[0]
+    )
+    best_val_rmse = float("inf")
     patience_counter = 0
     global_step = 0
     lr_decay_iters = len(train_dataloader) * n_epochs
@@ -106,8 +128,8 @@ def train(
         model.train()
         train_losses = []
 
-        for batch_idx, (inputs, targets) in enumerate(train_dataloader):
-            inputs, targets = inputs.to(device), targets.to(device)
+        for batch_idx, (input_patches, target_ls_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations) in enumerate(train_dataloader):
+            input_patches, target_ls_template_points = input_patches.to(device), target_ls_template_points.to(device)
 
             # Learning rate decay
             if decay_learning_rate:
@@ -124,8 +146,8 @@ def train(
             # Forward pass
             optimizer.zero_grad()
             with autocast_context:
-                outputs = model(inputs)
-                loss = criterion(outputs, targets)
+                pred_ls_template_points = model(input_patches)
+                loss = criterion(pred_ls_template_points, target_ls_template_points)
 
             # Backward pass
             loss.backward()
@@ -136,33 +158,52 @@ def train(
 
             # Periodic evaluation
             if global_step % loss_eval_interval == 0:
-                train_loss = evaluate_loss(
+                train_rmse, train_major_region_dice, train_small_region_dice = evaluate(
+                    val_loader=train_dataloader,
                     model=model,
-                    dataloader=train_dataloader,
-                    criterion=criterion,
-                    eval_iters=eval_iters,
-                    device=device,
-                    autocast_context=autocast_context,
+                    ccf_annotations=ccf_annotations,
+                    ls_template_to_ccf_affine_path=ls_template_to_ccf_affine_path,
+                    ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
+                    ls_template=ls_template,
+                    ls_template_parameters=ls_template_parameters,
+                    ccf_template_parameters=ccf_template_parameters,
+                    region_ccf_ids_map=region_ccf_ids_map,
+                    device=device
                 )
-                val_loss = evaluate_loss(
+                val_rmse, val_major_region_dice, val_small_region_dice = evaluate(
+                    val_loader=val_dataloader,
                     model=model,
-                    dataloader=val_dataloader,
-                    criterion=criterion,
-                    eval_iters=eval_iters,
-                    device=device,
-                    autocast_context=autocast_context,
+                    ccf_annotations=ccf_annotations,
+                    ls_template_to_ccf_affine_path=ls_template_to_ccf_affine_path,
+                    ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
+                    ls_template=ls_template,
+                    ls_template_parameters=ls_template_parameters,
+                    ccf_template_parameters=ccf_template_parameters,
+                    region_ccf_ids_map=region_ccf_ids_map,
+                    device=device
                 )
 
                 current_lr = optimizer.param_groups[0]['lr']
+                train_major_dice_avg = sum(train_major_region_dice.values()) / len(train_major_region_dice)
+                train_small_dice_avg = sum(train_small_region_dice.values()) / len(
+                    train_small_region_dice)
+
+                val_major_dice_avg = sum(val_major_region_dice.values()) / len(
+                    val_major_region_dice)
+                val_small_dice_avg = sum(val_small_region_dice.values()) / len(
+                    val_small_region_dice)
+
                 logger.info(
                     f"Epoch {epoch} | Step {global_step} | "
-                    f"Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f} | "
+                    f"Train RMSE: {train_rmse:.6f} | Val RMSE: {val_rmse:.6f} | "
+                    f"Train major dice: {train_major_dice_avg:.6f} | Val major dice: {val_major_dice_avg:.6f} | "
+                    f"Train small dice: {train_small_dice_avg} | Val major dice: {val_small_dice_avg:.6f} | "
                     f"LR: {current_lr:.6e}"
                 )
 
                 # Check for improvement
-                if val_loss < best_val_loss - min_delta:
-                    best_val_loss = val_loss
+                if val_rmse < best_val_rmse - min_delta:
+                    best_val_rmse = val_rmse
                     patience_counter = 0
 
                     # Save best model
@@ -173,11 +214,11 @@ def train(
                             'global_step': global_step,
                             'model_state_dict': model.state_dict(),
                             'optimizer_state_dict': optimizer.state_dict(),
-                            'val_loss': val_loss,
+                            'val_rmse': val_rmse,
                         },
                         f=checkpoint_path,
                     )
-                    logger.info(f"New best model saved! Val Loss: {val_loss:.6f}")
+                    logger.info(f"New best model saved! Val RMSE: {val_rmse:.6f}")
                 else:
                     patience_counter += 1
                     logger.info(f"No improvement. Patience: {patience_counter}/{patience}")
@@ -185,8 +226,8 @@ def train(
                 # Early stopping
                 if patience_counter >= patience:
                     logger.info(f"\nEarly stopping triggered after {global_step} steps")
-                    logger.info(f"Best validation loss: {best_val_loss:.6f}")
-                    return best_val_loss
+                    logger.info(f"Best validation RMSE: {best_val_rmse:.6f}")
+                    return best_val_rmse
 
                 model.train()
 
@@ -209,8 +250,8 @@ def train(
             f=checkpoint_path,
         )
 
-    logger.info(f"\nTraining completed! Best validation loss: {best_val_loss:.6f}")
-    return best_val_loss
+    logger.info(f"\nTraining completed! Best validation loss: {best_val_rmse:.6f}")
+    return best_val_rmse
 
 
 def evaluate_loss(

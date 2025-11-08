@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 import aind_smartspim_transform_utils
+import albumentations
 import ants
 import numpy as np
 import pandas as pd
@@ -71,8 +72,8 @@ def _create_coordinate_dataframe(
     """
     # Create meshgrid with actual coordinates
     axis1_coords, axis2_coords = np.meshgrid(
-        np.arange(start_x, start_x + patch_height),
-        np.arange(start_y, start_y + patch_width),
+        np.arange(start_y, start_y + patch_height),
+        np.arange(start_x, start_x + patch_width),
         indexing='ij'
     )
 
@@ -116,7 +117,8 @@ class SliceDataset(Dataset):
                  normalize_orientation_map: Optional[dict[
                                                      SliceOrientation: list[AcquisitionDirection]]] = None,
                  limit_sagittal_slices_to_hemisphere: bool = False,
-                 limit_frac: Optional[float] = None
+                 limit_frac: Optional[float] = None,
+                 transforms: Optional[list[albumentations.BasicTransform]] = None
                  ):
         """
         Initialize SliceDataset.
@@ -167,6 +169,7 @@ class SliceDataset(Dataset):
         self._patch_size = patch_size
         self._mode = mode
         self._limit_sagittal_slices_to_hemisphere = limit_sagittal_slices_to_hemisphere
+        self._transforms = transforms
 
         if normalize_orientation_map is not None:
             for axis, orientation in normalize_orientation_map.items():
@@ -482,13 +485,13 @@ class SliceDataset(Dataset):
         input_image = np.ascontiguousarray(input_image)
         output_points = np.ascontiguousarray(output_points)
 
-        # scale input_image to [0, 1]
-        input_image = input_image.astype(np.float32)
-
         # add channel dim
         input_image = np.expand_dims(input_image, axis=0)
 
-        return input_image, output_points, dataset_idx, slice_idx, patch_y, patch_x
+        if self._transforms is not None:
+            input_image = albumentations.Compose(self._transforms)(input_image)
+
+        return input_image, output_points, dataset_idx, slice_idx, patch_y, patch_x, orientation
 
     def __len__(self):
         """

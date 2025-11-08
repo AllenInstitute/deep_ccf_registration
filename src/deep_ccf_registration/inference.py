@@ -24,8 +24,7 @@ class RegionAcronymCCFIdsMap(BaseModel):
 
 
 @torch.no_grad()
-def infer_full_volume(
-        orientation: SliceOrientation,
+def evaluate(
         val_loader: DataLoader,
         model: UNet,
         ccf_annotations: np.ndarray,
@@ -38,7 +37,6 @@ def infer_full_volume(
         device: str = "cuda",
 ) -> tuple[float, dict[str, float], dict[str, float]]:
     """
-    :param orientation: What orientation to run inference on
     :param val_loader: validation DataLoader
     :param model: model
     :param ccf_annotations: ccf annotation volume
@@ -68,13 +66,13 @@ def infer_full_volume(
     small_confusion_matrix = np.zeros((n_small_classes, n_small_classes), dtype=np.int64)
 
     # For sagittal orientation RMSE
-    ml_dim_size = ls_template.shape[0] * ls_template_parameters.scale[
-        0] * 1000 if orientation == SliceOrientation.SAGITTAL else None
+    ml_dim_size = ls_template.shape[0] * ls_template_parameters.scale[0] * 1000
+
 
     model.eval()
     with torch.no_grad():
         for batch_idx, batch in enumerate(tqdm(val_loader, desc="Processing patches")):
-            input_images, output_points, dataset_indices, slice_indices, patch_ys, patch_xs = batch
+            input_images, output_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations = batch
 
             input_images = input_images.to(device)
 
@@ -119,8 +117,8 @@ def infer_full_volume(
                     pred_tissue = pred_patch[tissue_mask] * 1000
                     gt_tissue = gt_patch[tissue_mask] * 1000
 
-                    if orientation == SliceOrientation.SAGITTAL:
-                        # Hemisphere-agnostic RMSE
+                    if orientations[i] == SliceOrientation.SAGITTAL:
+                        # Hemisphere-agnostic sum of squared errors
                         ml_error_direct = (pred_tissue[:, 0] - gt_tissue[:, 0]) ** 2
                         ml_error_flipped = ((ml_dim_size - pred_tissue[:, 0]) - gt_tissue[:,
                                                                                 0]) ** 2
@@ -131,7 +129,7 @@ def infer_full_volume(
 
                         patch_squared_errors = ml_error + ap_error + dv_error
                     else:
-                        # Standard RMSE
+                        # sum of squared error
                         patch_squared_errors = np.sum((pred_tissue - gt_tissue) ** 2, axis=1)
 
                     sum_squared_errors += np.sum(patch_squared_errors)

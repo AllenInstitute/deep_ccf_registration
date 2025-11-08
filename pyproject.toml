@@ -9,6 +9,7 @@ requires-python = ">=3.12"
 dynamic = [ "version"]
 dependencies = [
     "aind-smartspim-transform-utils @ https://github.com/AllenInstitute/aind-smartspim-transform-utils.git",
+    "albumentationsx>=2.0.12",
     "click>=8.3.0",
     "loguru>=0.7.3",
     "pydantic>=2.11.9",
