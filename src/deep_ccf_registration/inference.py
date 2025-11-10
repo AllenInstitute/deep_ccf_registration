@@ -1,15 +1,17 @@
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
+import albumentations
 import numpy as np
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from aind_smartspim_transform_utils.utils import utils
 from loguru import logger
 from pydantic import BaseModel, Field
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
+from deep_ccf_registration.datasets.slice_dataset import SliceDataset
 from deep_ccf_registration.metadata import SliceOrientation
 from deep_ccf_registration.models.unet import UNet
 from deep_ccf_registration.utils.transforms import apply_transforms_to_points
@@ -22,6 +24,36 @@ class RegionAcronymCCFIdsMap(BaseModel):
     small_regions: dict[str, list[int]] = Field(
         description="Mapping from small region ccf acronym to list of descendent node IDs including itself")
 
+
+def _resize_to_original(
+        pred_patch: torch.Tensor,
+        gt_shape: tuple[int, int],
+        pre_pad_shape: tuple[int, int],
+        pad_top: int,
+        pad_left: int
+) -> torch.Tensor:
+    """if the input images are resized, resize it back to the original dimensions.
+    This handles the fact that the input image might be padded, and so padding is reversed and then
+    resized.
+
+    :param pred_patch: The predicted points
+    :param gt_shape: The unmodified ground truth patch shape
+    :param pad_transform: output from albumentations transform
+
+    :return the resized prediction
+    """
+    if pad_top > 0 or pad_left > 0:
+        # 1. Crop out padding
+        H_scaled, W_scaled = pre_pad_shape
+        pred_cropped = pred_patch[pad_top:pad_top + H_scaled, pad_left:pad_left + W_scaled]
+    else:
+        pred_cropped = pred_patch
+
+    # 2. Resize back to original
+    resize = albumentations.Resize(height=gt_shape[0], width=gt_shape[1])
+    pred_original = resize(image=pred_cropped)['image']
+
+    return pred_original
 
 @torch.no_grad()
 def evaluate(
@@ -50,6 +82,10 @@ def evaluate(
     :return: tuple of: (rmse in microns ignoring background (just tissue), mapping from major brain
         region to dice, mapping from small region to dice)
     """
+    slice_dataset: SliceDataset = val_loader.dataset
+    if isinstance(slice_dataset, Subset):
+        slice_dataset = slice_dataset.dataset
+
     # Build class mapping for dice calculation
     major_region_map = _build_class_mapping(region_ccf_ids_map.major_regions)
     small_region_map = _build_class_mapping(region_ccf_ids_map.small_regions)
@@ -70,85 +106,97 @@ def evaluate(
 
 
     model.eval()
-    with torch.no_grad():
-        for batch_idx, batch in enumerate(tqdm(val_loader, desc="Processing patches")):
-            input_images, output_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations = batch
+    for batch_idx, batch in enumerate(tqdm(val_loader, desc="Processing patches")):
+        if slice_dataset.patch_size is not None:
+            input_images, output_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms = batch
+        else:
+            input_images, output_points, dataset_indices, slice_indices, orientations, input_image_transforms = batch
 
-            input_images = input_images.to(device)
+        input_images = input_images.to(device)
 
-            # Run inference
-            pred_ls_template_points = model(input_images).cpu().numpy()  # (B, 3, H, W)
-            pred_ls_template_points = pred_ls_template_points.transpose(0, 2, 3, 1)  # (B, H, W, 3)
-            gt_ls_template_points = output_points.numpy()  # (B, H, W, 3)
+        # Run inference
+        pred_ls_template_points = model(input_images).cpu().numpy()  # (B, 3, H, W)
+        pred_ls_template_points = pred_ls_template_points.transpose(0, 2, 3, 1)  # (B, H, W, 3)
+        gt_ls_template_points = output_points.numpy()  # (B, H, W, 3)
 
-            # Process each patch in the batch
-            for i in range(pred_ls_template_points.shape[0]):
-                pred_patch = pred_ls_template_points[i]  # (H, W, 3)
-                gt_patch = gt_ls_template_points[i]  # (H, W, 3)
+        # Process each patch in the batch
+        for i in range(pred_ls_template_points.shape[0]):
+            pred_patch = pred_ls_template_points[i]  # (H, W, 3)
+            gt_patch = gt_ls_template_points[i]  # (H, W, 3)
 
-                # Transform patch to CCF space
-                pred_ccf_pts = _transform_ls_space_to_ccf_space(
-                    points=pred_patch,
-                    ls_template_to_ccf_affine_path=ls_template_to_ccf_affine_path,
-                    ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
-                    ls_template_parameters=ls_template_parameters,
-                    ccf_template_parameters=ccf_template_parameters
+            if pred_patch.shape != gt_patch.shape:
+                pred_patch = _resize_to_original(
+                    pred_patch=pred_patch,
+                    pre_pad_shape=tuple([int(input_image_transforms['shape'][ii][i].item()) for ii in range(2)]) if input_image_transforms else (),
+                    pad_top=input_image_transforms['pad_top'][i].item() if input_image_transforms else None,
+                    pad_left=input_image_transforms['pad_left'][i].item() if input_image_transforms else None,
+                    gt_shape=gt_patch.shape
                 )
 
-                gt_ccf_pts = _transform_ls_space_to_ccf_space(
-                    points=gt_patch,
-                    ls_template_to_ccf_affine_path=ls_template_to_ccf_affine_path,
-                    ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
-                    ls_template_parameters=ls_template_parameters,
-                    ccf_template_parameters=ccf_template_parameters
-                )
+            # Transform patch to CCF space
+            pred_ccf_pts = transform_ls_space_to_ccf_space(
+                points=pred_patch,
+                ls_template_to_ccf_affine_path=ls_template_to_ccf_affine_path,
+                ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
+                ls_template_parameters=ls_template_parameters,
+                ccf_template_parameters=ccf_template_parameters
+            )
 
-                # Get CCF annotations for patch
-                pred_ccf_annot = _get_ccf_annotations(ccf_annotations, pred_ccf_pts).reshape(
-                    pred_patch.shape[:-1])
-                gt_ccf_annot = _get_ccf_annotations(ccf_annotations, gt_ccf_pts).reshape(
-                    gt_patch.shape[:-1])
+            gt_ccf_pts = transform_ls_space_to_ccf_space(
+                points=gt_patch,
+                ls_template_to_ccf_affine_path=ls_template_to_ccf_affine_path,
+                ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
+                ls_template_parameters=ls_template_parameters,
+                ccf_template_parameters=ccf_template_parameters
+            )
 
-                # Accumulate RMSE in microns, ignoring background
-                tissue_mask = gt_ccf_annot != 0
+            # Get CCF annotations for patch
+            pred_ccf_annot = get_ccf_annotations(ccf_annotations, pred_ccf_pts).reshape(
+                pred_patch.shape[:-1])
+            gt_ccf_annot = get_ccf_annotations(ccf_annotations, gt_ccf_pts).reshape(
+                gt_patch.shape[:-1])
 
-                if np.any(tissue_mask):
-                    # ANTs uses millimeters. convert to microns
-                    pred_tissue = pred_patch[tissue_mask] * 1000
-                    gt_tissue = gt_patch[tissue_mask] * 1000
+            # Accumulate RMSE in microns, ignoring background
+            tissue_mask = gt_ccf_annot != 0
 
-                    if orientations[i] == SliceOrientation.SAGITTAL:
-                        # Hemisphere-agnostic sum of squared errors
-                        ml_error_direct = (pred_tissue[:, 0] - gt_tissue[:, 0]) ** 2
-                        ml_error_flipped = ((ml_dim_size - pred_tissue[:, 0]) - gt_tissue[:,
-                                                                                0]) ** 2
-                        ml_error = np.minimum(ml_error_direct, ml_error_flipped)
+            if np.any(tissue_mask):
+                # ANTs uses millimeters. convert to microns
+                pred_tissue = pred_patch[tissue_mask] * 1000
+                gt_tissue = gt_patch[tissue_mask] * 1000
 
-                        ap_error = (pred_tissue[:, 1] - gt_tissue[:, 1]) ** 2
-                        dv_error = (pred_tissue[:, 2] - gt_tissue[:, 2]) ** 2
+                orientation = SliceOrientation(orientations[i])
+                if orientation == SliceOrientation.SAGITTAL:
+                    # Hemisphere-agnostic sum of squared errors
+                    ml_error_direct = (pred_tissue[:, 0] - gt_tissue[:, 0]) ** 2
+                    ml_error_flipped = ((ml_dim_size - pred_tissue[:, 0]) - gt_tissue[:,
+                                                                            0]) ** 2
+                    ml_error = np.minimum(ml_error_direct, ml_error_flipped)
 
-                        patch_squared_errors = ml_error + ap_error + dv_error
-                    else:
-                        # sum of squared error
-                        patch_squared_errors = np.sum((pred_tissue - gt_tissue) ** 2, axis=1)
+                    ap_error = (pred_tissue[:, 1] - gt_tissue[:, 1]) ** 2
+                    dv_error = (pred_tissue[:, 2] - gt_tissue[:, 2]) ** 2
 
-                    sum_squared_errors += np.sum(patch_squared_errors)
-                    tissue_pixel_count += np.sum(tissue_mask)
+                    patch_squared_errors = ml_error + ap_error + dv_error
+                else:
+                    # sum of squared error
+                    patch_squared_errors = np.sum((pred_tissue - gt_tissue) ** 2, axis=1)
 
-                # Accumulate confusion matrices for Dice
-                _update_confusion_matrix(
-                    confusion_matrix=major_confusion_matrix,
-                    pred_annotations=pred_ccf_annot,
-                    true_annotations=gt_ccf_annot,
-                    class_mapping=major_region_map
-                )
+                sum_squared_errors += np.sum(patch_squared_errors)
+                tissue_pixel_count += np.sum(tissue_mask)
 
-                _update_confusion_matrix(
-                    confusion_matrix=small_confusion_matrix,
-                    pred_annotations=pred_ccf_annot,
-                    true_annotations=gt_ccf_annot,
-                    class_mapping=small_region_map
-                )
+            # Accumulate confusion matrices for Dice
+            _update_confusion_matrix(
+                confusion_matrix=major_confusion_matrix,
+                pred_annotations=pred_ccf_annot,
+                true_annotations=gt_ccf_annot,
+                class_mapping=major_region_map
+            )
+
+            _update_confusion_matrix(
+                confusion_matrix=small_confusion_matrix,
+                pred_annotations=pred_ccf_annot,
+                true_annotations=gt_ccf_annot,
+                class_mapping=small_region_map
+            )
 
     # Calculate final metrics
     logger.info('Calculating RMSE from accumulated statistics')
@@ -243,7 +291,7 @@ def _calc_dice_from_confusion_matrix(
 
     return result
 
-def _transform_ls_space_to_ccf_space(
+def transform_ls_space_to_ccf_space(
         points: np.ndarray,
         ls_template_to_ccf_affine_path: Path,
         ls_template_to_ccf_inverse_warp: np.ndarray,
@@ -280,7 +328,7 @@ def _transform_ls_space_to_ccf_space(
     return ccf_pts
 
 
-def _get_ccf_annotations(ccf_annotations: np.ndarray, pts: np.ndarray):
+def get_ccf_annotations(ccf_annotations: np.ndarray, pts: np.ndarray):
     labels = interpolate(
         array=ccf_annotations.astype(np.float32),
         grid=pts,

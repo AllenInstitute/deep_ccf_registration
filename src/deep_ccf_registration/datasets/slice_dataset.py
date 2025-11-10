@@ -118,7 +118,8 @@ class SliceDataset(Dataset):
                                                      SliceOrientation: list[AcquisitionDirection]]] = None,
                  limit_sagittal_slices_to_hemisphere: bool = False,
                  limit_frac: Optional[float] = None,
-                 transforms: Optional[list[albumentations.BasicTransform]] = None
+                 input_image_transforms: Optional[list[albumentations.BasicTransform]] = None,
+                 output_points_transforms: Optional[list[albumentations.BasicTransform]] = None,
                  ):
         """
         Initialize SliceDataset.
@@ -169,7 +170,8 @@ class SliceDataset(Dataset):
         self._patch_size = patch_size
         self._mode = mode
         self._limit_sagittal_slices_to_hemisphere = limit_sagittal_slices_to_hemisphere
-        self._transforms = transforms
+        self._input_image_transforms = input_image_transforms
+        self._output_points_transforms = output_points_transforms
 
         if normalize_orientation_map is not None:
             for axis, orientation in normalize_orientation_map.items():
@@ -178,13 +180,10 @@ class SliceDataset(Dataset):
         self._normalize_orientation_map = normalize_orientation_map
 
         self._ls_template_parameters = ls_template_parameters
-        self._limit_frac = limit_frac
-
-        if mode == TrainMode.TEST:
-            self._patch_index = self._build_patch_index()
+        self._precomputed_patches = self._build_patch_index() if mode == TrainMode.TEST and patch_size is not None else None
 
     @property
-    def patch_size(self) -> tuple[int, int]:
+    def patch_size(self) -> Optional[tuple[int, int]]:
         return self._patch_size
 
     def _get_patch_positions(self, slice_shape: tuple[int, int]):
@@ -317,9 +316,6 @@ class SliceDataset(Dataset):
                 slices = list(range(subject.sagittal_midline, sagittal_dim))
         else:
             slices = list(range(subject.registered_shape[slice_axis.dimension]))
-
-        if self._limit_frac is not None:
-            slices = random.sample(slices, k=int(self._limit_frac * len(slices)))
         return slices
 
     def _get_num_slices_in_axis(self, orientation: SliceOrientation) -> list[int]:
@@ -401,19 +397,17 @@ class SliceDataset(Dataset):
             - slice_idx : int
                 Index of the slice within the subject.
         """
-        # Determine what to load
-        if self._mode == TrainMode.TRAIN:
-            orientation = random.choice(self._orientation)
-            dataset_idx, slice_idx = self._get_slice_from_idx(idx=idx, orientation=orientation)
-            patch_x, patch_y = None, None  # Will be determined randomly
+        orientation = random.choice(self._orientation)
+        dataset_idx, slice_idx = self._get_slice_from_idx(idx=idx, orientation=orientation)
+
+        if self._precomputed_patches is not None:
+            patch_x = self._precomputed_patches[idx].x
+            patch_y = self._precomputed_patches[idx].y
         else:
-            # TEST mode - use precomputed patch index
-            patch_info = self._patch_index[idx]
-            dataset_idx = patch_info.dataset_idx
-            slice_idx = patch_info.slice_idx
-            patch_x = patch_info.x
-            patch_y = patch_info.y
-            orientation = patch_info.orientation
+            if self._patch_size is None:
+                patch_x, patch_y = 0, 0
+            else:
+                patch_x, patch_y = None, None
 
         experiment_meta = self._dataset_meta[dataset_idx]
         acquisition_axes = experiment_meta.axes
@@ -436,11 +430,14 @@ class SliceDataset(Dataset):
         volume_slice[slice_axis.dimension + 2] = slice_idx  # + 2 since first 2 dims unused
 
         with timed():
-            input_image, patch_y, patch_x = self._get_patch(
-                slice_2d=volume[tuple(volume_slice)],
-                patch_x=patch_x,
-                patch_y=patch_y
-            )
+            if self._patch_size is None:
+                input_image = volume[tuple(volume_slice)][:].read().result()
+            else:
+                input_image, patch_y, patch_x = self._get_patch(
+                    slice_2d=volume[tuple(volume_slice)],
+                    patch_x=patch_x,
+                    patch_y=patch_y
+                )
 
         height, width = input_image.shape
 
@@ -486,12 +483,32 @@ class SliceDataset(Dataset):
         output_points = np.ascontiguousarray(output_points)
 
         # add channel dim
-        input_image = np.expand_dims(input_image, axis=0)
+        input_image = np.expand_dims(input_image, axis=-1)
 
-        if self._transforms is not None:
-            input_image = albumentations.Compose(self._transforms)(input_image)
+        if self._input_image_transforms is not None:
+            input_image_transforms = albumentations.ReplayCompose(self._input_image_transforms)(image=input_image)
+            input_image = input_image_transforms['image']
+        else:
+            input_image_transforms = []
 
-        return input_image, output_points, dataset_idx, slice_idx, patch_y, patch_x, orientation
+        if self._output_points_transforms is not None:
+            output_points = albumentations.Compose(self._output_points_transforms)(image=output_points)[
+                'image']
+        pad_transform = [x for x in input_image_transforms['replay']['transforms'] if
+                         x['__class_fullname__'] == 'PadIfNeeded']
+        if len(pad_transform) != 0:
+            if len(pad_transform) > 1:
+                raise ValueError('Expected 1 pad transform')
+            pad_transform = pad_transform[0]
+            pad_transform = pad_transform['params']
+        else:
+            pad_transform = {}
+
+        if self.patch_size is not None:
+            res = input_image, output_points, dataset_idx, slice_idx, patch_y, patch_x, orientation.value, pad_transform
+        else:
+            res = input_image, output_points, dataset_idx, slice_idx, orientation.value, pad_transform
+        return res
 
     def __len__(self):
         """
@@ -502,8 +519,8 @@ class SliceDataset(Dataset):
         int
             Number of items (patches in TEST mode, slices in TRAIN mode).
         """
-        if self._mode == TrainMode.TEST:
-            return len(self._patch_index)
+        if self._mode == TrainMode.TEST and self._patch_size is not None:
+            return len(self._precomputed_patches)
         else:
             num_slices = 0
             for orientation in self._orientation:
@@ -541,9 +558,6 @@ class SliceDataset(Dataset):
                 Actual starting x coordinate used.
         """
         h, w = slice_2d.shape
-
-        if self._patch_size is None:
-            return slice_2d[:].read().result(), 0, 0
 
         ph, pw = self._patch_size
 
