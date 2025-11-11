@@ -28,13 +28,13 @@ class RegionAcronymCCFIdsMap(BaseModel):
 def _resize_to_original(
         pred_patch: torch.Tensor,
         gt_shape: tuple[int, int],
-        pre_pad_shape: tuple[int, int],
-        pad_top: int,
-        pad_left: int
+        pre_pad_shape: Optional[tuple[int, int]] = None,
+        pad_top: Optional[int] = None,
+        pad_left: Optional[int] = None,
 ) -> torch.Tensor:
     """if the input images are resized, resize it back to the original dimensions.
     This handles the fact that the input image might be padded, and so padding is reversed and then
-    resized.
+    image excluding padding resized.
 
     :param pred_patch: The predicted points
     :param gt_shape: The unmodified ground truth patch shape
@@ -42,7 +42,7 @@ def _resize_to_original(
 
     :return the resized prediction
     """
-    if pad_top > 0 or pad_left > 0:
+    if pre_pad_shape is not None:
         # 1. Crop out padding
         H_scaled, W_scaled = pre_pad_shape
         pred_cropped = pred_patch[pad_top:pad_top + H_scaled, pad_left:pad_left + W_scaled]
@@ -108,16 +108,16 @@ def evaluate(
     model.eval()
     for batch_idx, batch in enumerate(tqdm(val_loader, desc="Processing patches")):
         if slice_dataset.patch_size is not None:
-            input_images, output_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms = batch
+            input_images, output_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, raw_shapes = batch
         else:
-            input_images, output_points, dataset_indices, slice_indices, orientations, input_image_transforms = batch
+            input_images, output_points, dataset_indices, slice_indices, orientations, input_image_transforms, raw_shapes = batch
 
         input_images = input_images.to(device)
 
         # Run inference
         pred_ls_template_points = model(input_images).cpu().numpy()  # (B, 3, H, W)
         pred_ls_template_points = pred_ls_template_points.transpose(0, 2, 3, 1)  # (B, H, W, 3)
-        gt_ls_template_points = output_points.numpy()  # (B, H, W, 3)
+        gt_ls_template_points = output_points.numpy().transpose(0, 2, 3, 1)  # (B, H, W, 3)
 
         # Process each patch in the batch
         for i in range(pred_ls_template_points.shape[0]):
@@ -127,7 +127,7 @@ def evaluate(
             if pred_patch.shape != gt_patch.shape:
                 pred_patch = _resize_to_original(
                     pred_patch=pred_patch,
-                    pre_pad_shape=tuple([int(input_image_transforms['shape'][ii][i].item()) for ii in range(2)]) if input_image_transforms else (),
+                    pre_pad_shape=tuple([int(input_image_transforms['shape'][ii][i].item()) for ii in range(2)]) if input_image_transforms else None,
                     pad_top=input_image_transforms['pad_top'][i].item() if input_image_transforms else None,
                     pad_left=input_image_transforms['pad_left'][i].item() if input_image_transforms else None,
                     gt_shape=gt_patch.shape
@@ -167,13 +167,12 @@ def evaluate(
                 orientation = SliceOrientation(orientations[i])
                 if orientation == SliceOrientation.SAGITTAL:
                     # Hemisphere-agnostic sum of squared errors
-                    ml_error_direct = (pred_tissue[:, 0] - gt_tissue[:, 0]) ** 2
-                    ml_error_flipped = ((ml_dim_size - pred_tissue[:, 0]) - gt_tissue[:,
-                                                                            0]) ** 2
+                    ml_error_direct = (pred_tissue[..., 0] - gt_tissue[..., 0]) ** 2
+                    ml_error_flipped = ((ml_dim_size - pred_tissue[..., 0]) - gt_tissue[..., 0]) ** 2
                     ml_error = np.minimum(ml_error_direct, ml_error_flipped)
 
-                    ap_error = (pred_tissue[:, 1] - gt_tissue[:, 1]) ** 2
-                    dv_error = (pred_tissue[:, 2] - gt_tissue[:, 2]) ** 2
+                    ap_error = (pred_tissue[..., 1] - gt_tissue[..., 1]) ** 2
+                    dv_error = (pred_tissue[..., 2] - gt_tissue[..., 2]) ** 2
 
                     patch_squared_errors = ml_error + ap_error + dv_error
                 else:

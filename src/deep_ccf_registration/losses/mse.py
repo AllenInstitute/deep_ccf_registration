@@ -26,7 +26,7 @@ class HemisphereAgnosticMSE(nn.Module):
     def forward(self,
                 pred_template_points: torch.Tensor,
                 true_template_points: torch.Tensor,
-                orientations: torch.Tensor
+                orientations: list[SliceOrientation]
                 ) -> torch.Tensor:
         """
         :param pred_template_points: Predicted points in light sheet template physical space, shape (batch_size, 3) (RAS)
@@ -34,7 +34,7 @@ class HemisphereAgnosticMSE(nn.Module):
         :param orientations: Orientation for each sample, shape (batch_size,)
         :return: Mean squared error loss
         """
-        sagittal_mask = (orientations == SliceOrientation.SAGITTAL)
+        sagittal_mask = torch.tensor([orientations[i] == SliceOrientation.SAGITTAL for i in range(len(orientations))], device=pred_template_points.device).bool()
 
         # Calculate hemisphere-agnostic SE for all samples
         hemisphere_agnostic_se = self._calc_hemisphere_agnostic_se(
@@ -43,10 +43,10 @@ class HemisphereAgnosticMSE(nn.Module):
         )
 
         # Calculate standard SE for all samples
-        standard_se = torch.sum((pred_template_points - true_template_points) ** 2, dim=-1)
+        standard_se = torch.sum((pred_template_points - true_template_points) ** 2, dim=1)
 
         # Use sagittal mask to select appropriate loss for each sample
-        squared_errors = torch.where(sagittal_mask, hemisphere_agnostic_se, standard_se)
+        squared_errors = torch.where(sagittal_mask[:, None, None], hemisphere_agnostic_se, standard_se)
 
         # Return mean squared error
         return torch.mean(squared_errors)
@@ -65,14 +65,14 @@ class HemisphereAgnosticMSE(nn.Module):
         """
         # LS template is in orientation RAS
         # ML error: consider both direct and flipped across midline
-        ml_error_direct = (pred_template_points[..., 0] - true_template_points[..., 0]) ** 2
-        ml_error_flipped = ((self._ml_dim_size - pred_template_points[..., 0]) -
-                            true_template_points[..., 0]) ** 2
+        ml_error_direct = (pred_template_points[:, 0] - true_template_points[:, 0]) ** 2
+        ml_error_flipped = ((self._ml_dim_size - pred_template_points[:, 0]) -
+                            true_template_points[:, 0]) ** 2
         ml_error = torch.minimum(ml_error_direct, ml_error_flipped)
 
         # AP and DV errors are standard
-        ap_error = (pred_template_points[..., 1] - true_template_points[..., 1]) ** 2
-        dv_error = (pred_template_points[..., 2] - true_template_points[..., 2]) ** 2
+        ap_error = (pred_template_points[:, 1] - true_template_points[:, 1]) ** 2
+        dv_error = (pred_template_points[:, 2] - true_template_points[:, 2]) ** 2
 
         squared_errors = ml_error + ap_error + dv_error
         return squared_errors

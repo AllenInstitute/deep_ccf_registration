@@ -117,7 +117,6 @@ class SliceDataset(Dataset):
                  normalize_orientation_map: Optional[dict[
                                                      SliceOrientation: list[AcquisitionDirection]]] = None,
                  limit_sagittal_slices_to_hemisphere: bool = False,
-                 limit_frac: Optional[float] = None,
                  input_image_transforms: Optional[list[albumentations.BasicTransform]] = None,
                  output_points_transforms: Optional[list[albumentations.BasicTransform]] = None,
                  ):
@@ -155,7 +154,6 @@ class SliceDataset(Dataset):
             Due to the symmetry of the brain, the model won't be able to differentiate
             sagittal slices from each hemisphere. Use this to limit sampling to the
             LEFT hemisphere.
-        limit_frac: Fraction of slices to load
         """
         super().__init__()
         self._dataset_meta = dataset_meta
@@ -487,15 +485,20 @@ class SliceDataset(Dataset):
 
         if self._input_image_transforms is not None:
             input_image_transforms = albumentations.ReplayCompose(self._input_image_transforms)(image=input_image)
-            input_image = input_image_transforms['image']
+            input_image_transformed = input_image_transforms['image']
         else:
             input_image_transforms = []
+            input_image_transformed = input_image
 
         if self._output_points_transforms is not None:
             output_points = albumentations.Compose(self._output_points_transforms)(image=output_points)[
                 'image']
-        pad_transform = [x for x in input_image_transforms['replay']['transforms'] if
-                         x['__class_fullname__'] == 'PadIfNeeded']
+
+        if input_image_transforms:
+            pad_transform = [x for x in input_image_transforms['replay']['transforms'] if
+                             x['__class_fullname__'] == 'PadIfNeeded']
+        else:
+            pad_transform = []
         if len(pad_transform) != 0:
             if len(pad_transform) > 1:
                 raise ValueError('Expected 1 pad transform')
@@ -505,9 +508,9 @@ class SliceDataset(Dataset):
             pad_transform = {}
 
         if self.patch_size is not None:
-            res = input_image, output_points, dataset_idx, slice_idx, patch_y, patch_x, orientation.value, pad_transform
+            res = input_image_transformed, output_points, dataset_idx, slice_idx, patch_y, patch_x, orientation.value, pad_transform, np.array(input_image.shape)
         else:
-            res = input_image, output_points, dataset_idx, slice_idx, orientation.value, pad_transform
+            res = input_image_transformed, output_points, dataset_idx, slice_idx, orientation.value, pad_transform, np.array(input_image.shape)
         return res
 
     def __len__(self):

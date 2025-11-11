@@ -1,12 +1,16 @@
+import os
+import sys
 from pathlib import Path
 
 import albumentations
 import click
+import cv2
 import numpy as np
+import segmentation_models_pytorch
 import tensorstore
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from contextlib import nullcontext
 from loguru import logger
 import json
@@ -14,6 +18,7 @@ import ants
 import random
 
 from deep_ccf_registration.configs.train_config import TrainConfig
+from deep_ccf_registration.inference import RegionAcronymCCFIdsMap
 from deep_ccf_registration.models.unet import UNet
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 from train import train
@@ -23,6 +28,9 @@ from deep_ccf_registration.datasets.slice_dataset import (
 )
 from deep_ccf_registration.metadata import SubjectMetadata
 
+logger.remove()
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logger.add(sys.stderr, level=log_level)
 
 @click.command()
 @click.option(
@@ -38,7 +46,7 @@ def main(config_path: Path):
         config = json.load(f)
     config = TrainConfig.model_validate(config)
 
-    if config.logging.log_file:
+    if config.log_file:
         logger.add(sink=config.logging.log_file, rotation="500 MB", level="INFO")
 
     logger.info("=" * 60)
@@ -75,6 +83,7 @@ def main(config_path: Path):
     # Load light sheet template
     logger.info(f"Loading light sheet template from: {config.ls_template_path}")
     ls_template = ants.image_read(filename=str(config.ls_template_path))
+    ls_template_parameters = AntsImageParameters.from_ants_image(image=ls_template)
 
     # Load dataset metadata
     logger.info(f"Loading dataset metadata from: {config.dataset_meta_path}")
@@ -88,7 +97,6 @@ def main(config_path: Path):
         subject_metadata=subject_metadata,
         train_split=config.train_val_split,
         val_split=(1 - config.train_val_split) / 2,
-        seed=config.seed,
     )
 
     logger.info(f"Train subjects: {len(train_metadata)}")
@@ -100,32 +108,60 @@ def main(config_path: Path):
     logger.info("Creating training dataset...")
     train_dataset = SliceDataset(
         dataset_meta=train_metadata,
-        ls_template_parameters=AntsImageParameters.from_ants_image(image=ls_template),
+        ls_template_parameters=ls_template_parameters,
         orientation=config.orientation,
         registration_downsample_factor=config.registration_downsample_factor,
         tensorstore_aws_credentials_method=config.tensorstore_aws_credentials_method,
         crop_warp_to_bounding_box=config.crop_warp_to_bounding_box,
         patch_size=config.patch_size,
         mode=TrainMode.TRAIN,
-        normalize_orientation_map=config.normalize_orientation_map_path,
+        normalize_orientation_map=config.normalize_orientation_map,
         limit_sagittal_slices_to_hemisphere=config.limit_sagittal_slices_to_hemisphere,
-        transforms=[albumentations.ToFloat()]
+        input_image_transforms=[
+            albumentations.LongestMaxSize(max_size=256),
+            # albumentations.PadIfNeeded(min_height=512, min_width=512),
+            #albumentations.Resize(width=512, height=512),
+            albumentations.Normalize(normalization="image"),
+            albumentations.ToTensorV2()
+        ],
+        output_points_transforms=[
+            albumentations.LongestMaxSize(max_size=256),
+            # albumentations.PadIfNeeded(min_height=512, min_width=512, border_mode=cv2.BORDER_REPLICATE),
+            #albumentations.Resize(width=512, height=512),
+            albumentations.ToTensorV2()
+        ]
     )
 
     logger.info("Creating validation dataset...")
     val_dataset = SliceDataset(
         dataset_meta=val_metadata,
-        ls_template_parameters=AntsImageParameters.from_ants_image(image=ls_template),
+        ls_template_parameters=ls_template_parameters,
         orientation=config.orientation,
         registration_downsample_factor=config.registration_downsample_factor,
         tensorstore_aws_credentials_method=config.tensorstore_aws_credentials_method,
         crop_warp_to_bounding_box=False,
         patch_size=config.patch_size,
         mode=TrainMode.TRAIN,
-        normalize_orientation_map=config.normalize_orientation_map_path,
+        normalize_orientation_map=config.normalize_orientation_map,
         limit_sagittal_slices_to_hemisphere=config.limit_sagittal_slices_to_hemisphere,
-        limit_frac=config.eval_frac
+        input_image_transforms=[
+            albumentations.LongestMaxSize(max_size=256),
+            # albumentations.PadIfNeeded(min_height=512, min_width=512),
+            #albumentations.Resize(width=512, height=512),
+            albumentations.Normalize(normalization="image"),
+            albumentations.ToTensorV2()
+        ],
+        output_points_transforms=[
+            albumentations.LongestMaxSize(max_size=256),
+            # albumentations.PadIfNeeded(min_height=512, min_width=512, border_mode=cv2.BORDER_REPLICATE),
+            #albumentations.Resize(width=512, height=512),
+            albumentations.ToTensorV2()
+        ]
     )
+
+    if config.debug:
+        train_dataset = Subset(train_dataset, indices=random.sample(range(len(train_dataset)), k=1))
+        val_dataset = Subset(val_dataset, indices=random.sample(range(len(val_dataset)), k=1))
 
     # Create dataloaders
     train_dataloader = DataLoader(
@@ -143,11 +179,16 @@ def main(config_path: Path):
         pin_memory=(device == "cuda"),
     )
 
-    logger.info(f"Train dataset size: {len(train_dataset)}")
-    logger.info(f"Val dataset size: {len(val_dataset)}")
+    logger.info(f"Num train slices: {len(train_dataset)}")
+    logger.info(f"Num val slices: {len(val_dataset)}")
 
-    # Create or load model
-    model = UNet(init_features=config.unet_init_features, in_channels=1, out_channels=3)
+    model = segmentation_models_pytorch.Unet(
+        encoder_name="resnet34",
+        encoder_weights=None,
+        in_channels=1,
+        classes=3,
+        encoder_depth=7
+    )
 
     if config.load_checkpoint:
         logger.info(f"Loading checkpoint from: {config.load_checkpoint}")
@@ -163,7 +204,6 @@ def main(config_path: Path):
     logger.info(f"Trainable parameters: {trainable_params:,}")
 
     # Create optimizer
-    logger.info(f"Creating optimizer: {config.optimizer}")
     opt = torch.optim.AdamW(
             params=model.parameters(),
             lr=config.learning_rate,
@@ -185,6 +225,13 @@ def main(config_path: Path):
         )
     }).result()[:].read().result()
 
+    ls_template_to_ccf_inverse_warp = ants.image_read(str(config.ls_template_to_ccf_inverse_warp_path)).numpy()
+    ccf_template_parameters = AntsImageParameters.from_ants_image(image=ants.image_read(str(config.ccf_template_path)))
+
+    with open(config.region_ccf_ids_map_path) as f:
+        region_ccf_ids_map = json.load(f)
+    region_ccf_ids_map = RegionAcronymCCFIdsMap.model_validate(region_ccf_ids_map)
+
     # Train model
     best_val_rmse = train(
         train_dataloader=train_dataloader,
@@ -202,7 +249,12 @@ def main(config_path: Path):
         autocast_context=autocast_context,
         device=device,
         ccf_annotations=ccf_annotations,
-
+        ls_template=ls_template,
+        ls_template_parameters=ls_template_parameters,
+        ls_template_to_ccf_affine_path=config.ls_template_to_ccf_affine_path,
+        ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
+        ccf_template_parameters=ccf_template_parameters,
+        region_ccf_ids_map=region_ccf_ids_map
     )
 
     logger.info("=" * 60)
@@ -214,7 +266,6 @@ def split_train_val_test(
         subject_metadata: list[SubjectMetadata],
         train_split: float,
         val_split: float,
-        seed: int,
 ) -> tuple[list[SubjectMetadata], list[SubjectMetadata], list[SubjectMetadata]]:
     """
     Parameters
@@ -241,8 +292,6 @@ def split_train_val_test(
         f"{val_split:.1%} val, {test_split:.1%} test"
     )
 
-    # Shuffle with seed
-    random.seed(seed)
     shuffled_metadata = subject_metadata.copy()
     random.shuffle(shuffled_metadata)
 

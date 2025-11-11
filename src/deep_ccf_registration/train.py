@@ -6,14 +6,16 @@ import math
 
 import numpy as np
 import torch
-import torch.nn as nn
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
+from segmentation_models_pytorch import Unet
+from torch.utils.data import Subset
 from torch.utils.data.distributed import DistributedSampler
 from loguru import logger
 
+from deep_ccf_registration.datasets.slice_dataset import SliceDataset
 from deep_ccf_registration.inference import evaluate, RegionAcronymCCFIdsMap
 from deep_ccf_registration.losses.mse import HemisphereAgnosticMSE
-from deep_ccf_registration.models.unet import UNet
+from deep_ccf_registration.metadata import SliceOrientation
 
 
 # https://github.com/karpathy/nanoGPT/blob/master/train.py
@@ -51,10 +53,10 @@ def _get_lr(
 def train(
         train_dataloader,
         val_dataloader,
-        model: UNet,
+        model: Unet,
         optimizer,
         n_epochs: int,
-        model_weights_out_dir: str,
+        model_weights_out_dir: Path,
         ccf_annotations: np.ndarray,
         ls_template_to_ccf_affine_path: Path,
         ls_template_to_ccf_inverse_warp: np.ndarray,
@@ -102,6 +104,10 @@ def train(
     -------
     Best validation loss achieved during training
     """
+    train_dataset: SliceDataset = train_dataloader.dataset
+    if isinstance(train_dataset, Subset):
+        train_dataset = train_dataset.dataset
+
     os.makedirs(model_weights_out_dir, exist_ok=True)
 
     criterion = HemisphereAgnosticMSE(
@@ -128,8 +134,12 @@ def train(
         model.train()
         train_losses = []
 
-        for batch_idx, (input_patches, target_ls_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations) in enumerate(train_dataloader):
-            input_patches, target_ls_template_points = input_patches.to(device), target_ls_template_points.to(device)
+        for batch_idx, batch in enumerate(train_dataloader):
+            if train_dataset.patch_size is not None:
+                input_images, target_ls_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, raw_shapes = batch
+            else:
+                input_images, target_ls_template_points, dataset_indices, slice_indices, orientations, input_image_transforms, raw_shapes = batch
+            input_images, target_ls_template_points = input_images.to(device), target_ls_template_points.to(device)
 
             # Learning rate decay
             if decay_learning_rate:
@@ -146,8 +156,12 @@ def train(
             # Forward pass
             optimizer.zero_grad()
             with autocast_context:
-                pred_ls_template_points = model(input_patches)
-                loss = criterion(pred_ls_template_points, target_ls_template_points)
+                pred_ls_template_points = model(input_images)
+                loss = criterion(
+                    pred_template_points=pred_ls_template_points,
+                    true_template_points=target_ls_template_points,
+                    orientations=[SliceOrientation(x) for x in orientations]
+                )
 
             # Backward pass
             loss.backward()
@@ -252,46 +266,3 @@ def train(
 
     logger.info(f"\nTraining completed! Best validation loss: {best_val_rmse:.6f}")
     return best_val_rmse
-
-
-def evaluate_loss(
-        model: nn.Module,
-        dataloader,
-        criterion,
-        eval_iters: int,
-        device: str,
-        autocast_context: ContextManager = nullcontext(),
-) -> float:
-    """
-    Evaluate average loss over eval_iters batches.
-
-    Parameters
-    ----------
-    model: Neural network model to evaluate
-    dataloader: DataLoader for evaluation data
-    criterion: Loss function
-    eval_iters: Number of batches to evaluate
-    device: Device to evaluate on
-    autocast_context: Context manager for mixed precision evaluation
-
-    Returns
-    -------
-    Average loss over evaluated batches
-    """
-    model.eval()
-    losses = []
-
-    with torch.no_grad():
-        for i, (inputs, targets) in enumerate(dataloader):
-            if i >= eval_iters:
-                break
-
-            inputs, targets = inputs.to(device), targets.to(device)
-
-            with autocast_context:
-                outputs = model(inputs)
-                loss = criterion(outputs, targets)
-
-            losses.append(loss.item())
-
-    return sum(losses) / len(losses) if losses else float('inf')

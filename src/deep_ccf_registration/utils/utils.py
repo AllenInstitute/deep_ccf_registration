@@ -111,3 +111,77 @@ def sample_template_at_points(
         raise NotImplementedError
 
     return values
+
+
+def visualize_ccf_annotations(
+        annotations: np.ndarray,
+        colormap: dict[int, list],
+        return_image: bool = True
+) -> np.ndarray:
+    """
+    Visualize CCF annotations with official Allen colors.
+
+    Args:
+        annotations: (H, W) array of annotation IDs
+        colormap: Optional custom colormap dict. If None, uses Allen official colors.
+        return_image: If True, returns RGB image. If False, displays with matplotlib.
+
+    Returns:
+        RGB image array (H, W, 3) with uint8 values [0-255]
+    """
+    # Create RGB image
+    h, w = annotations.shape
+    rgb_image = np.zeros((h, w, 3), dtype=np.uint8)
+
+    # Map each annotation ID to its color
+    unique_ids = np.unique(annotations)
+    for ann_id in unique_ids:
+        if ann_id == 0:  # Skip background
+            continue
+        mask = annotations == ann_id
+        if ann_id in colormap:
+            rgb_image[mask] = colormap[ann_id]
+        else:
+            # Fallback: generate a random color for unmapped IDs
+            np.random.seed(int(ann_id))  # Deterministic color
+            rgb_image[mask] = np.random.randint(50, 255, 3)
+
+    if not return_image:
+        plt.figure(figsize=(10, 10))
+        plt.imshow(rgb_image)
+        plt.axis('off')
+        plt.title('CCF Annotations')
+        plt.show()
+
+    return rgb_image
+
+
+def fetch_complete_colormap() -> dict[int, list]:
+    """
+    Fetch the complete colormap from Allen Brain Atlas API.
+    Requires internet connection.
+
+    Returns:
+        Complete dictionary mapping all annotation IDs -> RGB [0-255]
+    """
+    import requests
+
+    def hex_to_rgb(hex_color):
+        return [int(hex_color[i:i + 2], 16) for i in (0, 2, 4)]
+
+    def extract_recursive(node, colormap):
+        if 'id' in node and 'color_hex_triplet' in node:
+            colormap[node['id']] = hex_to_rgb(node['color_hex_triplet'])
+        if 'children' in node:
+            for child in node['children']:
+                extract_recursive(child, colormap)
+
+    url = "http://api.brain-map.org/api/v2/structure_graph_download/1.json"
+    response = requests.get(url)
+    data = response.json()
+
+    colormap = {0: [0, 0, 0]}
+    if 'msg' in data and len(data['msg']) > 0:
+        extract_recursive(data['msg'][0], colormap)
+
+    return colormap
