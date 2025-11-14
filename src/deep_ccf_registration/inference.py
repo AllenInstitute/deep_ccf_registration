@@ -1,3 +1,4 @@
+import random
 from pathlib import Path
 from typing import Any, Optional
 
@@ -7,15 +8,18 @@ import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from aind_smartspim_transform_utils.utils import utils
 from loguru import logger
+from matplotlib import pyplot as plt
 from pydantic import BaseModel, Field
+from monai.networks.nets import UNet
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 
 from deep_ccf_registration.datasets.slice_dataset import SliceDataset
+from deep_ccf_registration.losses.mse import HemisphereAgnosticMSE
 from deep_ccf_registration.metadata import SliceOrientation
-from deep_ccf_registration.models.unet import UNet
 from deep_ccf_registration.utils.transforms import apply_transforms_to_points
 from deep_ccf_registration.utils.interpolation import interpolate
+from deep_ccf_registration.utils.visualization import create_diagnostic_image
 
 
 class RegionAcronymCCFIdsMap(BaseModel):
@@ -93,7 +97,7 @@ def evaluate(
     # Initialize accumulators for metrics
     # For RMSE
     sum_squared_errors = 0.0
-    tissue_pixel_count = 0
+    denominator = 0
 
     # For Dice - confusion matrices
     n_major_classes = len(region_ccf_ids_map.major_regions) + 1  # +1 for background
@@ -101,28 +105,36 @@ def evaluate(
     major_confusion_matrix = np.zeros((n_major_classes, n_major_classes), dtype=np.int64)
     small_confusion_matrix = np.zeros((n_small_classes, n_small_classes), dtype=np.int64)
 
-    # For sagittal orientation RMSE
-    ml_dim_size = ls_template.shape[0] * ls_template_parameters.scale[0] * 1000
+    mse = HemisphereAgnosticMSE(
+        ml_dim_size=ls_template.shape[0],
+        template_parameters=ls_template_parameters
+    )
 
+    random_batch_for_viz_idx = random.choice(range(len(val_loader)))
 
     model.eval()
     for batch_idx, batch in enumerate(tqdm(val_loader, desc="Processing patches")):
         if slice_dataset.patch_size is not None:
-            input_images, output_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, raw_shapes = batch
+            input_images, gt_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks = batch
         else:
-            input_images, output_points, dataset_indices, slice_indices, orientations, input_image_transforms, raw_shapes = batch
+            input_images, gt_template_points, dataset_indices, slice_indices, orientations, input_image_transforms, tissue_masks = batch
 
         input_images = input_images.to(device)
+        tissue_masks = tissue_masks.cpu()
+        gt_template_points = gt_template_points.cpu()
 
         # Run inference
-        pred_ls_template_points = model(input_images).cpu().numpy()  # (B, 3, H, W)
-        pred_ls_template_points = pred_ls_template_points.transpose(0, 2, 3, 1)  # (B, H, W, 3)
-        gt_ls_template_points = output_points.numpy().transpose(0, 2, 3, 1)  # (B, H, W, 3)
+        pred_ls_template_points = model(input_images).cpu()
+
+        if batch_idx == random_batch_for_viz_idx:
+            random_sample_for_viz = random.choice(slice_indices.cpu().tolist())
+        else:
+            random_sample_for_viz = None
 
         # Process each patch in the batch
         for i in range(pred_ls_template_points.shape[0]):
-            pred_patch = pred_ls_template_points[i]  # (H, W, 3)
-            gt_patch = gt_ls_template_points[i]  # (H, W, 3)
+            pred_patch = pred_ls_template_points[i]  # (3, H, W)
+            gt_patch = gt_template_points[i]  # (3, H, W)
 
             if pred_patch.shape != gt_patch.shape:
                 pred_patch = _resize_to_original(
@@ -152,35 +164,31 @@ def evaluate(
 
             # Get CCF annotations for patch
             pred_ccf_annot = get_ccf_annotations(ccf_annotations, pred_ccf_pts).reshape(
-                pred_patch.shape[:-1])
+                pred_patch.shape[1:])
+            pred_ccf_annot[(1 - tissue_masks[i]).bool()] = 0
             gt_ccf_annot = get_ccf_annotations(ccf_annotations, gt_ccf_pts).reshape(
-                gt_patch.shape[:-1])
+                gt_patch.shape[1:])
 
-            # Accumulate RMSE in microns, ignoring background
-            tissue_mask = gt_ccf_annot != 0
+            orientation = SliceOrientation(orientations[i])
+            patch_squared_errors = mse(
+                pred_template_points=pred_patch.unsqueeze(0),
+                true_template_points=gt_patch.unsqueeze(0),
+                orientations=[orientation],
+                tissue_masks=tissue_masks[i].unsqueeze(0),
+                return_mean=False
+            )
+            sum_squared_errors += patch_squared_errors.sum()
+            denominator += tissue_masks[i].sum()
 
-            if np.any(tissue_mask):
-                # ANTs uses millimeters. convert to microns
-                pred_tissue = pred_patch[tissue_mask] * 1000
-                gt_tissue = gt_patch[tissue_mask] * 1000
-
-                orientation = SliceOrientation(orientations[i])
-                if orientation == SliceOrientation.SAGITTAL:
-                    # Hemisphere-agnostic sum of squared errors
-                    ml_error_direct = (pred_tissue[..., 0] - gt_tissue[..., 0]) ** 2
-                    ml_error_flipped = ((ml_dim_size - pred_tissue[..., 0]) - gt_tissue[..., 0]) ** 2
-                    ml_error = np.minimum(ml_error_direct, ml_error_flipped)
-
-                    ap_error = (pred_tissue[..., 1] - gt_tissue[..., 1]) ** 2
-                    dv_error = (pred_tissue[..., 2] - gt_tissue[..., 2]) ** 2
-
-                    patch_squared_errors = ml_error + ap_error + dv_error
-                else:
-                    # sum of squared error
-                    patch_squared_errors = np.sum((pred_tissue - gt_tissue) ** 2, axis=1)
-
-                sum_squared_errors += np.sum(patch_squared_errors)
-                tissue_pixel_count += np.sum(tissue_mask)
+            if slice_indices[i] == random_sample_for_viz:
+                fig = create_diagnostic_image(
+                    input_image=input_images[i].cpu().squeeze(0),
+                    slice_idx=slice_indices[i],
+                    squared_errors=patch_squared_errors.cpu().numpy().squeeze(0),
+                    pred_ccf_annotations=pred_ccf_annot,
+                    gt_cff_annotations=gt_ccf_annot
+                )
+                plt.show()
 
             # Accumulate confusion matrices for Dice
             _update_confusion_matrix(
@@ -199,7 +207,7 @@ def evaluate(
 
     # Calculate final metrics
     logger.info('Calculating RMSE from accumulated statistics')
-    rmse = np.sqrt(sum_squared_errors / tissue_pixel_count) if tissue_pixel_count > 0 else 0.0
+    rmse = np.sqrt(sum_squared_errors / denominator) if denominator > 0 else 0.0
 
     logger.info('Calculating dice scores from confusion matrices')
     major_region_dice = _calc_dice_from_confusion_matrix(
@@ -303,7 +311,7 @@ def transform_ls_space_to_ccf_space(
     :param points: MxNx3 predicted points in LS template space
     :return: ccf points in index space
     """
-    points = points.reshape((-1, 3))
+    points = points.permute(1, 2, 0).reshape((-1, 3))
 
     ccf_pts = apply_transforms_to_points(
         points=points,

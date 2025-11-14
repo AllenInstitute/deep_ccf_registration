@@ -7,6 +7,7 @@ import pandas as pd
 import tensorstore
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from aind_smartspim_transform_utils.utils.utils import convert_from_ants_space
+from aind_smartspim_transform_utils.utils import utils
 from tensorstore import TensorStore
 
 from deep_ccf_registration.metadata import AcquisitionAxis
@@ -24,7 +25,7 @@ def transform_points_to_template_ants_space(
     registration_downsample: float = 3.0,
 ) -> np.ndarray:
     """
-    Transform points from input volume space to template ANTs space.
+    Transform points from input index space to physical template ANTs space.
 
     Performs orientation alignment, scaling, and coordinate system conversion
     to map points from acquisition space to template space.

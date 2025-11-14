@@ -14,6 +14,7 @@ import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from aind_smartspim_transform_utils.utils.utils import AcquisitionDirection
 from loguru import logger
+from skimage.filters import threshold_otsu
 from torch.utils.data import Dataset
 
 from deep_ccf_registration.metadata import AcquisitionAxis, SubjectMetadata, SliceOrientation
@@ -119,6 +120,7 @@ class SliceDataset(Dataset):
                  limit_sagittal_slices_to_hemisphere: bool = False,
                  input_image_transforms: Optional[list[albumentations.BasicTransform]] = None,
                  output_points_transforms: Optional[list[albumentations.BasicTransform]] = None,
+                 tissue_mask_transforms: Optional[list[albumentations.BasicTransform]] = None,
                  ):
         """
         Initialize SliceDataset.
@@ -170,6 +172,7 @@ class SliceDataset(Dataset):
         self._limit_sagittal_slices_to_hemisphere = limit_sagittal_slices_to_hemisphere
         self._input_image_transforms = input_image_transforms
         self._output_points_transforms = output_points_transforms
+        self._tissue_mask_transforms = tissue_mask_transforms
 
         if normalize_orientation_map is not None:
             for axis, orientation in normalize_orientation_map.items():
@@ -507,10 +510,21 @@ class SliceDataset(Dataset):
         else:
             pad_transform = {}
 
+        # mask to downweight background in loss
+        # it would be better to pull ccf label for background
+        # but that would require mapping to ccf which adds complexity
+        threshold = threshold_otsu(input_image)
+        tissue_mask = (input_image > threshold).astype('uint8')
+
+        if self._tissue_mask_transforms:
+            tissue_mask = albumentations.Compose(self._tissue_mask_transforms)(image=tissue_mask)['image']
+
+        tissue_mask = tissue_mask.squeeze()
+
         if self.patch_size is not None:
-            res = input_image_transformed, output_points, dataset_idx, slice_idx, patch_y, patch_x, orientation.value, pad_transform, np.array(input_image.shape)
+            res = input_image_transformed, output_points, dataset_idx, slice_idx, patch_y, patch_x, orientation.value, pad_transform, tissue_mask
         else:
-            res = input_image_transformed, output_points, dataset_idx, slice_idx, orientation.value, pad_transform, np.array(input_image.shape)
+            res = input_image_transformed, output_points, dataset_idx, slice_idx, orientation.value, pad_transform, tissue_mask
         return res
 
     def __len__(self):

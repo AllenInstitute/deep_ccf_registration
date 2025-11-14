@@ -6,7 +6,7 @@ import albumentations
 import click
 import cv2
 import numpy as np
-import segmentation_models_pytorch
+from monai.networks.nets import UNet
 import tensorstore
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
@@ -19,7 +19,6 @@ import random
 
 from deep_ccf_registration.configs.train_config import TrainConfig
 from deep_ccf_registration.inference import RegionAcronymCCFIdsMap
-from deep_ccf_registration.models.unet import UNet
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 from train import train
 from deep_ccf_registration.datasets.slice_dataset import (
@@ -119,14 +118,20 @@ def main(config_path: Path):
         limit_sagittal_slices_to_hemisphere=config.limit_sagittal_slices_to_hemisphere,
         input_image_transforms=[
             albumentations.LongestMaxSize(max_size=256),
-            # albumentations.PadIfNeeded(min_height=512, min_width=512),
+            albumentations.PadIfNeeded(min_height=256, min_width=256),
             #albumentations.Resize(width=512, height=512),
-            albumentations.Normalize(normalization="image"),
+            #albumentations.Normalize(mean=(42.6776,), std=(136.6275,), max_pixel_value=1.0),
+            albumentations.ToFloat(max_value=1.0),
             albumentations.ToTensorV2()
+        ],
+        tissue_mask_transforms=[
+            albumentations.LongestMaxSize(max_size=256),
+            albumentations.PadIfNeeded(min_height=256, min_width=256),
+            albumentations.ToTensorV2(),
         ],
         output_points_transforms=[
             albumentations.LongestMaxSize(max_size=256),
-            # albumentations.PadIfNeeded(min_height=512, min_width=512, border_mode=cv2.BORDER_REPLICATE),
+            albumentations.PadIfNeeded(min_height=256, min_width=256, border_mode=cv2.BORDER_REPLICATE),
             #albumentations.Resize(width=512, height=512),
             albumentations.ToTensorV2()
         ]
@@ -146,14 +151,19 @@ def main(config_path: Path):
         limit_sagittal_slices_to_hemisphere=config.limit_sagittal_slices_to_hemisphere,
         input_image_transforms=[
             albumentations.LongestMaxSize(max_size=256),
-            # albumentations.PadIfNeeded(min_height=512, min_width=512),
+            albumentations.PadIfNeeded(min_height=256, min_width=256),
             #albumentations.Resize(width=512, height=512),
             albumentations.Normalize(normalization="image"),
             albumentations.ToTensorV2()
         ],
+        tissue_mask_transforms=[
+            albumentations.LongestMaxSize(max_size=256),
+            albumentations.PadIfNeeded(min_height=256, min_width=256),
+            albumentations.ToTensorV2(),
+        ],
         output_points_transforms=[
             albumentations.LongestMaxSize(max_size=256),
-            # albumentations.PadIfNeeded(min_height=512, min_width=512, border_mode=cv2.BORDER_REPLICATE),
+            albumentations.PadIfNeeded(min_height=256, min_width=256, border_mode=cv2.BORDER_REPLICATE),
             #albumentations.Resize(width=512, height=512),
             albumentations.ToTensorV2()
         ]
@@ -182,12 +192,14 @@ def main(config_path: Path):
     logger.info(f"Num train slices: {len(train_dataset)}")
     logger.info(f"Num val slices: {len(val_dataset)}")
 
-    model = segmentation_models_pytorch.Unet(
-        encoder_name="resnet34",
-        encoder_weights=None,
+    model = UNet(
+        spatial_dims=2,
         in_channels=1,
-        classes=3,
-        encoder_depth=7
+        out_channels=3,
+        # norm=("GROUP", {"num_groups": 32}),
+        dropout=0.0,
+        channels=(32, 64, 128, 256, 512),
+        strides=(2, 2, 2, 2),
     )
 
     if config.load_checkpoint:

@@ -7,7 +7,7 @@ import math
 import numpy as np
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
-from segmentation_models_pytorch import Unet
+from monai.networks.nets import UNet
 from torch.utils.data import Subset
 from torch.utils.data.distributed import DistributedSampler
 from loguru import logger
@@ -53,7 +53,7 @@ def _get_lr(
 def train(
         train_dataloader,
         val_dataloader,
-        model: Unet,
+        model: UNet,
         optimizer,
         n_epochs: int,
         model_weights_out_dir: Path,
@@ -111,7 +111,8 @@ def train(
     os.makedirs(model_weights_out_dir, exist_ok=True)
 
     criterion = HemisphereAgnosticMSE(
-        ml_dim_size=ls_template.shape[0] * ls_template_parameters.scale[0]
+        ml_dim_size=ls_template.shape[0],
+        template_parameters=ls_template_parameters
     )
     best_val_rmse = float("inf")
     patience_counter = 0
@@ -136,10 +137,10 @@ def train(
 
         for batch_idx, batch in enumerate(train_dataloader):
             if train_dataset.patch_size is not None:
-                input_images, target_ls_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, raw_shapes = batch
+                input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks = batch
             else:
-                input_images, target_ls_template_points, dataset_indices, slice_indices, orientations, input_image_transforms, raw_shapes = batch
-            input_images, target_ls_template_points = input_images.to(device), target_ls_template_points.to(device)
+                input_images, target_template_points, dataset_indices, slice_indices, orientations, input_image_transforms, tissue_masks = batch
+            input_images, target_template_points, tissue_masks = input_images.to(device), target_template_points.to(device), tissue_masks.to(device)
 
             # Learning rate decay
             if decay_learning_rate:
@@ -156,10 +157,11 @@ def train(
             # Forward pass
             optimizer.zero_grad()
             with autocast_context:
-                pred_ls_template_points = model(input_images)
+                pred_template_points = model(input_images)
                 loss = criterion(
-                    pred_template_points=pred_ls_template_points,
-                    true_template_points=target_ls_template_points,
+                    pred_template_points=pred_template_points,
+                    true_template_points=target_template_points,
+                    tissue_masks=tissue_masks,
                     orientations=[SliceOrientation(x) for x in orientations]
                 )
 
