@@ -155,13 +155,13 @@ def main(config_path: Path):
             albumentations.ToTensorV2()
         ],
         tissue_mask_transforms=[
-            albumentations.LongestMaxSize(max_size=256),
-            albumentations.PadIfNeeded(min_height=256, min_width=256),
+            #albumentations.LongestMaxSize(max_size=256),
+            #albumentations.PadIfNeeded(min_height=256, min_width=256),
             albumentations.ToTensorV2(),
         ],
         output_points_transforms=[
-            albumentations.LongestMaxSize(max_size=256),
-            albumentations.PadIfNeeded(min_height=256, min_width=256),
+            #albumentations.LongestMaxSize(max_size=256),
+            #albumentations.PadIfNeeded(min_height=256, min_width=256),
             #albumentations.Resize(width=512, height=512),
             albumentations.ToTensorV2()
         ]

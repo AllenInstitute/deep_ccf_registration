@@ -37,7 +37,7 @@ class HemisphereAgnosticMSE(nn.Module):
                 true_template_points: torch.Tensor,
                 orientations: list[SliceOrientation],
                 tissue_masks: torch.Tensor,
-                return_mean: bool = True
+                per_channel_squared_error: bool = False
                 ) -> torch.Tensor:
         """
         :param pred_template_points: Predicted points in light sheet template physical space, shape (batch_size, 3, H, W) (RAS)
@@ -53,31 +53,36 @@ class HemisphereAgnosticMSE(nn.Module):
         )
 
         # Precompute squared errors - shape: (batch_size, H, W)
-        standard_se = torch.sum((pred_template_points - true_template_points) ** 2, dim=1)
+        if per_channel_squared_error:
+            standard_se = (pred_template_points - true_template_points) ** 2
+        else:
+            standard_se = torch.sum((pred_template_points - true_template_points) ** 2, dim=1)
         hemi_agnostic_se = self._calc_hemisphere_agnostic_se(pred_template_points,
-                                                             true_template_points)
+                                                             true_template_points,
+                                                             per_channel=per_channel_squared_error
+                                                             )
 
         # Weight mask: tissue pixels = 1.0, background pixels = lambda_background
         weight_mask = tissue_masks + self._lambda_background * (1 - tissue_masks)
 
-        if return_mean:
-            # Only consider tissue pixels
+        if per_channel_squared_error:
+            standard_loss = standard_se * weight_mask.unsqueeze(1)
+            hemi_loss = hemi_agnostic_se * weight_mask.unsqueeze(1)
+        else:
             weight_sum = weight_mask.sum(dim=(1, 2)).clamp(min=1)  # Avoid division by zero
             standard_loss = (standard_se * weight_mask).sum(dim=(1, 2)) / weight_sum
             hemi_loss = (hemi_agnostic_se * weight_mask).sum(dim=(1, 2)) / weight_sum
-        else:
-            standard_loss = standard_se * weight_mask
-            hemi_loss = hemi_agnostic_se * weight_mask
 
         # Choose hemisphere-agnostic or standard depending on orientation
         loss_per_sample = torch.where(sagittal_mask, hemi_loss, standard_loss)
 
-        return loss_per_sample.mean() if return_mean else loss_per_sample
+        return loss_per_sample if per_channel_squared_error else loss_per_sample.mean()
 
     def _calc_hemisphere_agnostic_se(
             self,
             pred_template_points: torch.Tensor,
             true_template_points: torch.Tensor,
+            per_channel = False,
     ) -> torch.Tensor:
         """
         Calculate hemisphere-agnostic squared error for sagittal slices.
@@ -86,12 +91,19 @@ class HemisphereAgnosticMSE(nn.Module):
         :param true_template_points: Ground truth points in template physical space, shape (batch_size, 3, H, W)
         :return: Squared errors, shape (batch_size, H, W)
         """
-        # Compute total SE for direct prediction
-        se_direct = torch.sum((pred_template_points - true_template_points) ** 2, dim=1)
+        if per_channel:
+            se_direct = (pred_template_points - true_template_points) ** 2
+        else:
+            # Compute total SE for direct prediction
+            se_direct = torch.sum((pred_template_points - true_template_points) ** 2, dim=1)
 
         # Compute total SE for hemisphere-flipped prediction
         ml_flipped = self._mirror_points(pred=pred_template_points)
-        se_flipped = torch.sum((ml_flipped - true_template_points) ** 2, dim=1)
+
+        if per_channel:
+            se_flipped = (ml_flipped - true_template_points) ** 2
+        else:
+            se_flipped = torch.sum((ml_flipped - true_template_points) ** 2, dim=1)
 
         # Take minimum of the two at each pixel
         return torch.minimum(se_direct, se_flipped)

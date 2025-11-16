@@ -26,21 +26,16 @@ def create_diagnostic_image(
     :param gt_template_points: ground truth coordinates (3, H, W) in LS template space
     :param pred_ccf_annotations: predicted CCF annotations (H, W)
     :param gt_ccf_annotations: ground truth CCF annotations (H, W)
-    :param squared_errors: sum of squares for all points across all dims (H, W)
+    :param squared_errors: squared error for all dims  in ANTs space (millimeters) shape (3, H, W)
     :param slice_idx: slice index for title
     :param vmax_percentile: percentile for colormap max
     :param iteration: optional iteration number
     """
-    error_map = np.sqrt(squared_errors) * 1000
+    # Create tissue mask from ground truth annotations (background = 0)
+    tissue_mask = gt_ccf_annotations != 0
 
-    # Calculate vmax from percentile on non-zero values
-    error_nonzero = error_map[error_map > 0]
-    if len(error_nonzero) > 0:
-        vmax = np.percentile(error_nonzero, vmax_percentile)
-        rmse = np.sqrt(np.mean(error_nonzero ** 2))  # RMSE over tissue only
-    else:
-        vmax = None
-        rmse = 0.0
+    sse = squared_errors.sum(axis=0)
+    rmse = np.sqrt(sse[tissue_mask].mean()) * 1000
 
     # Convert coordinates to numpy if needed
     if isinstance(pred_template_points, torch.Tensor):
@@ -53,8 +48,8 @@ def create_diagnostic_image(
     else:
         gt_coords = gt_template_points
 
-    # Create tissue mask from ground truth annotations (background = 0)
-    tissue_mask = gt_ccf_annotations != 0
+
+    error_heatmap = np.sqrt(sse) * 1000
 
     # Mask coordinates - set background to NaN for visualization
     gt_coords_masked = gt_coords.copy()
@@ -62,6 +57,7 @@ def create_diagnostic_image(
     for i in range(3):
         gt_coords_masked[i][~tissue_mask] = np.nan
         pred_coords_masked[i][~tissue_mask] = np.nan
+    error_heatmap[~tissue_mask] = np.nan
 
     # Create figure with multiple rows
     fig = plt.figure(figsize=(24, 18))
@@ -79,8 +75,7 @@ def create_diagnostic_image(
     ax_input.axis('off')
 
     # Plot 2: Error heatmap
-    ax_error.imshow(input_image, cmap='gray', alpha=0.3)
-    im_error = ax_error.imshow(error_map, cmap='turbo', alpha=0.7, vmin=0, vmax=vmax)
+    im_error = ax_error.imshow(error_heatmap, cmap='turbo', alpha=0.7, vmin=0, vmax=np.percentile(error_heatmap[tissue_mask], vmax_percentile))
     ax_error.set_title('Error (microns)', fontsize=12)
     ax_error.axis('off')
     plt.colorbar(im_error, ax=ax_error, fraction=0.046, pad=0.04)
@@ -111,9 +106,7 @@ def create_diagnostic_image(
 
     # Add coordinate error per dimension (tissue only)
     ax_coord_error = fig.add_subplot(gs[1, 3])
-    coord_errors = np.abs(pred_coords - gt_coords) * 1000  # Convert to microns
-    # Calculate mean only over tissue pixels
-    mean_coord_errors = [coord_errors[i][tissue_mask].mean() for i in range(3)]
+    mean_coord_errors = [np.sqrt(squared_errors[i][tissue_mask].mean()) * 1000 for i in range(3)]
     ax_coord_error.bar(['ML', 'AP', 'DV'], mean_coord_errors, color=['red', 'green', 'blue'])
     ax_coord_error.set_title('Mean Error per Coordinate (μm)', fontsize=12)
     ax_coord_error.set_ylabel('Error (microns)')
@@ -126,18 +119,6 @@ def create_diagnostic_image(
         ax.set_title(f'Pred {coord_labels[i]}', fontsize=12)
         ax.axis('off')
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-
-    # Add spatial gradient magnitude for GT coordinates (tissue only)
-    ax_gradient = fig.add_subplot(gs[2, 3])
-    # Calculate gradient magnitude across all coordinate dimensions
-    grad_x = np.gradient(gt_coords, axis=2)  # (3, H, W)
-    grad_y = np.gradient(gt_coords, axis=1)  # (3, H, W)
-    grad_magnitude = np.sqrt((grad_x ** 2 + grad_y ** 2).sum(axis=0)) * 1000  # Microns per pixel
-    grad_magnitude_masked = np.where(tissue_mask, grad_magnitude, np.nan)
-    im_grad = ax_gradient.imshow(grad_magnitude_masked, cmap='plasma')
-    ax_gradient.set_title('GT Coordinate Gradient (μm/px)', fontsize=12)
-    ax_gradient.axis('off')
-    plt.colorbar(im_grad, ax=ax_gradient, fraction=0.046, pad=0.04)
 
     # Overall title
     iteration_title = f'iter {iteration} ' if iteration else ''

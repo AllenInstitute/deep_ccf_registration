@@ -46,6 +46,8 @@ def _resize_to_original(
 
     :return the resized prediction
     """
+    pred_patch = np.permute_dims(pred_patch, (1, 2, 0))
+
     if pre_pad_shape is not None:
         # 1. Crop out padding
         H_scaled, W_scaled = pre_pad_shape
@@ -57,6 +59,7 @@ def _resize_to_original(
     resize = albumentations.Resize(height=gt_shape[0], width=gt_shape[1])
     pred_original = resize(image=pred_cropped)['image']
 
+    pred_original = torch.tensor(pred_original).permute((2, 0, 1))
     return pred_original
 
 @torch.no_grad()
@@ -140,11 +143,11 @@ def evaluate(
 
             if pred_patch.shape != gt_patch.shape:
                 pred_patch = _resize_to_original(
-                    pred_patch=pred_patch,
+                    pred_patch=pred_patch.cpu().numpy(),
                     pre_pad_shape=tuple([int(input_image_transforms['shape'][ii][i].item()) for ii in range(2)]) if input_image_transforms else None,
                     pad_top=input_image_transforms['pad_top'][i].item() if input_image_transforms else None,
                     pad_left=input_image_transforms['pad_left'][i].item() if input_image_transforms else None,
-                    gt_shape=gt_patch.shape
+                    gt_shape=gt_patch.shape[1:]
                 )
 
             # Transform patch to CCF space
@@ -177,7 +180,7 @@ def evaluate(
                 true_template_points=gt_patch.unsqueeze(0),
                 orientations=[orientation],
                 tissue_masks=tissue_masks[i].unsqueeze(0),
-                return_mean=False
+                per_channel_squared_error=True
             )
             sum_squared_errors += patch_squared_errors.sum()
             denominator += tissue_masks[i].sum()
