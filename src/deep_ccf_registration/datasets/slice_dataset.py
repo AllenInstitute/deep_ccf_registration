@@ -14,6 +14,7 @@ import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from aind_smartspim_transform_utils.utils.utils import AcquisitionDirection
 from loguru import logger
+from skimage.exposure import rescale_intensity
 from skimage.filters import threshold_otsu
 from torch.utils.data import Dataset
 
@@ -478,6 +479,12 @@ class SliceDataset(Dataset):
                 orientation=orientation,
                 slice_axis=slice_axis
             )
+
+        input_image = rescale_intensity(
+            input_image,
+            in_range=tuple(np.percentile(input_image, (1, 99))),
+            out_range=(0, 1)
+        ).astype(np.float32)
 
         # prevent negative strides error when arrays are collated
         input_image = np.ascontiguousarray(input_image)

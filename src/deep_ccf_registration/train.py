@@ -184,7 +184,8 @@ def train(
                     ls_template_parameters=ls_template_parameters,
                     ccf_template_parameters=ccf_template_parameters,
                     region_ccf_ids_map=region_ccf_ids_map,
-                    device=device
+                    device=device,
+                    iteration=global_step,
                 )
                 val_rmse, val_major_region_dice, val_small_region_dice = evaluate(
                     val_loader=val_dataloader,
@@ -196,7 +197,8 @@ def train(
                     ls_template_parameters=ls_template_parameters,
                     ccf_template_parameters=ccf_template_parameters,
                     region_ccf_ids_map=region_ccf_ids_map,
-                    device=device
+                    device=device,
+                    iteration=global_step
                 )
 
                 current_lr = optimizer.param_groups[0]['lr']
@@ -211,7 +213,7 @@ def train(
 
                 logger.info(
                     f"Epoch {epoch} | Step {global_step} | "
-                    f"Train RMSE: {train_rmse:.6f} | Val RMSE: {val_rmse:.6f} | "
+                    f"Train RMSE: {train_rmse:.6f} microns | Val RMSE: {val_rmse:.6f} microns | "
                     f"Train major dice: {train_major_dice_avg:.6f} | Val major dice: {val_major_dice_avg:.6f} | "
                     f"Train small dice: {train_small_dice_avg} | Val major dice: {val_small_dice_avg:.6f} | "
                     f"LR: {current_lr:.6e}"

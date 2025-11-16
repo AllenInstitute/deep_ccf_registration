@@ -6,6 +6,7 @@ import albumentations
 import click
 import cv2
 import numpy as np
+from monai.networks.layers import Norm
 from monai.networks.nets import UNet
 import tensorstore
 import torch
@@ -120,8 +121,6 @@ def main(config_path: Path):
             albumentations.LongestMaxSize(max_size=256),
             albumentations.PadIfNeeded(min_height=256, min_width=256),
             #albumentations.Resize(width=512, height=512),
-            #albumentations.Normalize(mean=(42.6776,), std=(136.6275,), max_pixel_value=1.0),
-            albumentations.ToFloat(max_value=1.0),
             albumentations.ToTensorV2()
         ],
         tissue_mask_transforms=[
@@ -131,7 +130,7 @@ def main(config_path: Path):
         ],
         output_points_transforms=[
             albumentations.LongestMaxSize(max_size=256),
-            albumentations.PadIfNeeded(min_height=256, min_width=256, border_mode=cv2.BORDER_REPLICATE),
+            albumentations.PadIfNeeded(min_height=256, min_width=256),
             #albumentations.Resize(width=512, height=512),
             albumentations.ToTensorV2()
         ]
@@ -153,7 +152,6 @@ def main(config_path: Path):
             albumentations.LongestMaxSize(max_size=256),
             albumentations.PadIfNeeded(min_height=256, min_width=256),
             #albumentations.Resize(width=512, height=512),
-            albumentations.Normalize(normalization="image"),
             albumentations.ToTensorV2()
         ],
         tissue_mask_transforms=[
@@ -163,15 +161,15 @@ def main(config_path: Path):
         ],
         output_points_transforms=[
             albumentations.LongestMaxSize(max_size=256),
-            albumentations.PadIfNeeded(min_height=256, min_width=256, border_mode=cv2.BORDER_REPLICATE),
+            albumentations.PadIfNeeded(min_height=256, min_width=256),
             #albumentations.Resize(width=512, height=512),
             albumentations.ToTensorV2()
         ]
     )
 
     if config.debug:
-        train_dataset = Subset(train_dataset, indices=random.sample(range(len(train_dataset)), k=1))
-        val_dataset = Subset(val_dataset, indices=random.sample(range(len(val_dataset)), k=1))
+        train_dataset = Subset(train_dataset, indices=[int(len(train_dataset)/2)])
+        val_dataset = Subset(val_dataset, indices=[int(len(val_dataset)/2)])
 
     # Create dataloaders
     train_dataloader = DataLoader(
@@ -196,10 +194,9 @@ def main(config_path: Path):
         spatial_dims=2,
         in_channels=1,
         out_channels=3,
-        # norm=("GROUP", {"num_groups": 32}),
         dropout=0.0,
-        channels=(32, 64, 128, 256, 512),
-        strides=(2, 2, 2, 2),
+        channels=(8, 16, 32, 64, 128, 256, 512),
+        strides=(2, 2, 2, 2, 2, 2, 2),
     )
 
     if config.load_checkpoint:

@@ -61,8 +61,10 @@ class HemisphereAgnosticMSE(nn.Module):
         weight_mask = tissue_masks + self._lambda_background * (1 - tissue_masks)
 
         if return_mean:
-            standard_loss = (standard_se * weight_mask).mean(dim=(1, 2))
-            hemi_loss = (hemi_agnostic_se * weight_mask).mean(dim=(1, 2))
+            # Only consider tissue pixels
+            weight_sum = weight_mask.sum(dim=(1, 2)).clamp(min=1)  # Avoid division by zero
+            standard_loss = (standard_se * weight_mask).sum(dim=(1, 2)) / weight_sum
+            hemi_loss = (hemi_agnostic_se * weight_mask).sum(dim=(1, 2)) / weight_sum
         else:
             standard_loss = standard_se * weight_mask
             hemi_loss = hemi_agnostic_se * weight_mask

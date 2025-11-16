@@ -70,6 +70,7 @@ def evaluate(
         ls_template_parameters: AntsImageParameters,
         ccf_template_parameters: AntsImageParameters,
         region_ccf_ids_map: RegionAcronymCCFIdsMap,
+        iteration: int,
         device: str = "cuda",
 ) -> tuple[float, dict[str, float], dict[str, float]]:
     """
@@ -83,6 +84,7 @@ def evaluate(
     :param ccf_template_parameters: ccf template AntsImageParameters
     :param region_ccf_ids_map: `RegionAcronymCCFIdsMap`
     :param device:
+    :param iteration
     :return: tuple of: (rmse in microns ignoring background (just tissue), mapping from major brain
         region to dice, mapping from small region to dice)
     """
@@ -186,7 +188,10 @@ def evaluate(
                     slice_idx=slice_indices[i],
                     squared_errors=patch_squared_errors.cpu().numpy().squeeze(0),
                     pred_ccf_annotations=pred_ccf_annot,
-                    gt_cff_annotations=gt_ccf_annot
+                    gt_ccf_annotations=gt_ccf_annot,
+                    iteration=iteration,
+                    pred_template_points=pred_patch,
+                    gt_template_points=gt_patch
                 )
                 plt.show()
 
@@ -208,6 +213,9 @@ def evaluate(
     # Calculate final metrics
     logger.info('Calculating RMSE from accumulated statistics')
     rmse = np.sqrt(sum_squared_errors / denominator) if denominator > 0 else 0.0
+
+    # convert to microns
+    rmse *= 1000
 
     logger.info('Calculating dice scores from confusion matrices')
     major_region_dice = _calc_dice_from_confusion_matrix(
