@@ -317,20 +317,20 @@ def _calc_dice_from_confusion_matrix(
     """
     result = {}
 
-    # Map acronyms to class indices (1-indexed, skipping background)
     acronym_to_class = {
         acronym: class_idx
         for class_idx, acronym in enumerate(region_map.keys(), start=1)
     }
 
     for acronym, class_idx in acronym_to_class.items():
-        # Dice = 2 * TP / (2 * TP + FP + FN)
+        if confusion_matrix[class_idx].sum() == 0:
+            continue
         tp = confusion_matrix[class_idx, class_idx]
         fp = confusion_matrix[:, class_idx].sum() - tp
         fn = confusion_matrix[class_idx, :].sum() - tp
 
         denominator = 2 * tp + fp + fn
-        dice = (2 * tp / denominator) if denominator > 0 else 0.0
+        dice = (2 * tp / denominator)
 
         result[acronym] = float(dice)
 
