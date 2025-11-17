@@ -1,5 +1,5 @@
 from pathlib import Path
-from typing import ContextManager
+from typing import ContextManager, Any
 from contextlib import nullcontext
 import os
 import math
@@ -11,6 +11,7 @@ from monai.networks.nets import UNet
 from torch.utils.data import Subset
 from torch.utils.data.distributed import DistributedSampler
 from loguru import logger
+import torch.nn.functional as F
 
 from deep_ccf_registration.datasets.slice_dataset import SliceDataset
 from deep_ccf_registration.inference import evaluate, RegionAcronymCCFIdsMap
@@ -49,6 +50,35 @@ def _get_lr(
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
     return min_lr + coeff * (learning_rate - min_lr)
 
+def _mask_pad_pixels(tissue_loss_per_pixel: torch.Tensor, input_image_transforms: dict[str, Any]) -> torch.Tensor:
+    """
+    Ignore pad pixels for loss
+
+    :param tissue_loss_per_pixel: B, H, W tensor for BCE loss per pixel
+    :param input_image_transforms: transforms applied to input image
+    :return: tissue loss, ignoring pad pixels
+    """
+    batch_size, height, width = tissue_loss_per_pixel.shape
+    valid_mask = torch.ones((batch_size, height, width), dtype=torch.bool, device='cpu')
+
+    for i in range(batch_size):
+        pad_top = input_image_transforms['pad_top'][i].item()
+        pad_bottom = input_image_transforms['pad_bottom'][i].item()
+        pad_left = input_image_transforms['pad_left'][i].item()
+        pad_right = input_image_transforms['pad_right'][i].item()
+
+        # Mark padded regions as False
+        if pad_top > 0:
+            valid_mask[i, :pad_top, :] = False
+        if pad_bottom > 0:
+            valid_mask[i, -pad_bottom:, :] = False
+        if pad_left > 0:
+            valid_mask[i, :, :pad_left] = False
+        if pad_right > 0:
+            valid_mask[i, :, -pad_right:] = False
+
+    tissue_loss = tissue_loss_per_pixel[valid_mask].mean()
+    return tissue_loss
 
 def train(
         train_dataloader,
@@ -114,8 +144,6 @@ def train(
         ml_dim_size=ls_template.shape[0],
         template_parameters=ls_template_parameters
     )
-    bce = torch.nn.BCEWithLogitsLoss()
-
     best_val_rmse = float("inf")
     patience_counter = 0
     global_step = 0
@@ -169,9 +197,14 @@ def train(
                     orientations=[SliceOrientation(x) for x in orientations]
                 )
 
-                tissue_loss = bce(
-                    model_out[:, -1].cpu().float(),
-                    tissue_masks.cpu().float()
+                tissue_loss_per_pixel = F.binary_cross_entropy_with_logits(
+                    model_out[:, -1].cpu().float(), # moving to cpu since bug with BCE and mps locally
+                    tissue_masks.cpu().float(),  # moving to cpu since bug with BCE and mps locally
+                    reduction='none'
+                )
+                tissue_loss = _mask_pad_pixels(
+                    tissue_loss_per_pixel=tissue_loss_per_pixel,
+                    input_image_transforms=input_image_transforms
                 )
                 loss = mse_loss + 0.1 * tissue_loss
 
