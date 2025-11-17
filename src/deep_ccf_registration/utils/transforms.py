@@ -5,6 +5,7 @@ import aind_smartspim_transform_utils
 import numpy as np
 import pandas as pd
 import tensorstore
+import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from aind_smartspim_transform_utils.utils.utils import convert_from_ants_space
 from aind_smartspim_transform_utils.utils import utils
@@ -228,3 +229,46 @@ def get_cropped_region_from_array(
     points -= min_coords
 
     return cropped_array
+
+
+def transform_ls_space_to_ccf_space(
+        points: torch.Tensor | np.ndarray,
+        ls_template_to_ccf_affine_path: Path,
+        ls_template_to_ccf_inverse_warp: np.ndarray,
+        ls_template_parameters: AntsImageParameters,
+        ccf_template_parameters: AntsImageParameters,
+) -> np.ndarray:
+    """
+    Transform points to CCF index space
+
+    :param points: MxNx3 predicted points in LS template space
+    :return: ccf points in index space
+    """
+    if isinstance(points, torch.Tensor):
+        points = points.numpy()
+
+    if points.shape[-1] != 3:
+        # place channel dim last
+        points = np.permute_dims(points, (1, 2, 0))
+    points = points.reshape((-1, 3))
+
+    ccf_pts = apply_transforms_to_points(
+        points=points,
+        affine_path=ls_template_to_ccf_affine_path,
+        warp=ls_template_to_ccf_inverse_warp,
+        template_parameters=ccf_template_parameters,
+        crop_warp_to_bounding_box=False
+    )
+
+    ccf_pts = utils.convert_from_ants_space(
+        ccf_template_parameters, ccf_pts
+    )
+
+    _, swapped, _ = utils.get_orientation_transform(
+        ls_template_parameters.orientation,
+        ccf_template_parameters.orientation,
+    )
+
+    ccf_pts = ccf_pts[:, swapped]
+
+    return ccf_pts

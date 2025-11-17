@@ -1,24 +1,24 @@
 import random
 from pathlib import Path
-from typing import Any, Optional
+from typing import Optional
 
 import albumentations
 import numpy as np
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
-from aind_smartspim_transform_utils.utils import utils
 from loguru import logger
 from matplotlib import pyplot as plt
 from pydantic import BaseModel, Field
 from monai.networks.nets import UNet
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
+import  torch.nn.functional as F
 
 from deep_ccf_registration.datasets.slice_dataset import SliceDataset
 from deep_ccf_registration.losses.mse import HemisphereAgnosticMSE
 from deep_ccf_registration.metadata import SliceOrientation
-from deep_ccf_registration.utils.transforms import apply_transforms_to_points
-from deep_ccf_registration.utils.interpolation import interpolate
+from deep_ccf_registration.utils.transforms import transform_ls_space_to_ccf_space
+from deep_ccf_registration.utils.utils import get_ccf_annotations
 from deep_ccf_registration.utils.visualization import create_diagnostic_image
 
 
@@ -30,7 +30,7 @@ class RegionAcronymCCFIdsMap(BaseModel):
 
 
 def _resize_to_original(
-        pred_patch: torch.Tensor,
+        img: torch.Tensor,
         gt_shape: tuple[int, int],
         pre_pad_shape: Optional[tuple[int, int]] = None,
         pad_top: Optional[int] = None,
@@ -40,20 +40,20 @@ def _resize_to_original(
     This handles the fact that the input image might be padded, and so padding is reversed and then
     image excluding padding resized.
 
-    :param pred_patch: The predicted points
+    :param img: The predicted points
     :param gt_shape: The unmodified ground truth patch shape
     :param pad_transform: output from albumentations transform
 
     :return the resized prediction
     """
-    pred_patch = np.permute_dims(pred_patch, (1, 2, 0))
+    img = np.permute_dims(img, (1, 2, 0))
 
     if pre_pad_shape is not None:
         # 1. Crop out padding
         H_scaled, W_scaled = pre_pad_shape
-        pred_cropped = pred_patch[pad_top:pad_top + H_scaled, pad_left:pad_left + W_scaled]
+        pred_cropped = img[pad_top:pad_top + H_scaled, pad_left:pad_left + W_scaled]
     else:
-        pred_cropped = pred_patch
+        pred_cropped = img
 
     # 2. Resize back to original
     resize = albumentations.Resize(height=gt_shape[0], width=gt_shape[1])
@@ -75,7 +75,7 @@ def evaluate(
         region_ccf_ids_map: RegionAcronymCCFIdsMap,
         iteration: int,
         device: str = "cuda",
-) -> tuple[float, dict[str, float], dict[str, float]]:
+) -> tuple[float, dict[str, float], dict[str, float], float, float, float]:
     """
     :param val_loader: validation DataLoader
     :param model: model
@@ -102,7 +102,10 @@ def evaluate(
     # Initialize accumulators for metrics
     # For RMSE
     sum_squared_errors = 0.0
-    denominator = 0
+    mse_denominator = 0
+    tissue_mask_tp_sum = 0
+    tissue_mask_fp_sum = 0
+    tissue_mask_fn_sum = 0
 
     # For Dice - confusion matrices
     n_major_classes = len(region_ccf_ids_map.major_regions) + 1  # +1 for background
@@ -120,16 +123,18 @@ def evaluate(
     model.eval()
     for batch_idx, batch in enumerate(tqdm(val_loader, desc="Processing patches")):
         if slice_dataset.patch_size is not None:
-            input_images, gt_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks = batch
+            input_images, gt_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, _ = batch
         else:
-            input_images, gt_template_points, dataset_indices, slice_indices, orientations, input_image_transforms, tissue_masks = batch
+            input_images, gt_template_points, dataset_indices, slice_indices, orientations, input_image_transforms, _ = batch
 
         input_images = input_images.to(device)
-        tissue_masks = tissue_masks.cpu()
         gt_template_points = gt_template_points.cpu()
 
         # Run inference
-        pred_ls_template_points = model(input_images).cpu()
+        model_out = model(input_images).cpu()
+        pred_ls_template_points = model_out[:, :-1]
+        pred_tissue_logits = model_out[:, -1]
+        tissue_masks = (F.sigmoid(pred_tissue_logits) > 0.5).to(torch.uint8)
 
         if batch_idx == random_batch_for_viz_idx:
             random_sample_for_viz = random.choice(slice_indices.cpu().tolist())
@@ -140,15 +145,28 @@ def evaluate(
         for i in range(pred_ls_template_points.shape[0]):
             pred_patch = pred_ls_template_points[i]  # (3, H, W)
             gt_patch = gt_template_points[i]  # (3, H, W)
+            tissue_mask = tissue_masks[i]
 
             if pred_patch.shape != gt_patch.shape:
                 pred_patch = _resize_to_original(
-                    pred_patch=pred_patch.cpu().numpy(),
+                    img=pred_patch.cpu().numpy(),
                     pre_pad_shape=tuple([int(input_image_transforms['shape'][ii][i].item()) for ii in range(2)]) if input_image_transforms else None,
                     pad_top=input_image_transforms['pad_top'][i].item() if input_image_transforms else None,
                     pad_left=input_image_transforms['pad_left'][i].item() if input_image_transforms else None,
                     gt_shape=gt_patch.shape[1:]
                 )
+                tissue_mask = _resize_to_original(
+                    img=tissue_mask.unsqueeze(0).cpu().numpy(),
+                    pre_pad_shape=tuple(
+                        [int(input_image_transforms['shape'][ii][i].item()) for ii in
+                         range(2)]) if input_image_transforms else None,
+
+                    pad_top=input_image_transforms['pad_top'][
+                        i].item() if input_image_transforms else None,
+                    pad_left=input_image_transforms['pad_left'][
+                        i].item() if input_image_transforms else None,
+                    gt_shape=gt_patch.shape[1:]
+                ).squeeze(0)
 
             # Transform patch to CCF space
             pred_ccf_pts = transform_ls_space_to_ccf_space(
@@ -170,20 +188,25 @@ def evaluate(
             # Get CCF annotations for patch
             pred_ccf_annot = get_ccf_annotations(ccf_annotations, pred_ccf_pts).reshape(
                 pred_patch.shape[1:])
-            pred_ccf_annot[(1 - tissue_masks[i]).bool()] = 0
+            pred_ccf_annot[(1 - tissue_mask).bool()] = 0
             gt_ccf_annot = get_ccf_annotations(ccf_annotations, gt_ccf_pts).reshape(
                 gt_patch.shape[1:])
+
+            gt_tissue_mask = gt_ccf_annot != 0
 
             orientation = SliceOrientation(orientations[i])
             patch_squared_errors = mse(
                 pred_template_points=pred_patch.unsqueeze(0),
                 true_template_points=gt_patch.unsqueeze(0),
                 orientations=[orientation],
-                tissue_masks=tissue_masks[i].unsqueeze(0),
+                tissue_masks=torch.ones_like(tissue_mask).unsqueeze(0),  # calculate squared error over all pixels
                 per_channel_squared_error=True
             )
-            sum_squared_errors += patch_squared_errors.sum()
-            denominator += tissue_masks[i].sum()
+            sum_squared_errors += patch_squared_errors[0][:, gt_tissue_mask].sum(dim=0).sum()
+            mse_denominator += gt_tissue_mask.sum()
+            tissue_mask_tp_sum += ((gt_tissue_mask == 1) & (tissue_mask.cpu().numpy() == 1)).sum()
+            tissue_mask_fp_sum += ((gt_tissue_mask == 0) & (tissue_mask.cpu().numpy() == 1)).sum()
+            tissue_mask_fn_sum += ((gt_tissue_mask == 1) & (tissue_mask.cpu().numpy() == 0)).sum()
 
             if slice_indices[i] == random_sample_for_viz:
                 fig = create_diagnostic_image(
@@ -215,10 +238,14 @@ def evaluate(
 
     # Calculate final metrics
     logger.info('Calculating RMSE from accumulated statistics')
-    rmse = np.sqrt(sum_squared_errors / denominator) if denominator > 0 else 0.0
+    rmse = np.sqrt(sum_squared_errors / mse_denominator) if mse_denominator > 0 else 0.0
 
     # convert to microns
     rmse *= 1000
+
+    tissue_mask_precision = tissue_mask_tp_sum / (tissue_mask_tp_sum + tissue_mask_fp_sum)
+    tissue_mask_recall = tissue_mask_tp_sum / (tissue_mask_tp_sum + tissue_mask_fn_sum)
+    tissue_mask_f1 = 2 * tissue_mask_precision * tissue_mask_recall / (tissue_mask_precision + tissue_mask_recall)
 
     logger.info('Calculating dice scores from confusion matrices')
     major_region_dice = _calc_dice_from_confusion_matrix(
@@ -231,7 +258,7 @@ def evaluate(
         region_map=region_ccf_ids_map.small_regions
     )
 
-    return rmse, major_region_dice, small_region_dice
+    return rmse, major_region_dice, small_region_dice, tissue_mask_precision, tissue_mask_recall, tissue_mask_f1
 
 
 def _build_class_mapping(region_map: dict[str, list[int]]) -> dict[int, int]:
@@ -308,51 +335,3 @@ def _calc_dice_from_confusion_matrix(
         result[acronym] = float(dice)
 
     return result
-
-def transform_ls_space_to_ccf_space(
-        points: np.ndarray,
-        ls_template_to_ccf_affine_path: Path,
-        ls_template_to_ccf_inverse_warp: np.ndarray,
-        ls_template_parameters: AntsImageParameters,
-        ccf_template_parameters: AntsImageParameters,
-) -> np.ndarray:
-    """
-    Transform points to CCF index space
-
-    :param points: MxNx3 predicted points in LS template space
-    :return: ccf points in index space
-    """
-    points = points.permute(1, 2, 0).reshape((-1, 3))
-
-    ccf_pts = apply_transforms_to_points(
-        points=points,
-        affine_path=ls_template_to_ccf_affine_path,
-        warp=ls_template_to_ccf_inverse_warp,
-        template_parameters=ccf_template_parameters,
-        crop_warp_to_bounding_box=False
-    )
-
-    ccf_pts = utils.convert_from_ants_space(
-        ccf_template_parameters, ccf_pts
-    )
-
-    _, swapped, _ = utils.get_orientation_transform(
-        ls_template_parameters.orientation,
-        ccf_template_parameters.orientation,
-    )
-
-    ccf_pts = ccf_pts[:, swapped]
-
-    return ccf_pts
-
-
-def get_ccf_annotations(ccf_annotations: np.ndarray, pts: np.ndarray):
-    labels = interpolate(
-        array=ccf_annotations.astype(np.float32),
-        grid=pts,
-        mode='nearest'
-    )
-
-    labels = labels.squeeze().cpu().numpy().astype(int)  # (M*N,)
-
-    return labels

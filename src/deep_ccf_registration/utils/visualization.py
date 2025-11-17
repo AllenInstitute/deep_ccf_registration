@@ -72,12 +72,10 @@ def create_diagnostic_image(
     # Plot 1: Input image
     ax_input.imshow(input_image, cmap='gray')
     ax_input.set_title('Input Image', fontsize=12)
-    ax_input.axis('off')
 
     # Plot 2: Error heatmap
     im_error = ax_error.imshow(error_heatmap, cmap='turbo', alpha=0.7, vmin=0, vmax=np.percentile(error_heatmap[tissue_mask], vmax_percentile))
     ax_error.set_title('Error (microns)', fontsize=12)
-    ax_error.axis('off')
     plt.colorbar(im_error, ax=ax_error, fraction=0.046, pad=0.04)
 
     # Plot 3 & 4: CCF annotations
@@ -89,19 +87,16 @@ def create_diagnostic_image(
 
     ax_pred_ccf.imshow(pred_ccf_vis)
     ax_pred_ccf.set_title('Predicted CCF annotations', fontsize=12)
-    ax_pred_ccf.axis('off')
 
     ax_gt_ccf.imshow(gt_ccf_vis)
     ax_gt_ccf.set_title('Ground truth CCF annotations', fontsize=12)
-    ax_gt_ccf.axis('off')
 
     # Row 2: Ground truth coordinate channels (ML, AP, DV) - masked
     coord_labels = ['ML (Medial-Lateral)', 'AP (Anterior-Posterior)', 'DV (Dorsal-Ventral)']
     for i in range(3):
         ax = fig.add_subplot(gs[1, i])
-        im = ax.imshow(gt_coords_masked[i], cmap='viridis')
+        im = ax.imshow(gt_coords_masked[i] * 1000, cmap='viridis')
         ax.set_title(f'GT {coord_labels[i]}', fontsize=12)
-        ax.axis('off')
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
     # Add coordinate error per dimension (tissue only)
@@ -115,9 +110,8 @@ def create_diagnostic_image(
     # Row 3: Predicted coordinate channels (ML, AP, DV) - masked
     for i in range(3):
         ax = fig.add_subplot(gs[2, i])
-        im = ax.imshow(pred_coords_masked[i], cmap='viridis')
+        im = ax.imshow(pred_coords_masked[i] * 1000, cmap='viridis')
         ax.set_title(f'Pred {coord_labels[i]}', fontsize=12)
-        ax.axis('off')
         plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 
     # Overall title

@@ -17,7 +17,8 @@ from aind_smartspim_transform_utils.utils.utils import AcquisitionDirection
 from loguru import logger
 from tqdm import tqdm
 
-from deep_ccf_registration.inference import transform_ls_space_to_ccf_space, get_ccf_annotations
+from deep_ccf_registration.utils.transforms import transform_ls_space_to_ccf_space
+from deep_ccf_registration.utils.utils import get_ccf_annotations
 
 from deep_ccf_registration.datasets.slice_dataset import SliceDataset, TrainMode
 from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation

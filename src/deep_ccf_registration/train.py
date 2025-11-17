@@ -110,10 +110,12 @@ def train(
 
     os.makedirs(model_weights_out_dir, exist_ok=True)
 
-    criterion = HemisphereAgnosticMSE(
+    mse = HemisphereAgnosticMSE(
         ml_dim_size=ls_template.shape[0],
         template_parameters=ls_template_parameters
     )
+    bce = torch.nn.BCEWithLogitsLoss()
+
     best_val_rmse = float("inf")
     patience_counter = 0
     global_step = 0
@@ -134,6 +136,8 @@ def train(
 
         model.train()
         train_losses = []
+        train_mse_losses = []
+        train_mask_losses = []
 
         for batch_idx, batch in enumerate(train_dataloader):
             if train_dataset.patch_size is not None:
@@ -157,24 +161,33 @@ def train(
             # Forward pass
             optimizer.zero_grad()
             with autocast_context:
-                pred_template_points = model(input_images)
-                loss = criterion(
-                    pred_template_points=pred_template_points,
+                model_out = model(input_images)
+                mse_loss = mse(
+                    pred_template_points=model_out[:, :-1],
                     true_template_points=target_template_points,
                     tissue_masks=tissue_masks,
                     orientations=[SliceOrientation(x) for x in orientations]
                 )
+
+                tissue_loss = bce(
+                    model_out[:, -1].cpu().float(),
+                    tissue_masks.cpu().float()
+                )
+                loss = mse_loss + 0.1 * tissue_loss
 
             # Backward pass
             loss.backward()
             optimizer.step()
 
             train_losses.append(loss.item())
+            train_mse_losses.append(mse_loss.item())
+            train_mask_losses.append(tissue_loss.item())
+
             global_step += 1
 
             # Periodic evaluation
             if global_step % loss_eval_interval == 0:
-                train_rmse, train_major_region_dice, train_small_region_dice = evaluate(
+                train_rmse, train_major_region_dice, train_small_region_dice, train_tissue_mask_precision, train_tissue_mask_recall, train_tissue_mask_f1 = evaluate(
                     val_loader=train_dataloader,
                     model=model,
                     ccf_annotations=ccf_annotations,
@@ -187,7 +200,7 @@ def train(
                     device=device,
                     iteration=global_step,
                 )
-                val_rmse, val_major_region_dice, val_small_region_dice = evaluate(
+                val_rmse, val_major_region_dice, val_small_region_dice, val_tissue_mask_precision, val_tissue_mask_recall, val_tissue_mask_f1 = evaluate(
                     val_loader=val_dataloader,
                     model=model,
                     ccf_annotations=ccf_annotations,
@@ -216,6 +229,8 @@ def train(
                     f"Train RMSE: {train_rmse:.6f} microns | Val RMSE: {val_rmse:.6f} microns | "
                     f"Train major dice: {train_major_dice_avg:.6f} | Val major dice: {val_major_dice_avg:.6f} | "
                     f"Train small dice: {train_small_dice_avg} | Val major dice: {val_small_dice_avg:.6f} | "
+                    f"Train mask precision: {train_tissue_mask_precision} | Train mask recall {train_tissue_mask_recall} | Train mask f1 {train_tissue_mask_f1} | "
+                    f"Val mask precision: {val_tissue_mask_precision} | Val mask recall {val_tissue_mask_recall} | Val mask f1 {val_tissue_mask_f1} | "
                     f"LR: {current_lr:.6e}"
                 )
 
@@ -251,8 +266,10 @@ def train(
 
         # End of epoch summary
         avg_train_loss = sum(train_losses) / len(train_losses)
+        avg_mse_loss = sum(train_mse_losses) / len(train_mse_losses)
+        avg_mask_loss = sum(train_mask_losses) / len(train_mask_losses)
         logger.info(f"\n{'=' * 60}")
-        logger.info(f"Epoch {epoch}/{n_epochs} completed | Avg Train Loss: {avg_train_loss:.6f}")
+        logger.info(f"Epoch {epoch}/{n_epochs} completed | Avg Train Loss: {avg_train_loss:.6f} | Avg mse loss {avg_mse_loss:.6f} | Avg mask loss {avg_mask_loss:.6f}")
         logger.info(f"{'=' * 60}\n")
 
         # Save epoch checkpoint

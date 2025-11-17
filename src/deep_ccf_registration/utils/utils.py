@@ -7,6 +7,8 @@ import torch
 from matplotlib import pyplot as plt
 from skimage.exposure import rescale_intensity
 
+from deep_ccf_registration.utils.interpolation import interpolate
+
 
 def visualize_alignment(
     input_slice: np.ndarray | torch.Tensor,
@@ -185,3 +187,15 @@ def fetch_complete_colormap() -> dict[int, list]:
         extract_recursive(data['msg'][0], colormap)
 
     return colormap
+
+
+def get_ccf_annotations(ccf_annotations: np.ndarray, pts: np.ndarray):
+    labels = interpolate(
+        array=ccf_annotations.astype(np.float32),
+        grid=pts,
+        mode='nearest'
+    )
+
+    labels = labels.squeeze().cpu().numpy().astype(int)  # (M*N,)
+
+    return labels

@@ -103,6 +103,18 @@ def main(config_path: Path):
     logger.info(f"Val subjects: {len(val_metadata)}")
     logger.info(f"Test subjects: {len(test_metadata)}")
 
+    logger.info('loading ccf annotations volume')
+    ccf_annotations = tensorstore.open(spec={
+        'driver': 'auto',
+        'kvstore': create_kvstore(
+            path=str(config.ccf_annotations_path),
+            aws_credentials_method=config.tensorstore_aws_credentials_method
+        )
+    }).result()[:].read().result()
+
+    ls_template_to_ccf_inverse_warp = ants.image_read(str(config.ls_template_to_ccf_inverse_warp_path)).numpy()
+    ccf_template_parameters = AntsImageParameters.from_ants_image(image=ants.image_read(str(config.ccf_template_path)))
+
 
     # Create datasets
     logger.info("Creating training dataset...")
@@ -133,7 +145,11 @@ def main(config_path: Path):
             albumentations.PadIfNeeded(min_height=256, min_width=256),
             #albumentations.Resize(width=512, height=512),
             albumentations.ToTensorV2()
-        ]
+        ],
+        ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
+        ls_template_to_ccf_affine_path=config.ls_template_to_ccf_affine_path,
+        ccf_template_parameters=ccf_template_parameters,
+        ccf_annotations=ccf_annotations
     )
 
     logger.info("Creating validation dataset...")
@@ -164,7 +180,11 @@ def main(config_path: Path):
             #albumentations.PadIfNeeded(min_height=256, min_width=256),
             #albumentations.Resize(width=512, height=512),
             albumentations.ToTensorV2()
-        ]
+        ],
+        ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
+        ls_template_to_ccf_affine_path=config.ls_template_to_ccf_affine_path,
+        ccf_template_parameters=ccf_template_parameters,
+        ccf_annotations=ccf_annotations
     )
 
     if config.debug:
@@ -193,7 +213,7 @@ def main(config_path: Path):
     model = UNet(
         spatial_dims=2,
         in_channels=1,
-        out_channels=3,
+        out_channels=4,
         dropout=0.0,
         channels=(8, 16, 32, 64, 128, 256, 512),
         strides=(2, 2, 2, 2, 2, 2, 2),
@@ -224,18 +244,6 @@ def main(config_path: Path):
         logger.info("Loaded optimizer state from checkpoint")
 
     logger.info(config)
-
-    logger.info('loading ccf annotations volume')
-    ccf_annotations = tensorstore.open(spec={
-        'driver': 'auto',
-        'kvstore': create_kvstore(
-            path=str(config.ccf_annotations_path),
-            aws_credentials_method=config.tensorstore_aws_credentials_method
-        )
-    }).result()[:].read().result()
-
-    ls_template_to_ccf_inverse_warp = ants.image_read(str(config.ls_template_to_ccf_inverse_warp_path)).numpy()
-    ccf_template_parameters = AntsImageParameters.from_ants_image(image=ants.image_read(str(config.ccf_template_path)))
 
     with open(config.region_ccf_ids_map_path) as f:
         region_ccf_ids_map = json.load(f)

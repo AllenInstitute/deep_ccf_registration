@@ -22,7 +22,8 @@ from deep_ccf_registration.metadata import AcquisitionAxis, SubjectMetadata, Sli
 from deep_ccf_registration.utils.logging_utils import timed, timed_func
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 from deep_ccf_registration.utils.transforms import transform_points_to_template_ants_space, \
-    apply_transforms_to_points
+    apply_transforms_to_points, transform_ls_space_to_ccf_space
+from deep_ccf_registration.utils.utils import get_ccf_annotations
 
 
 @dataclass
@@ -109,7 +110,13 @@ class SliceDataset(Dataset):
     This dataset loads 2D slices from 3D volumes along with their corresponding
     coordinates in template space after applying registration transformations.
     """
-    def __init__(self, dataset_meta: list[SubjectMetadata], ls_template_parameters: AntsImageParameters,
+    def __init__(self,
+                 dataset_meta: list[SubjectMetadata],
+                 ls_template_parameters: AntsImageParameters,
+                 ls_template_to_ccf_affine_path: Path,
+                 ls_template_to_ccf_inverse_warp: np.ndarray,
+                 ccf_template_parameters: AntsImageParameters,
+                 ccf_annotations: np.ndarray,
                  orientation: Optional[SliceOrientation] = None,
                  registration_downsample_factor: int = 3,
                  tensorstore_aws_credentials_method: str = "default",
@@ -183,6 +190,10 @@ class SliceDataset(Dataset):
 
         self._ls_template_parameters = ls_template_parameters
         self._precomputed_patches = self._build_patch_index() if mode == TrainMode.TEST and patch_size is not None else None
+        self._ls_template_to_ccf_affine_path = ls_template_to_ccf_affine_path
+        self._ls_template_to_ccf_inverse_warp = ls_template_to_ccf_inverse_warp
+        self._ccf_template_parameters = ccf_template_parameters
+        self._ccf_annotations = ccf_annotations
 
     @property
     def patch_size(self) -> Optional[tuple[int, int]]:
@@ -480,6 +491,10 @@ class SliceDataset(Dataset):
                 slice_axis=slice_axis
             )
 
+        tissue_mask = self._calculate_tissue_mask(
+            template_points=output_points
+        )
+
         input_image = rescale_intensity(
             input_image,
             in_range=tuple(np.percentile(input_image, (1, 99))),
@@ -516,12 +531,6 @@ class SliceDataset(Dataset):
             pad_transform = pad_transform['params']
         else:
             pad_transform = {}
-
-        # mask to downweight background in loss
-        # it would be better to pull ccf label for background
-        # but that would require mapping to ccf which adds complexity
-        threshold = threshold_otsu(input_image)
-        tissue_mask = (input_image > threshold).astype('uint8')
 
         if self._tissue_mask_transforms:
             tissue_mask = albumentations.Compose(self._tissue_mask_transforms)(image=tissue_mask)['image']
@@ -695,3 +704,17 @@ class SliceDataset(Dataset):
             template_points = np.permute_dims(template_points, axes=[1, 0, 2])
 
         return slice, template_points
+
+    def _calculate_tissue_mask(self, template_points: np.ndarray):
+        ccf_pts = transform_ls_space_to_ccf_space(
+            points=template_points,
+            ls_template_to_ccf_affine_path=self._ls_template_to_ccf_affine_path,
+            ls_template_to_ccf_inverse_warp=self._ls_template_to_ccf_inverse_warp,
+            ls_template_parameters=self._ls_template_parameters,
+            ccf_template_parameters=self._ccf_template_parameters
+        )
+        ccf_annotations = get_ccf_annotations(self._ccf_annotations, ccf_pts).reshape(
+            template_points.shape[:-1])
+
+        tissue_mask = (ccf_annotations != 0).astype('uint8')
+        return tissue_mask
