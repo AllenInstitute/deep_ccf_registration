@@ -135,7 +135,7 @@ def main(config_path: Path):
             #albumentations.Resize(width=512, height=512),
             albumentations.ToTensorV2()
         ],
-        tissue_mask_transforms=[
+        mask_transforms=[
             albumentations.LongestMaxSize(max_size=256),
             albumentations.PadIfNeeded(min_height=256, min_width=256),
             albumentations.ToTensorV2(),
@@ -149,7 +149,8 @@ def main(config_path: Path):
         ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
         ls_template_to_ccf_affine_path=config.ls_template_to_ccf_affine_path,
         ccf_template_parameters=ccf_template_parameters,
-        ccf_annotations=ccf_annotations
+        ccf_annotations=ccf_annotations,
+        return_tissue_mask=config.exclude_background_pixels
     )
 
     logger.info("Creating validation dataset...")
@@ -170,7 +171,7 @@ def main(config_path: Path):
             #albumentations.Resize(width=512, height=512),
             albumentations.ToTensorV2()
         ],
-        tissue_mask_transforms=[
+        mask_transforms=[
             #albumentations.LongestMaxSize(max_size=256),
             #albumentations.PadIfNeeded(min_height=256, min_width=256),
             albumentations.ToTensorV2(),
@@ -184,7 +185,8 @@ def main(config_path: Path):
         ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
         ls_template_to_ccf_affine_path=config.ls_template_to_ccf_affine_path,
         ccf_template_parameters=ccf_template_parameters,
-        ccf_annotations=ccf_annotations
+        ccf_annotations=ccf_annotations,
+        return_tissue_mask=config.exclude_background_pixels
     )
 
     if config.debug:
@@ -213,7 +215,7 @@ def main(config_path: Path):
     model = UNet(
         spatial_dims=2,
         in_channels=1,
-        out_channels=4,
+        out_channels=4 if config.exclude_background_pixels else 3,
         dropout=0.0,
         channels=(8, 16, 32, 64, 128, 256, 512),
         strides=(2, 2, 2, 2, 2, 2, 2),
@@ -271,7 +273,8 @@ def main(config_path: Path):
         ls_template_to_ccf_affine_path=config.ls_template_to_ccf_affine_path,
         ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
         ccf_template_parameters=ccf_template_parameters,
-        region_ccf_ids_map=region_ccf_ids_map
+        region_ccf_ids_map=region_ccf_ids_map,
+        exclude_background_pixels=config.exclude_background_pixels
     )
 
     logger.info("=" * 60)

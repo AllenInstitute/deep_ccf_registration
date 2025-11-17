@@ -2,7 +2,7 @@ import random
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 import aind_smartspim_transform_utils
 import albumentations
@@ -15,7 +15,6 @@ from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from aind_smartspim_transform_utils.utils.utils import AcquisitionDirection
 from loguru import logger
 from skimage.exposure import rescale_intensity
-from skimage.filters import threshold_otsu
 from torch.utils.data import Dataset
 
 from deep_ccf_registration.metadata import AcquisitionAxis, SubjectMetadata, SliceOrientation
@@ -128,7 +127,8 @@ class SliceDataset(Dataset):
                  limit_sagittal_slices_to_hemisphere: bool = False,
                  input_image_transforms: Optional[list[albumentations.BasicTransform]] = None,
                  output_points_transforms: Optional[list[albumentations.BasicTransform]] = None,
-                 tissue_mask_transforms: Optional[list[albumentations.BasicTransform]] = None,
+                 mask_transforms: Optional[list[albumentations.BasicTransform]] = None,
+                 return_tissue_mask: bool = True
                  ):
         """
         Initialize SliceDataset.
@@ -164,6 +164,8 @@ class SliceDataset(Dataset):
             Due to the symmetry of the brain, the model won't be able to differentiate
             sagittal slices from each hemisphere. Use this to limit sampling to the
             LEFT hemisphere.
+        return_tissue_mask: If true, returns a mask where the ccf annotations indicate a region is foreground (1) or background (0)
+            Otherwise, just returns a mask of 1 for image and 0 for pad
         """
         super().__init__()
         self._dataset_meta = dataset_meta
@@ -180,7 +182,7 @@ class SliceDataset(Dataset):
         self._limit_sagittal_slices_to_hemisphere = limit_sagittal_slices_to_hemisphere
         self._input_image_transforms = input_image_transforms
         self._output_points_transforms = output_points_transforms
-        self._tissue_mask_transforms = tissue_mask_transforms
+        self._mask_transforms = mask_transforms
 
         if normalize_orientation_map is not None:
             for axis, orientation in normalize_orientation_map.items():
@@ -194,6 +196,7 @@ class SliceDataset(Dataset):
         self._ls_template_to_ccf_inverse_warp = ls_template_to_ccf_inverse_warp
         self._ccf_template_parameters = ccf_template_parameters
         self._ccf_annotations = ccf_annotations
+        self._return_tissue_mask = return_tissue_mask
 
     @property
     def patch_size(self) -> Optional[tuple[int, int]]:
@@ -491,10 +494,6 @@ class SliceDataset(Dataset):
                 slice_axis=slice_axis
             )
 
-        tissue_mask = self._calculate_tissue_mask(
-            template_points=output_points
-        )
-
         input_image = rescale_intensity(
             input_image,
             in_range=tuple(np.percentile(input_image, (1, 99))),
@@ -515,10 +514,6 @@ class SliceDataset(Dataset):
             input_image_transforms = []
             input_image_transformed = input_image
 
-        if self._output_points_transforms is not None:
-            output_points = albumentations.Compose(self._output_points_transforms)(image=output_points)[
-                'image']
-
         if input_image_transforms:
             pad_transform = [x for x in input_image_transforms['replay']['transforms'] if
                              x['__class_fullname__'] == 'PadIfNeeded']
@@ -532,15 +527,25 @@ class SliceDataset(Dataset):
         else:
             pad_transform = {}
 
-        if self._tissue_mask_transforms:
-            tissue_mask = albumentations.Compose(self._tissue_mask_transforms)(image=tissue_mask)['image']
+        if self._return_tissue_mask:
+            mask = self._calculate_tissue_mask(
+                template_points=output_points
+            )
+            if self._mask_transforms:
+                mask = albumentations.Compose(self._mask_transforms)(image=mask)['image']
+        else:
+            mask = _calculate_non_pad_mask(input_image=input_image_transformed, pad_transform=pad_transform)
 
-        tissue_mask = tissue_mask.squeeze()
+        if self._output_points_transforms is not None:
+            output_points = albumentations.Compose(self._output_points_transforms)(image=output_points)[
+                'image']
+
+        mask = mask.squeeze()
 
         if self.patch_size is not None:
-            res = input_image_transformed, output_points, dataset_idx, slice_idx, patch_y, patch_x, orientation.value, pad_transform, tissue_mask
+            res = input_image_transformed, output_points, dataset_idx, slice_idx, patch_y, patch_x, orientation.value, pad_transform, mask
         else:
-            res = input_image_transformed, output_points, dataset_idx, slice_idx, orientation.value, pad_transform, tissue_mask
+            res = input_image_transformed, output_points, dataset_idx, slice_idx, orientation.value, pad_transform, mask
         return res
 
     def __len__(self):
@@ -718,3 +723,11 @@ class SliceDataset(Dataset):
 
         tissue_mask = (ccf_annotations != 0).astype('uint8')
         return tissue_mask
+
+def _calculate_non_pad_mask(input_image: np.ndarray, pad_transform: dict[str, Any]):
+    mask = np.zeros_like(input_image, dtype="uint8")
+    mask[:,
+        pad_transform['pad_top']:pad_transform['pad_top']+pad_transform['shape'][0],
+        pad_transform['pad_left']:pad_transform['pad_left']+pad_transform['shape'][1]
+    ] = 1
+    return mask

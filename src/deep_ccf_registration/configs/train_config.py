@@ -23,20 +23,18 @@ class TrainConfig(BaseModel):
     limit_sagittal_slices_to_hemisphere: bool = False
     batch_size: int = Field(32, gt=0)
     num_workers: int = Field(0, ge=0)
+    exclude_background_pixels: bool = True
 
-    # Model
     unet_init_features: int = Field(64, gt=0)
     unet_depth: int = Field(4, gt=0)
     load_checkpoint: Optional[Path] = None
 
-    # Training
     n_epochs: int = Field(100, gt=0)
     learning_rate: float = Field(0.001, gt=0.0)
     weight_decay: float = Field(0.0, ge=0.0)
     decay_learning_rate: bool = True
     warmup_iters: int = Field(1000, ge=0)
 
-    # Evaluation
     loss_eval_interval: int = Field(500, gt=0)
     eval_iters: int = Field(100, gt=0)
     patience: int = Field(10, gt=0)
@@ -46,7 +44,6 @@ class TrainConfig(BaseModel):
     ccf_template_path: Path
     region_ccf_ids_map_path: Path
 
-    # Output
     model_weights_out_dir: Path = Path("./checkpoints")
     log_file: Optional[Path] = None
 

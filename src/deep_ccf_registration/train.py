@@ -102,6 +102,7 @@ def train(
         min_delta: float = 1e-4,
         autocast_context: ContextManager = nullcontext(),
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
+        exclude_background_pixels: bool = True
 ):
     """
     Train slice registration model
@@ -129,6 +130,8 @@ def train(
     ls_template_parameters: ls template AntsImageParameters
     ccf_template_parameters: ccf template AntsImageParameters
     region_ccf_ids_map: `RegionAcronymCCFIdsMap`
+    exclude_background_pixels: whether to use a tissue mask to exclude background pixels in loss/evaluation.
+        Otherwise, just excludes pad pixels
 
     Returns
     -------
@@ -191,22 +194,25 @@ def train(
             with autocast_context:
                 model_out = model(input_images)
                 mse_loss = mse(
-                    pred_template_points=model_out[:, :-1],
+                    pred_template_points=model_out[:, :-1] if exclude_background_pixels else model_out,
                     true_template_points=target_template_points,
                     tissue_masks=tissue_masks,
                     orientations=[SliceOrientation(x) for x in orientations]
                 )
 
-                tissue_loss_per_pixel = F.binary_cross_entropy_with_logits(
-                    model_out[:, -1].cpu().float(), # moving to cpu since bug with BCE and mps locally
-                    tissue_masks.cpu().float(),  # moving to cpu since bug with BCE and mps locally
-                    reduction='none'
-                )
-                tissue_loss = _mask_pad_pixels(
-                    tissue_loss_per_pixel=tissue_loss_per_pixel,
-                    input_image_transforms=input_image_transforms
-                )
-                loss = mse_loss + 0.1 * tissue_loss
+                if exclude_background_pixels:
+                    tissue_loss_per_pixel = F.binary_cross_entropy_with_logits(
+                        model_out[:, -1].cpu().float(), # moving to cpu since bug with BCE and mps locally
+                        tissue_masks.cpu().float(),  # moving to cpu since bug with BCE and mps locally
+                        reduction='none'
+                    )
+                    tissue_loss = _mask_pad_pixels(
+                        tissue_loss_per_pixel=tissue_loss_per_pixel,
+                        input_image_transforms=input_image_transforms
+                    )
+                    loss = mse_loss + 0.1 * tissue_loss
+                else:
+                    loss = mse_loss
 
             # Backward pass
             loss.backward()
@@ -214,7 +220,8 @@ def train(
 
             train_losses.append(loss.item())
             train_mse_losses.append(mse_loss.item())
-            train_mask_losses.append(tissue_loss.item())
+            if exclude_background_pixels:
+                train_mask_losses.append(tissue_loss.item())
 
             global_step += 1
 
@@ -232,6 +239,7 @@ def train(
                     region_ccf_ids_map=region_ccf_ids_map,
                     device=device,
                     iteration=global_step,
+                    exclude_background_pixels=exclude_background_pixels
                 )
                 val_rmse, val_major_region_dice, val_small_region_dice, val_tissue_mask_precision, val_tissue_mask_recall, val_tissue_mask_f1 = evaluate(
                     val_loader=val_dataloader,
@@ -244,7 +252,8 @@ def train(
                     ccf_template_parameters=ccf_template_parameters,
                     region_ccf_ids_map=region_ccf_ids_map,
                     device=device,
-                    iteration=global_step
+                    iteration=global_step,
+                    exclude_background_pixels=exclude_background_pixels
                 )
 
                 current_lr = optimizer.param_groups[0]['lr']
@@ -257,13 +266,17 @@ def train(
                 val_small_dice_avg = sum(val_small_region_dice.values()) / len(
                     val_small_region_dice)
 
+                if exclude_background_pixels:
+                    mask_log = f"Train mask precision: {train_tissue_mask_precision} | Train mask recall {train_tissue_mask_recall} | Train mask f1 {train_tissue_mask_f1} | "
+                    f"Val mask precision: {val_tissue_mask_precision} | Val mask recall {val_tissue_mask_recall} | Val mask f1 {val_tissue_mask_f1} | "
+                else:
+                    mask_log = ""
                 logger.info(
                     f"Epoch {epoch} | Step {global_step} | "
                     f"Train RMSE: {train_rmse:.6f} microns | Val RMSE: {val_rmse:.6f} microns | "
                     f"Train major dice: {train_major_dice_avg:.6f} | Val major dice: {val_major_dice_avg:.6f} | "
-                    f"Train small dice: {train_small_dice_avg} | Val major dice: {val_small_dice_avg:.6f} | "
-                    f"Train mask precision: {train_tissue_mask_precision} | Train mask recall {train_tissue_mask_recall} | Train mask f1 {train_tissue_mask_f1} | "
-                    f"Val mask precision: {val_tissue_mask_precision} | Val mask recall {val_tissue_mask_recall} | Val mask f1 {val_tissue_mask_f1} | "
+                    f"Train small dice: {train_small_dice_avg} | Val small dice: {val_small_dice_avg:.6f} | "
+                    f"{mask_log} | "
                     f"LR: {current_lr:.6e}"
                 )
 
@@ -300,9 +313,11 @@ def train(
         # End of epoch summary
         avg_train_loss = sum(train_losses) / len(train_losses)
         avg_mse_loss = sum(train_mse_losses) / len(train_mse_losses)
-        avg_mask_loss = sum(train_mask_losses) / len(train_mask_losses)
+        if exclude_background_pixels:
+            avg_mask_loss = sum(train_mask_losses) / len(train_mask_losses)
         logger.info(f"\n{'=' * 60}")
-        logger.info(f"Epoch {epoch}/{n_epochs} completed | Avg Train Loss: {avg_train_loss:.6f} | Avg mse loss {avg_mse_loss:.6f} | Avg mask loss {avg_mask_loss:.6f}")
+        mask_loss_log = f"| Avg mask loss {avg_mask_loss:.6f}" if exclude_background_pixels else ""
+        logger.info(f"Epoch {epoch}/{n_epochs} completed | Avg Train Loss: {avg_train_loss:.6f} | Avg mse loss {avg_mse_loss:.6f} {mask_loss_log}")
         logger.info(f"{'=' * 60}\n")
 
         # Save epoch checkpoint

@@ -75,6 +75,7 @@ def evaluate(
         region_ccf_ids_map: RegionAcronymCCFIdsMap,
         iteration: int,
         device: str = "cuda",
+        exclude_background_pixels: bool = True,
 ) -> tuple[float, dict[str, float], dict[str, float], float, float, float]:
     """
     :param val_loader: validation DataLoader
@@ -88,6 +89,8 @@ def evaluate(
     :param region_ccf_ids_map: `RegionAcronymCCFIdsMap`
     :param device:
     :param iteration
+    :param exclude_background_pixels: whether to use a tissue mask to exclude background pixels
+        Otherwise, just excludes pad pixels
     :return: tuple of: (rmse in microns ignoring background (just tissue), mapping from major brain
         region to dice, mapping from small region to dice)
     """
@@ -123,18 +126,21 @@ def evaluate(
     model.eval()
     for batch_idx, batch in enumerate(tqdm(val_loader, desc="Processing patches")):
         if slice_dataset.patch_size is not None:
-            input_images, gt_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, _ = batch
+            input_images, gt_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, masks = batch
         else:
-            input_images, gt_template_points, dataset_indices, slice_indices, orientations, input_image_transforms, _ = batch
+            input_images, gt_template_points, dataset_indices, slice_indices, orientations, input_image_transforms, masks = batch
 
         input_images = input_images.to(device)
         gt_template_points = gt_template_points.cpu()
 
         # Run inference
         model_out = model(input_images).cpu()
-        pred_ls_template_points = model_out[:, :-1]
-        pred_tissue_logits = model_out[:, -1]
-        tissue_masks = (F.sigmoid(pred_tissue_logits) > 0.5).to(torch.uint8)
+        if exclude_background_pixels:
+            pred_ls_template_points = model_out[:, :-1]
+            pred_tissue_logits = model_out[:, -1]
+            masks = (F.sigmoid(pred_tissue_logits) > 0.5).to(torch.uint8)
+        else:
+            pred_ls_template_points = model_out
 
         if batch_idx == random_batch_for_viz_idx:
             random_sample_for_viz = random.choice(slice_indices.cpu().tolist())
@@ -145,7 +151,7 @@ def evaluate(
         for i in range(pred_ls_template_points.shape[0]):
             pred_patch = pred_ls_template_points[i]  # (3, H, W)
             gt_patch = gt_template_points[i]  # (3, H, W)
-            tissue_mask = tissue_masks[i]
+            mask = masks[i]
 
             if pred_patch.shape != gt_patch.shape:
                 pred_patch = _resize_to_original(
@@ -155,8 +161,8 @@ def evaluate(
                     pad_left=input_image_transforms['pad_left'][i].item() if input_image_transforms else None,
                     gt_shape=gt_patch.shape[1:]
                 )
-                tissue_mask = _resize_to_original(
-                    img=tissue_mask.unsqueeze(0).cpu().numpy(),
+                mask = _resize_to_original(
+                    img=mask.unsqueeze(0).cpu().numpy(),
                     pre_pad_shape=tuple(
                         [int(input_image_transforms['shape'][ii][i].item()) for ii in
                          range(2)]) if input_image_transforms else None,
@@ -188,25 +194,31 @@ def evaluate(
             # Get CCF annotations for patch
             pred_ccf_annot = get_ccf_annotations(ccf_annotations, pred_ccf_pts).reshape(
                 pred_patch.shape[1:])
-            pred_ccf_annot[(1 - tissue_mask).bool()] = 0
+            pred_ccf_annot[(1 - mask).bool()] = 0
             gt_ccf_annot = get_ccf_annotations(ccf_annotations, gt_ccf_pts).reshape(
                 gt_patch.shape[1:])
 
             gt_tissue_mask = gt_ccf_annot != 0
 
             orientation = SliceOrientation(orientations[i])
+
             patch_squared_errors = mse(
                 pred_template_points=pred_patch.unsqueeze(0),
                 true_template_points=gt_patch.unsqueeze(0),
                 orientations=[orientation],
-                tissue_masks=torch.ones_like(tissue_mask).unsqueeze(0),  # calculate squared error over all pixels
+                tissue_masks=torch.ones_like(mask).unsqueeze(0), # calculate squared error over all pixels
                 per_channel_squared_error=True
             )
-            sum_squared_errors += patch_squared_errors[0][:, gt_tissue_mask].sum(dim=0).sum()
-            mse_denominator += gt_tissue_mask.sum()
-            tissue_mask_tp_sum += ((gt_tissue_mask == 1) & (tissue_mask.cpu().numpy() == 1)).sum()
-            tissue_mask_fp_sum += ((gt_tissue_mask == 0) & (tissue_mask.cpu().numpy() == 1)).sum()
-            tissue_mask_fn_sum += ((gt_tissue_mask == 1) & (tissue_mask.cpu().numpy() == 0)).sum()
+
+            if exclude_background_pixels:
+                sum_squared_errors += patch_squared_errors[0][:, gt_tissue_mask].sum(dim=0).sum()
+                mse_denominator += gt_tissue_mask.sum()
+                tissue_mask_tp_sum += ((gt_tissue_mask == 1) & (mask.cpu().numpy() == 1)).sum()
+                tissue_mask_fp_sum += ((gt_tissue_mask == 0) & (mask.cpu().numpy() == 1)).sum()
+                tissue_mask_fn_sum += ((gt_tissue_mask == 1) & (mask.cpu().numpy() == 0)).sum()
+            else:
+                sum_squared_errors += patch_squared_errors[0][:, mask.bool()].sum(dim=0).sum()
+                mse_denominator += mask.sum()
 
             if slice_indices[i] == random_sample_for_viz:
                 fig = create_diagnostic_image(
@@ -217,7 +229,8 @@ def evaluate(
                     gt_ccf_annotations=gt_ccf_annot,
                     iteration=iteration,
                     pred_template_points=pred_patch,
-                    gt_template_points=gt_patch
+                    gt_template_points=gt_patch,
+                    mask=(gt_ccf_annot != 0) if exclude_background_pixels else mask.bool().numpy()
                 )
                 plt.show()
 
@@ -243,9 +256,12 @@ def evaluate(
     # convert to microns
     rmse *= 1000
 
-    tissue_mask_precision = tissue_mask_tp_sum / (tissue_mask_tp_sum + tissue_mask_fp_sum)
-    tissue_mask_recall = tissue_mask_tp_sum / (tissue_mask_tp_sum + tissue_mask_fn_sum)
-    tissue_mask_f1 = 2 * tissue_mask_precision * tissue_mask_recall / (tissue_mask_precision + tissue_mask_recall)
+    if exclude_background_pixels:
+        tissue_mask_precision = tissue_mask_tp_sum / (tissue_mask_tp_sum + tissue_mask_fp_sum)
+        tissue_mask_recall = tissue_mask_tp_sum / (tissue_mask_tp_sum + tissue_mask_fn_sum)
+        tissue_mask_f1 = 2 * tissue_mask_precision * tissue_mask_recall / (tissue_mask_precision + tissue_mask_recall)
+    else:
+        tissue_mask_precision, tissue_mask_recall, tissue_mask_f1 = None, None, None
 
     logger.info('Calculating dice scores from confusion matrices')
     major_region_dice = _calc_dice_from_confusion_matrix(
