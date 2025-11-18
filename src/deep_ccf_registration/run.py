@@ -115,9 +115,6 @@ def main(config_path: Path):
     ls_template_to_ccf_inverse_warp = ants.image_read(str(config.ls_template_to_ccf_inverse_warp_path)).numpy()
     ccf_template_parameters = AntsImageParameters.from_ants_image(image=ants.image_read(str(config.ccf_template_path)))
 
-
-    # Create datasets
-    logger.info("Creating training dataset...")
     train_dataset = SliceDataset(
         dataset_meta=train_metadata,
         ls_template_parameters=ls_template_parameters,
@@ -132,7 +129,6 @@ def main(config_path: Path):
         input_image_transforms=[
             albumentations.LongestMaxSize(max_size=256),
             albumentations.PadIfNeeded(min_height=256, min_width=256),
-            #albumentations.Resize(width=512, height=512),
             albumentations.ToTensorV2()
         ],
         mask_transforms=[
@@ -143,17 +139,15 @@ def main(config_path: Path):
         output_points_transforms=[
             albumentations.LongestMaxSize(max_size=256),
             albumentations.PadIfNeeded(min_height=256, min_width=256),
-            #albumentations.Resize(width=512, height=512),
             albumentations.ToTensorV2()
         ],
         ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
         ls_template_to_ccf_affine_path=config.ls_template_to_ccf_affine_path,
         ccf_template_parameters=ccf_template_parameters,
         ccf_annotations=ccf_annotations,
-        return_tissue_mask=config.exclude_background_pixels
+        return_tissue_mask=config.exclude_background_pixels,
     )
 
-    logger.info("Creating validation dataset...")
     val_dataset = SliceDataset(
         dataset_meta=val_metadata,
         ls_template_parameters=ls_template_parameters,
@@ -168,18 +162,12 @@ def main(config_path: Path):
         input_image_transforms=[
             albumentations.LongestMaxSize(max_size=256),
             albumentations.PadIfNeeded(min_height=256, min_width=256),
-            #albumentations.Resize(width=512, height=512),
             albumentations.ToTensorV2()
         ],
         mask_transforms=[
-            #albumentations.LongestMaxSize(max_size=256),
-            #albumentations.PadIfNeeded(min_height=256, min_width=256),
             albumentations.ToTensorV2(),
         ],
         output_points_transforms=[
-            #albumentations.LongestMaxSize(max_size=256),
-            #albumentations.PadIfNeeded(min_height=256, min_width=256),
-            #albumentations.Resize(width=512, height=512),
             albumentations.ToTensorV2()
         ],
         ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
@@ -191,13 +179,7 @@ def main(config_path: Path):
 
     if config.debug:
         train_dataset = Subset(train_dataset, indices=[int(len(train_dataset)/2)])
-        if config.patch_size is not None:
-            # get all patches
-            slice_index = train_dataset[0][3]
-            dataset_index = train_dataset[0][2]
-            val_dataset = Subset(val_dataset, indices=[i for i, x in enumerate(val_dataset._precomputed_patches) if x.slice_idx == slice_index and x.dataset_idx == dataset_index])
-        else:
-            val_dataset = Subset(val_dataset, indices=[int(len(val_dataset)/2)])
+        val_dataset = Subset(val_dataset, indices=[int(len(val_dataset) / 2)])
 
     # Create dataloaders
     train_dataloader = DataLoader(
