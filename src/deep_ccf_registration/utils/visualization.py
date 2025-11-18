@@ -31,8 +31,6 @@ def create_diagnostic_image(
     :param slice_idx: slice index for title
     :param vmax_percentile: percentile for colormap max
     :param iteration: optional iteration number
-    :param exclude_background_pixels: whether to use a tissue mask to exclude background pixels
-        Otherwise, just excludes pad pixels
     :param mask where to calculate metrics
     """
     sse = squared_errors.sum(axis=0)

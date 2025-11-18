@@ -257,14 +257,14 @@ def train(
                 )
 
                 current_lr = optimizer.param_groups[0]['lr']
-                train_major_dice_avg = sum(train_major_region_dice.values()) / len(train_major_region_dice)
+                train_major_dice_avg = sum(train_major_region_dice.values()) / len(train_major_region_dice) if len(train_major_region_dice) > 0 else np.nan
                 train_small_dice_avg = sum(train_small_region_dice.values()) / len(
-                    train_small_region_dice)
+                    train_small_region_dice) if len(train_small_region_dice) > 0 else np.nan
 
                 val_major_dice_avg = sum(val_major_region_dice.values()) / len(
-                    val_major_region_dice)
+                    val_major_region_dice) if len(val_major_region_dice) > 0 else np.nan
                 val_small_dice_avg = sum(val_small_region_dice.values()) / len(
-                    val_small_region_dice)
+                    val_small_region_dice) if len(val_small_region_dice) > 0 else np.nan
 
                 if exclude_background_pixels:
                     mask_log = f"Train mask precision: {train_tissue_mask_precision} | Train mask recall {train_tissue_mask_recall} | Train mask f1 {train_tissue_mask_f1} | "
