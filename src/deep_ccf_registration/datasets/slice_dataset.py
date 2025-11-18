@@ -414,12 +414,14 @@ class SliceDataset(Dataset):
                 Index of the slice within the subject.
         """
         orientation = random.choice(self._orientation)
-        dataset_idx, slice_idx = self._get_slice_from_idx(idx=idx, orientation=orientation)
 
         if self._precomputed_patches is not None:
             patch_x = self._precomputed_patches[idx].x
             patch_y = self._precomputed_patches[idx].y
+            dataset_idx = self._precomputed_patches[idx].dataset_idx
+            slice_idx = self._precomputed_patches[idx].slice_idx
         else:
+            dataset_idx, slice_idx = self._get_slice_from_idx(idx=idx, orientation=orientation)
             if self._patch_size is None:
                 patch_x, patch_y = 0, 0
             else:

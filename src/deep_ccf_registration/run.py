@@ -162,7 +162,7 @@ def main(config_path: Path):
         tensorstore_aws_credentials_method=config.tensorstore_aws_credentials_method,
         crop_warp_to_bounding_box=False,
         patch_size=config.patch_size,
-        mode=TrainMode.TRAIN,
+        mode=TrainMode.TEST,
         normalize_orientation_map=config.normalize_orientation_map,
         limit_sagittal_slices_to_hemisphere=config.limit_sagittal_slices_to_hemisphere,
         input_image_transforms=[
@@ -191,7 +191,13 @@ def main(config_path: Path):
 
     if config.debug:
         train_dataset = Subset(train_dataset, indices=[int(len(train_dataset)/2)])
-        val_dataset = Subset(val_dataset, indices=[int(len(val_dataset)/2)])
+        if config.patch_size is not None:
+            # get all patches
+            slice_index = train_dataset[0][3]
+            dataset_index = train_dataset[0][2]
+            val_dataset = Subset(val_dataset, indices=[i for i, x in enumerate(val_dataset._precomputed_patches) if x.slice_idx == slice_index and x.dataset_idx == dataset_index])
+        else:
+            val_dataset = Subset(val_dataset, indices=[int(len(val_dataset)/2)])
 
     # Create dataloaders
     train_dataloader = DataLoader(
