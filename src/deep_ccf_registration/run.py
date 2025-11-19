@@ -102,16 +102,7 @@ def main(config_path: Path):
     logger.info(f"Test subjects: {len(test_metadata)}")
 
     logger.info('loading ccf annotations volume')
-    ccf_annotations = tensorstore.open(spec={
-        'driver': 'auto',
-        'kvstore': create_kvstore(
-            path=str(config.ccf_annotations_path),
-            aws_credentials_method=config.tensorstore_aws_credentials_method
-        )
-    }).result()[:].read().result()
-
-    ls_template_to_ccf_inverse_warp = ants.image_read(str(config.ls_template_to_ccf_inverse_warp_path)).numpy()
-    ccf_template_parameters = AntsImageParameters.from_ants_image(image=ants.image_read(str(config.ccf_template_path)))
+    ccf_annotations = ants.image_read(str(config.ccf_annotations_path)).numpy()
 
     train_dataset = SliceDataset(
         dataset_meta=train_metadata,
@@ -139,9 +130,6 @@ def main(config_path: Path):
             albumentations.PadIfNeeded(min_height=256, min_width=256),
             albumentations.ToTensorV2()
         ],
-        ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
-        ls_template_to_ccf_affine_path=config.ls_template_to_ccf_affine_path,
-        ccf_template_parameters=ccf_template_parameters,
         ccf_annotations=ccf_annotations,
         return_tissue_mask=config.exclude_background_pixels,
     )
@@ -168,9 +156,6 @@ def main(config_path: Path):
         output_points_transforms=[
             albumentations.ToTensorV2()
         ],
-        ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
-        ls_template_to_ccf_affine_path=config.ls_template_to_ccf_affine_path,
-        ccf_template_parameters=ccf_template_parameters,
         ccf_annotations=ccf_annotations,
         return_tissue_mask=config.exclude_background_pixels
     )
@@ -278,9 +263,6 @@ def main(config_path: Path):
         ccf_annotations=ccf_annotations,
         ls_template=ls_template,
         ls_template_parameters=ls_template_parameters,
-        ls_template_to_ccf_affine_path=config.ls_template_to_ccf_affine_path,
-        ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
-        ccf_template_parameters=ccf_template_parameters,
         region_ccf_ids_map=region_ccf_ids_map,
         exclude_background_pixels=config.exclude_background_pixels
     )

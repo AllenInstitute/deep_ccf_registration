@@ -90,11 +90,8 @@ def train(
         n_epochs: int,
         model_weights_out_dir: Path,
         ccf_annotations: np.ndarray,
-        ls_template_to_ccf_affine_path: Path,
-        ls_template_to_ccf_inverse_warp: np.ndarray,
         ls_template: np.ndarray,
         ls_template_parameters: AntsImageParameters,
-        ccf_template_parameters: AntsImageParameters,
         region_ccf_ids_map: RegionAcronymCCFIdsMap,
         learning_rate: float = 0.001,
         decay_learning_rate: bool = True,
@@ -127,10 +124,7 @@ def train(
     device: Device to train on
     ccf_annotations: 25 micron resolution CCF annotation volume
     ls_template: light sheet template volume
-    ls_template_to_ccf_affine_path: path to ls template to ccf affine
-    ls_template_to_ccf_inverse_warp: ls template to ccf inverse warp
     ls_template_parameters: ls template AntsImageParameters
-    ccf_template_parameters: ccf template AntsImageParameters
     region_ccf_ids_map: `RegionAcronymCCFIdsMap`
     exclude_background_pixels: whether to use a tissue mask to exclude background pixels in loss/evaluation.
         Otherwise, just excludes pad pixels
@@ -233,11 +227,8 @@ def train(
                     val_loader=train_eval_dataloader,
                     model=model,
                     ccf_annotations=ccf_annotations,
-                    ls_template_to_ccf_affine_path=ls_template_to_ccf_affine_path,
-                    ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
                     ls_template=ls_template,
                     ls_template_parameters=ls_template_parameters,
-                    ccf_template_parameters=ccf_template_parameters,
                     region_ccf_ids_map=region_ccf_ids_map,
                     device=device,
                     iteration=global_step,
@@ -247,11 +238,8 @@ def train(
                     val_loader=val_eval_dataloader,
                     model=model,
                     ccf_annotations=ccf_annotations,
-                    ls_template_to_ccf_affine_path=ls_template_to_ccf_affine_path,
-                    ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
                     ls_template=ls_template,
                     ls_template_parameters=ls_template_parameters,
-                    ccf_template_parameters=ccf_template_parameters,
                     region_ccf_ids_map=region_ccf_ids_map,
                     device=device,
                     iteration=global_step,

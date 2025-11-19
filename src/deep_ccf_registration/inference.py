@@ -6,6 +6,7 @@ import albumentations
 import numpy as np
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
+from aind_smartspim_transform_utils.utils.utils import convert_from_ants_space
 from loguru import logger
 from matplotlib import pyplot as plt
 from pydantic import BaseModel, Field
@@ -17,7 +18,6 @@ import  torch.nn.functional as F
 from deep_ccf_registration.datasets.slice_dataset import SliceDataset
 from deep_ccf_registration.losses.mse import HemisphereAgnosticMSE
 from deep_ccf_registration.metadata import SliceOrientation
-from deep_ccf_registration.utils.transforms import transform_ls_space_to_ccf_space
 from deep_ccf_registration.utils.utils import get_ccf_annotations
 from deep_ccf_registration.utils.visualization import create_diagnostic_image
 
@@ -67,11 +67,8 @@ def evaluate(
         val_loader: DataLoader,
         model: UNet,
         ccf_annotations: np.ndarray,
-        ls_template_to_ccf_affine_path: Path,
-        ls_template_to_ccf_inverse_warp: np.ndarray,
         ls_template: np.ndarray,
         ls_template_parameters: AntsImageParameters,
-        ccf_template_parameters: AntsImageParameters,
         region_ccf_ids_map: RegionAcronymCCFIdsMap,
         iteration: int,
         device: str = "cuda",
@@ -82,10 +79,7 @@ def evaluate(
     :param model: model
     :param ccf_annotations: ccf annotation volume
     :param ls_template: light sheet template volume
-    :param ls_template_to_ccf_affine_path: path to ls template to ccf affine
-    :param ls_template_to_ccf_inverse_warp: ls template to ccf inverse warp
     :param ls_template_parameters: ls template AntsImageParameters
-    :param ccf_template_parameters: ccf template AntsImageParameters
     :param region_ccf_ids_map: `RegionAcronymCCFIdsMap`
     :param device:
     :param iteration
@@ -172,26 +166,15 @@ def evaluate(
                     gt_shape=gt_patch.shape[1:]
                 ).squeeze(0)
 
-            pred_ccf_pts = transform_ls_space_to_ccf_space(
-                points=pred_patch,
-                ls_template_to_ccf_affine_path=ls_template_to_ccf_affine_path,
-                ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
-                ls_template_parameters=ls_template_parameters,
-                ccf_template_parameters=ccf_template_parameters
-            )
+            pred_index_space = convert_from_ants_space(template_parameters=ls_template_parameters,
+                                                       physical_pts=pred_patch.permute((1, 2, 0)).reshape((-1, 3)).numpy())
+            gt_index_space = convert_from_ants_space(template_parameters=ls_template_parameters,
+                                                     physical_pts=gt_patch.permute((1, 2, 0)).reshape((-1, 3)).numpy())
 
-            gt_ccf_pts = transform_ls_space_to_ccf_space(
-                points=gt_patch,
-                ls_template_to_ccf_affine_path=ls_template_to_ccf_affine_path,
-                ls_template_to_ccf_inverse_warp=ls_template_to_ccf_inverse_warp,
-                ls_template_parameters=ls_template_parameters,
-                ccf_template_parameters=ccf_template_parameters
-            )
-
-            pred_ccf_annot = get_ccf_annotations(ccf_annotations, pred_ccf_pts).reshape(
+            pred_ccf_annot = get_ccf_annotations(ccf_annotations, pred_index_space).reshape(
                 pred_patch.shape[1:])
             pred_ccf_annot[(1 - mask).bool()] = 0
-            gt_ccf_annot = get_ccf_annotations(ccf_annotations, gt_ccf_pts).reshape(
+            gt_ccf_annot = get_ccf_annotations(ccf_annotations, gt_index_space).reshape(
                 gt_patch.shape[1:])
 
             gt_tissue_mask = gt_ccf_annot != 0

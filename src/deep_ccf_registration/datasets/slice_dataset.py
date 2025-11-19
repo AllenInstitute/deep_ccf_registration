@@ -12,7 +12,8 @@ import pandas as pd
 import tensorstore
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
-from aind_smartspim_transform_utils.utils.utils import AcquisitionDirection
+from aind_smartspim_transform_utils.utils.utils import AcquisitionDirection, \
+    convert_from_ants_space
 from loguru import logger
 from skimage.exposure import rescale_intensity
 from torch.utils.data import Dataset
@@ -21,7 +22,7 @@ from deep_ccf_registration.metadata import AcquisitionAxis, SubjectMetadata, Sli
 from deep_ccf_registration.utils.logging_utils import timed, timed_func
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 from deep_ccf_registration.utils.transforms import transform_points_to_template_ants_space, \
-    apply_transforms_to_points, transform_ls_space_to_ccf_space
+    apply_transforms_to_points
 from deep_ccf_registration.utils.utils import get_ccf_annotations
 
 
@@ -112,10 +113,7 @@ class SliceDataset(Dataset):
     def __init__(self,
                  dataset_meta: list[SubjectMetadata],
                  ls_template_parameters: AntsImageParameters,
-                 ls_template_to_ccf_affine_path: Path,
-                 ls_template_to_ccf_inverse_warp: np.ndarray,
-                 ccf_template_parameters: AntsImageParameters,
-                 ccf_annotations: np.ndarray,
+                 ccf_annotations: Optional[np.ndarray] = None,
                  orientation: Optional[SliceOrientation] = None,
                  registration_downsample_factor: int = 3,
                  tensorstore_aws_credentials_method: str = "default",
@@ -128,7 +126,7 @@ class SliceDataset(Dataset):
                  input_image_transforms: Optional[list[albumentations.BasicTransform]] = None,
                  output_points_transforms: Optional[list[albumentations.BasicTransform]] = None,
                  mask_transforms: Optional[list[albumentations.BasicTransform]] = None,
-                 return_tissue_mask: bool = True
+                 return_tissue_mask: bool = False
                  ):
         """
         Initialize SliceDataset.
@@ -192,9 +190,6 @@ class SliceDataset(Dataset):
 
         self._ls_template_parameters = ls_template_parameters
         self._precomputed_patches = self._build_patch_index() if mode == TrainMode.TEST and patch_size is not None else None
-        self._ls_template_to_ccf_affine_path = ls_template_to_ccf_affine_path
-        self._ls_template_to_ccf_inverse_warp = ls_template_to_ccf_inverse_warp
-        self._ccf_template_parameters = ccf_template_parameters
         self._ccf_annotations = ccf_annotations
         self._return_tissue_mask = return_tissue_mask
 
@@ -710,14 +705,8 @@ class SliceDataset(Dataset):
         return slice, template_points
 
     def _calculate_tissue_mask(self, template_points: np.ndarray):
-        ccf_pts = transform_ls_space_to_ccf_space(
-            points=template_points,
-            ls_template_to_ccf_affine_path=self._ls_template_to_ccf_affine_path,
-            ls_template_to_ccf_inverse_warp=self._ls_template_to_ccf_inverse_warp,
-            ls_template_parameters=self._ls_template_parameters,
-            ccf_template_parameters=self._ccf_template_parameters
-        )
-        ccf_annotations = get_ccf_annotations(self._ccf_annotations, ccf_pts).reshape(
+        index_pts = convert_from_ants_space(template_parameters=self._ls_template_parameters, physical_pts=template_points.reshape((-1, 3)))
+        ccf_annotations = get_ccf_annotations(self._ccf_annotations, index_pts).reshape(
             template_points.shape[:-1])
 
         tissue_mask = (ccf_annotations != 0).astype('uint8')
@@ -725,8 +714,11 @@ class SliceDataset(Dataset):
 
 def _calculate_non_pad_mask(input_image: np.ndarray, pad_transform: dict[str, Any]):
     mask = np.zeros_like(input_image, dtype="uint8")
-    mask[:,
-        pad_transform['pad_top']:pad_transform['pad_top']+pad_transform['shape'][0],
-        pad_transform['pad_left']:pad_transform['pad_left']+pad_transform['shape'][1]
-    ] = 1
+    if pad_transform:
+        mask[:,
+            pad_transform['pad_top']:pad_transform['pad_top']+pad_transform['shape'][0],
+            pad_transform['pad_left']:pad_transform['pad_left']+pad_transform['shape'][1]
+        ] = 1
+    else:
+        mask[:] = 1
     return mask

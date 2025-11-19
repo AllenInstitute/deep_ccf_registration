@@ -10,7 +10,8 @@ class TrainConfig(BaseModel):
     dataset_meta_path: Path
     train_val_split: float = Field(0.8, ge=0.0, le=1.0)
     ls_template_path: Path
-    ccf_annotations_path: Path
+    # ccf annotations moved to ls template space
+    ccf_annotations_path: Path = Path("/data/aind_open_data/SmartSPIM-template_2024-05-16_11-26-14/ccf_annotation_to_template_moved_25.nii.gz")
     orientation: Optional[SliceOrientation] = None
     registration_downsample_factor: int = 3
     tensorstore_aws_credentials_method: str = "default"
@@ -39,9 +40,6 @@ class TrainConfig(BaseModel):
     eval_iters: int = Field(100, gt=0)
     patience: int = Field(10, gt=0)
     min_delta: float = Field(1e-4, ge=0.0)
-    ls_template_to_ccf_affine_path: Path
-    ls_template_to_ccf_inverse_warp_path: Path
-    ccf_template_path: Path
     region_ccf_ids_map_path: Path
 
     model_weights_out_dir: Path = Path("./checkpoints")
