@@ -4,9 +4,7 @@ from pathlib import Path
 
 import albumentations
 import click
-import cv2
 import numpy as np
-from monai.networks.layers import Norm
 from monai.networks.nets import UNet
 import tensorstore
 import torch
@@ -181,7 +179,9 @@ def main(config_path: Path):
         train_dataset = Subset(train_dataset, indices=[int(len(train_dataset)/2)])
         val_dataset = Subset(val_dataset, indices=[int(len(val_dataset) / 2)])
 
-    # Create dataloaders
+    train_eval_subset = Subset(train_dataset, indices=random.sample(range(len(train_dataset)), k=int(len(train_dataset) * config.train_eval_frac)))
+    val_eval_subset = Subset(val_dataset, indices=random.sample(range(len(val_dataset)), k=int(len(val_dataset) * config.val_eval_frac)))
+
     train_dataloader = DataLoader(
         dataset=train_dataset,
         batch_size=config.batch_size,
@@ -197,8 +197,26 @@ def main(config_path: Path):
         pin_memory=(device == "cuda"),
     )
 
+    train_eval_dataloader = DataLoader(
+        dataset=train_eval_subset,
+        batch_size=config.batch_size,
+        shuffle=False,
+        num_workers=config.num_workers,
+        pin_memory=(device == "cuda"),
+    )
+    val_eval_dataloader = DataLoader(
+        dataset=val_eval_subset,
+        batch_size=config.batch_size,
+        shuffle=False,
+        num_workers=config.num_workers,
+        pin_memory=(device == "cuda"),
+    )
+
     logger.info(f"Num train slices: {len(train_dataset)}")
     logger.info(f"Num val slices: {len(val_dataset)}")
+
+    logger.info(f"Num train eval slices: {len(train_eval_subset)}")
+    logger.info(f"Num val eval slices: {len(val_eval_subset)}")
 
     model = UNet(
         spatial_dims=2,
@@ -243,6 +261,8 @@ def main(config_path: Path):
     best_val_rmse = train(
         train_dataloader=train_dataloader,
         val_dataloader=val_dataloader,
+        train_eval_dataloader=train_eval_dataloader,
+        val_eval_dataloader=val_eval_dataloader,
         model=model,
         optimizer=opt,
         n_epochs=config.n_epochs,

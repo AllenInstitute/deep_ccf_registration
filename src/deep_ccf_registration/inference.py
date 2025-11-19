@@ -96,21 +96,20 @@ def evaluate(
     """
     slice_dataset: SliceDataset = val_loader.dataset
     if isinstance(slice_dataset, Subset):
-        slice_dataset = slice_dataset.dataset
+        if isinstance(slice_dataset.dataset, Subset):
+            slice_dataset = slice_dataset.dataset.dataset
+        else:
+            slice_dataset = slice_dataset.dataset
 
-    # Build class mapping for dice calculation
     major_region_map = _build_class_mapping(region_ccf_ids_map.major_regions)
     small_region_map = _build_class_mapping(region_ccf_ids_map.small_regions)
 
-    # Initialize accumulators for metrics
-    # For RMSE
     sum_squared_errors = 0.0
     mse_denominator = 0
     tissue_mask_tp_sum = 0
     tissue_mask_fp_sum = 0
     tissue_mask_fn_sum = 0
 
-    # For Dice - confusion matrices
     n_major_classes = len(region_ccf_ids_map.major_regions) + 1  # +1 for background
     n_small_classes = len(region_ccf_ids_map.small_regions) + 1  # +1 for background
     major_confusion_matrix = np.zeros((n_major_classes, n_major_classes), dtype=np.int64)
@@ -124,7 +123,7 @@ def evaluate(
     random_batch_for_viz_idx = random.choice(range(len(val_loader)))
 
     model.eval()
-    for batch_idx, batch in enumerate(tqdm(val_loader, desc="Processing patches")):
+    for batch_idx, batch in enumerate(tqdm(val_loader, desc="Evaluation")):
         if slice_dataset.patch_size is not None:
             input_images, gt_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, masks = batch
         else:
@@ -147,7 +146,6 @@ def evaluate(
         else:
             random_sample_for_viz = None
 
-        # Process each patch in the batch
         for i in range(pred_ls_template_points.shape[0]):
             pred_patch = pred_ls_template_points[i]  # (3, H, W)
             gt_patch = gt_template_points[i]  # (3, H, W)
@@ -174,7 +172,6 @@ def evaluate(
                     gt_shape=gt_patch.shape[1:]
                 ).squeeze(0)
 
-            # Transform patch to CCF space
             pred_ccf_pts = transform_ls_space_to_ccf_space(
                 points=pred_patch,
                 ls_template_to_ccf_affine_path=ls_template_to_ccf_affine_path,
@@ -191,7 +188,6 @@ def evaluate(
                 ccf_template_parameters=ccf_template_parameters
             )
 
-            # Get CCF annotations for patch
             pred_ccf_annot = get_ccf_annotations(ccf_annotations, pred_ccf_pts).reshape(
                 pred_patch.shape[1:])
             pred_ccf_annot[(1 - mask).bool()] = 0
@@ -234,7 +230,6 @@ def evaluate(
                 )
                 plt.show()
 
-            # Accumulate confusion matrices for Dice
             _update_confusion_matrix(
                 confusion_matrix=major_confusion_matrix,
                 pred_annotations=pred_ccf_annot,
@@ -249,8 +244,6 @@ def evaluate(
                 class_mapping=small_region_map
             )
 
-    # Calculate final metrics
-    logger.info('Calculating RMSE from accumulated statistics')
     rmse = np.sqrt(sum_squared_errors / mse_denominator) if mse_denominator > 0 else 0.0
 
     # convert to microns

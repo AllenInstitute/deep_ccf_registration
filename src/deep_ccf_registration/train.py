@@ -83,6 +83,8 @@ def _mask_pad_pixels(tissue_loss_per_pixel: torch.Tensor, input_image_transforms
 def train(
         train_dataloader,
         val_dataloader,
+        train_eval_dataloader,
+        val_eval_dataloader,
         model: UNet,
         optimizer,
         n_epochs: int,
@@ -228,7 +230,7 @@ def train(
             # Periodic evaluation
             if global_step % loss_eval_interval == 0:
                 train_rmse, train_major_region_dice, train_small_region_dice, train_tissue_mask_precision, train_tissue_mask_recall, train_tissue_mask_f1 = evaluate(
-                    val_loader=train_dataloader,
+                    val_loader=train_eval_dataloader,
                     model=model,
                     ccf_annotations=ccf_annotations,
                     ls_template_to_ccf_affine_path=ls_template_to_ccf_affine_path,
@@ -242,7 +244,7 @@ def train(
                     exclude_background_pixels=exclude_background_pixels
                 )
                 val_rmse, val_major_region_dice, val_small_region_dice, val_tissue_mask_precision, val_tissue_mask_recall, val_tissue_mask_f1 = evaluate(
-                    val_loader=val_dataloader,
+                    val_loader=val_eval_dataloader,
                     model=model,
                     ccf_annotations=ccf_annotations,
                     ls_template_to_ccf_affine_path=ls_template_to_ccf_affine_path,
