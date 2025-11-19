@@ -176,8 +176,8 @@ def main(config_path: Path):
     )
 
     if config.debug:
-        train_dataset = Subset(train_dataset, indices=[int(len(train_dataset)/2)])
-        val_dataset = Subset(val_dataset, indices=[int(len(val_dataset) / 2)])
+        train_dataset = Subset(train_dataset, indices=[95])
+        val_dataset = Subset(val_dataset, indices=[95])
 
     train_eval_subset = Subset(train_dataset, indices=random.sample(range(len(train_dataset)), k=int(len(train_dataset) * config.train_eval_frac)))
     val_eval_subset = Subset(val_dataset, indices=random.sample(range(len(val_dataset)), k=int(len(val_dataset) * config.val_eval_frac)))

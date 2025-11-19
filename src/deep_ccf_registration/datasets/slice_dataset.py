@@ -614,9 +614,6 @@ class SliceDataset(Dataset):
         patch = torch.from_numpy(
             slice_2d[patch_y:patch_y + ph, patch_x:patch_x + pw].read().result())
 
-        # Pad to patch_size if needed
-        patch = self._pad_patch_to_size(patch)
-
         return patch, patch_y, patch_x
 
     def _pad_patch_to_size(self, patch):
