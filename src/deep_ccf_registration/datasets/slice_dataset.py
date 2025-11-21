@@ -311,22 +311,23 @@ class SliceDataset(Dataset):
         tuple[int, int]
             Tuple of (dataset_idx, slice_idx) identifying the specific slice.
         """
-        num_slices = self._get_num_slices_in_axis(
-            orientation=orientation
-        )
-        num_slices_cumsum = np.cumsum([0] + num_slices)
-        dataset_idx = int(np.searchsorted(num_slices_cumsum[1:], idx, side='right'))
-        slice_idx = int(idx - num_slices_cumsum[dataset_idx])
+        slice_ranges = [self._get_slice_range(
+            subject=subject, orientation=orientation
+        ) for subject in self._dataset_meta]
 
-        # For sagittal slices, adjust the slice index to sample from left hemisphere
-        if orientation == SliceOrientation.SAGITTAL and self._limit_sagittal_slices_to_hemisphere:
-                subject = self._dataset_meta[dataset_idx]
-                sagittal_axis = subject.get_slice_axis(
-                    orientation=orientation
-                )
-                if sagittal_axis.direction == AcquisitionDirection.RIGHT_TO_LEFT:
-                    # invert to get slice in left hemisphere
-                    slice_idx = slice_idx + subject.sagittal_midline
+        num_slices_per_subject = [len(slice_range) for slice_range in slice_ranges]
+
+        # Compute cumulative sum to find which dataset the idx falls into
+        num_slices_cumsum = np.cumsum([0] + num_slices_per_subject)
+
+        # Find which dataset this global index belongs to
+        dataset_idx = int(np.searchsorted(num_slices_cumsum[1:], idx, side='right'))
+
+        # Find the local index within that dataset's tissue slices
+        local_idx = int(idx - num_slices_cumsum[dataset_idx])
+
+        # Map local index to actual slice index from the list
+        slice_idx = slice_ranges[dataset_idx][local_idx]
 
         return dataset_idx, slice_idx
 
@@ -353,7 +354,7 @@ class SliceDataset(Dataset):
 
         return slices
 
-    def _get_num_slices_in_axis(self, orientation: SliceOrientation) -> list[int]:
+    def _get_num_slices_in_axis_per_subject(self, orientation: SliceOrientation) -> list[int]:
         """
         Get number of slices per subject for given orientation.
 
@@ -389,10 +390,6 @@ class SliceDataset(Dataset):
                 slice_range = self._get_slice_range(subject_meta, orientation)
 
                 for slice_idx in slice_range:
-                    slice_shape = subject_meta.get_slice_shape(
-                        orientation=orientation
-                    )
-
                     # Get all patch positions for this slice
                     patch_positions = self._get_patch_positions(
                         bounding_box=self._tissue_bboxes[subject_meta.subject_id][slice_idx]
@@ -580,7 +577,7 @@ class SliceDataset(Dataset):
         else:
             num_slices = 0
             for orientation in self._orientation:
-                num_slices_in_axis = self._get_num_slices_in_axis(
+                num_slices_in_axis = self._get_num_slices_in_axis_per_subject(
                     orientation=orientation
                 )
                 num_slices += sum(num_slices_in_axis)
