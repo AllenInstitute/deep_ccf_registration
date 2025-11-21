@@ -15,6 +15,7 @@ from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from aind_smartspim_transform_utils.utils.utils import AcquisitionDirection, \
     convert_from_ants_space
 from loguru import logger
+from pydantic import BaseModel
 from skimage.exposure import rescale_intensity
 from torch.utils.data import Dataset
 
@@ -103,6 +104,20 @@ class TrainMode(Enum):
     TRAIN = 0
     TEST = 1
 
+
+class TissueBoundingBox(BaseModel):
+    """
+    start y, x and width, height of tissue bounding boxes, obtained via
+    `get_tissue_bounding_box.py`
+    """
+    y: int
+    x: int
+    width: int
+    height: int
+
+class TissueBoundingBoxes(BaseModel):
+    bounding_boxes: dict[str, list[Optional[TissueBoundingBox]]]
+
 class SliceDataset(Dataset):
     """
     Dataset for loading slices and their mapped points in template space.
@@ -113,6 +128,7 @@ class SliceDataset(Dataset):
     def __init__(self,
                  dataset_meta: list[SubjectMetadata],
                  ls_template_parameters: AntsImageParameters,
+                 tissue_bboxes: TissueBoundingBoxes,
                  ccf_annotations: Optional[np.ndarray] = None,
                  orientation: Optional[SliceOrientation] = None,
                  registration_downsample_factor: int = 3,
@@ -164,9 +180,13 @@ class SliceDataset(Dataset):
             LEFT hemisphere.
         return_tissue_mask: If true, returns a mask where the ccf annotations indicate a region is foreground (1) or background (0)
             Otherwise, just returns a mask of 1 for image and 0 for pad
+        tissue_bboxes: tissue bounding boxes, obtained via `get_tissue_bounding_box.py`.
+            Each subject id maps to a list of bounding boxes ordered by slice index, or null if no tissue is present in slices
         """
         super().__init__()
         self._dataset_meta = dataset_meta
+        # TODO the schema needs to include orientation. Currently just generated for sagittal
+        self._tissue_bboxes = tissue_bboxes.bounding_boxes
         if orientation is None:
             orientation = [SliceOrientation.SAGITTAL, SliceOrientation.CORONAL, SliceOrientation.HORIZONTAL]
         else:
@@ -197,14 +217,18 @@ class SliceDataset(Dataset):
     def patch_size(self) -> Optional[tuple[int, int]]:
         return self._patch_size
 
-    def _get_patch_positions(self, slice_shape: tuple[int, int]):
+    def _get_patch_positions(
+            self,
+            bounding_box: TissueBoundingBox
+    ) -> list[tuple[int, int]]:
         """
-        Get all patch positions to tile the entire slice.
+        Get all patch positions to tile within a bounding box.
 
         Parameters
         ----------
-        slice_shape : tuple[int, int]
-            Shape of the slice (height, width).
+        bounding_box : TissueBoundingBox
+            Limit patch positions to within this bounding box.
+            The bounding box coordinates should be relative to the slice.
 
         Returns
         -------
@@ -212,20 +236,24 @@ class SliceDataset(Dataset):
             List of (y, x) positions for patch extraction.
         """
         if self._patch_size is None:
-            # Return single patch covering whole slice
-            return [(0, 0)]
+            # Return single patch at bounding box start
+            return [(bounding_box.y, bounding_box.x)]
 
-        h, w = slice_shape
         ph, pw = self._patch_size
+
+        start_y = bounding_box.y
+        start_x = bounding_box.x
+        end_y = bounding_box.y + bounding_box.height
+        end_x = bounding_box.x + bounding_box.width
 
         positions = []
 
         # Calculate number of patches needed (with overlap to cover edges)
-        for y in range(0, h, ph):
-            for x in range(0, w, pw):
-                # Adjust position if it would go past the edge
-                y_start = min(y, max(0, h - ph))
-                x_start = min(x, max(0, w - pw))
+        for y in range(start_y, end_y, ph):
+            for x in range(start_x, end_x, pw):
+                # Adjust position if it would go past the edge of the region
+                y_start = min(y, max(start_y, end_y - ph))
+                x_start = min(x, max(start_x, end_x - pw))
 
                 # Avoid duplicate patches at the edge
                 if not positions or (y_start, x_start) != positions[-1]:
@@ -318,15 +346,11 @@ class SliceDataset(Dataset):
         list of valid slice indices.
         """
         slice_axis = subject.get_slice_axis(orientation=orientation)
-        if orientation == SliceOrientation.SAGITTAL and self._limit_sagittal_slices_to_hemisphere:
-            sagittal_dim = subject.registered_shape[slice_axis.dimension]
-            # Always sample from the left hemisphere due to brain symmetry
-            if slice_axis.direction == AcquisitionDirection.LEFT_TO_RIGHT:
-                slices = list(range(subject.sagittal_midline))
-            else:
-                slices = list(range(subject.sagittal_midline, sagittal_dim))
-        else:
-            slices = list(range(subject.registered_shape[slice_axis.dimension]))
+        slices = list(range(subject.registered_shape[slice_axis.dimension]))
+
+        # exclude slices containing no tissue
+        slices = [x for x in slices if self._tissue_bboxes[subject.subject_id][x] is not None]
+
         return slices
 
     def _get_num_slices_in_axis(self, orientation: SliceOrientation) -> list[int]:
@@ -370,7 +394,9 @@ class SliceDataset(Dataset):
                     )
 
                     # Get all patch positions for this slice
-                    patch_positions = self._get_patch_positions(slice_shape)
+                    patch_positions = self._get_patch_positions(
+                        bounding_box=self._tissue_bboxes[subject_meta.subject_id][slice_idx]
+                    )
 
                     for patch_y, patch_x in patch_positions:
                         patch_index.append(
@@ -417,10 +443,7 @@ class SliceDataset(Dataset):
             slice_idx = self._precomputed_patches[idx].slice_idx
         else:
             dataset_idx, slice_idx = self._get_slice_from_idx(idx=idx, orientation=orientation)
-            if self._patch_size is None:
-                patch_x, patch_y = 0, 0
-            else:
-                patch_x, patch_y = None, None
+            patch_x, patch_y = None, None
 
         experiment_meta = self._dataset_meta[dataset_idx]
         acquisition_axes = experiment_meta.axes
@@ -443,13 +466,11 @@ class SliceDataset(Dataset):
         volume_slice[slice_axis.dimension + 2] = slice_idx  # + 2 since first 2 dims unused
 
         with timed():
-            if self._patch_size is None:
-                input_image = volume[tuple(volume_slice)][:].read().result()
-            else:
-                input_image, patch_y, patch_x = self._get_patch(
+                input_image, patch_y, patch_x = self._extract_slice_image(
                     slice_2d=volume[tuple(volume_slice)],
                     patch_x=patch_x,
-                    patch_y=patch_y
+                    patch_y=patch_y,
+                    tissue_bbox=self._tissue_bboxes[experiment_meta.subject_id][slice_idx]
                 )
 
         height, width = input_image.shape
@@ -565,81 +586,70 @@ class SliceDataset(Dataset):
                 num_slices += sum(num_slices_in_axis)
             return num_slices
 
-    def _get_patch(self, slice_2d: tensorstore.TensorStore, patch_x: Optional[int] = None,
-                   patch_y: Optional[int] = None):
+    def _extract_slice_image(
+            self,
+            slice_2d: tensorstore.TensorStore,
+            tissue_bbox: TissueBoundingBox,
+            patch_x: Optional[int] = None,
+            patch_y: Optional[int] = None,
+    ):
         """
-        Extract patch from slice.
+        Extract patch from slice or whole slice if patch_x, patch_y is None and self._patch_size is None.
+        Only extracts a region from within `tissue_bbox`.
 
-        If patch_x/patch_y are None, choose randomly. Pads the patch to patch_size if needed.
+        If patch_x/patch_y are None and patch_size is not None, choose randomly.
 
         Parameters
         ----------
         slice_2d : tensorstore.TensorStore
             2D slice to extract patch from.
+        tissue_bbox : TissueBoundingBox
+            Bounding box defining the region to extract from.
         patch_x : int, optional
-            Starting x coordinate for patch. If None, chosen randomly.
+            Starting x coordinate for patch (assumed to be within bbox). If None, chosen randomly.
         patch_y : int, optional
-            Starting y coordinate for patch. If None, chosen randomly.
+            Starting y coordinate for patch (assumed to be within bbox). If None, chosen randomly.
 
         Returns
         -------
         tuple
             Tuple containing:
             - patch : torch.Tensor
-                Extracted and padded patch.
+                Extracted patch.
             - patch_y : int
                 Actual starting y coordinate used.
             - patch_x : int
                 Actual starting x coordinate used.
         """
-        h, w = slice_2d.shape
+        # Create view restricted to bounding box (coordinates still absolute)
+        slice_2d_bbox = slice_2d[
+                        tissue_bbox.y:tissue_bbox.y + tissue_bbox.height,
+                        tissue_bbox.x:tissue_bbox.x + tissue_bbox.width
+                        ]
 
-        ph, pw = self._patch_size
+        h, w = tissue_bbox.height, tissue_bbox.width
 
-        # Adjust patch size to what's available
-        ph = min(h, ph)
-        pw = min(w, pw)
+        if self._patch_size is None:
+            # Extract full bbox region
+            ph, pw = h, w
+            patch_y = tissue_bbox.y
+            patch_x = tissue_bbox.x
+        else:
+            ph, pw = self._patch_size
+            # Adjust patch size to available region
+            ph = min(h, ph)
+            pw = min(w, pw)
 
-        if patch_x is None or patch_y is None:
-            # Random position (0 if slice is smaller than patch)
-            patch_y = random.randint(0, max(0, h - ph))
-            patch_x = random.randint(0, max(0, w - pw))
+            if patch_y is None or patch_x is None:
+                # Random position within bbox
+                patch_y = random.randint(tissue_bbox.y, max(tissue_bbox.y, tissue_bbox.y + h - ph))
+                patch_x = random.randint(tissue_bbox.x, max(tissue_bbox.x, tissue_bbox.x + w - pw))
 
-        # Extract patch
         patch = torch.from_numpy(
-            slice_2d[patch_y:patch_y + ph, patch_x:patch_x + pw].read().result())
+            slice_2d_bbox[patch_y:patch_y + ph, patch_x:patch_x + pw].read().result()
+        )
 
         return patch, patch_y, patch_x
-
-    def _pad_patch_to_size(self, patch):
-        """
-        Pad extracted patch to patch_size if needed.
-
-        Parameters
-        ----------
-        patch : torch.Tensor
-            Patch tensor to pad.
-
-        Returns
-        -------
-        torch.Tensor
-            Padded patch with dimensions matching self._patch_size.
-        """
-        h, w = patch.shape
-        ph, pw = self._patch_size
-
-        pad_h = max(0, ph - h)
-        pad_w = max(0, pw - w)
-
-        if pad_h > 0 or pad_w > 0:
-            patch = torch.nn.functional.pad(
-                patch,
-                (0, pad_w, 0, pad_h),
-                mode='constant',
-                value=0
-            )
-
-        return patch
 
     def _normalize_orientation(
         self,

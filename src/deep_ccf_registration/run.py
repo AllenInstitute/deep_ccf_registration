@@ -6,7 +6,6 @@ import albumentations
 import click
 import numpy as np
 from monai.networks.nets import UNet
-import tensorstore
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from torch.utils.data import DataLoader, Subset
@@ -18,13 +17,12 @@ import random
 
 from deep_ccf_registration.configs.train_config import TrainConfig
 from deep_ccf_registration.inference import RegionAcronymCCFIdsMap
-from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
-from train import train
 from deep_ccf_registration.datasets.slice_dataset import (
     SliceDataset,
-    TrainMode,
+    TrainMode, TissueBoundingBoxes,
 )
 from deep_ccf_registration.metadata import SubjectMetadata
+from deep_ccf_registration.train import train
 
 logger.remove()
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -104,6 +102,10 @@ def main(config_path: Path):
     logger.info('loading ccf annotations volume')
     ccf_annotations = ants.image_read(str(config.ccf_annotations_path)).numpy()
 
+    with open(config.tissue_bounding_boxes_path) as f:
+        tissue_bboxes = json.load(f)
+    tissue_bboxes = TissueBoundingBoxes(bounding_boxes=tissue_bboxes)
+
     train_dataset = SliceDataset(
         dataset_meta=train_metadata,
         ls_template_parameters=ls_template_parameters,
@@ -116,22 +118,16 @@ def main(config_path: Path):
         normalize_orientation_map=config.normalize_orientation_map,
         limit_sagittal_slices_to_hemisphere=config.limit_sagittal_slices_to_hemisphere,
         input_image_transforms=[
-            albumentations.LongestMaxSize(max_size=256),
-            albumentations.PadIfNeeded(min_height=256, min_width=256),
+            albumentations.PadIfNeeded(min_height=512, min_width=512),
             albumentations.ToTensorV2()
         ],
-        mask_transforms=[
-            albumentations.LongestMaxSize(max_size=256),
-            albumentations.PadIfNeeded(min_height=256, min_width=256),
-            albumentations.ToTensorV2(),
-        ],
         output_points_transforms=[
-            albumentations.LongestMaxSize(max_size=256),
-            albumentations.PadIfNeeded(min_height=256, min_width=256),
+            albumentations.PadIfNeeded(min_height=512, min_width=512),
             albumentations.ToTensorV2()
         ],
         ccf_annotations=ccf_annotations,
         return_tissue_mask=config.exclude_background_pixels,
+        tissue_bboxes=tissue_bboxes
     )
 
     val_dataset = SliceDataset(
@@ -146,18 +142,16 @@ def main(config_path: Path):
         normalize_orientation_map=config.normalize_orientation_map,
         limit_sagittal_slices_to_hemisphere=config.limit_sagittal_slices_to_hemisphere,
         input_image_transforms=[
-            albumentations.LongestMaxSize(max_size=256),
-            albumentations.PadIfNeeded(min_height=256, min_width=256),
+            albumentations.PadIfNeeded(min_height=512, min_width=512),
             albumentations.ToTensorV2()
         ],
-        mask_transforms=[
-            albumentations.ToTensorV2(),
-        ],
         output_points_transforms=[
+            albumentations.PadIfNeeded(min_height=512, min_width=512),
             albumentations.ToTensorV2()
         ],
         ccf_annotations=ccf_annotations,
-        return_tissue_mask=config.exclude_background_pixels
+        return_tissue_mask=config.exclude_background_pixels,
+        tissue_bboxes=tissue_bboxes
     )
 
     if config.debug:
