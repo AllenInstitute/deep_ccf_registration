@@ -174,8 +174,9 @@ def train(
         train_mse_losses = []
         train_mask_losses = []
 
+        iter_start_time = time.time()
+
         for batch_idx, batch in enumerate(train_dataloader):
-            iter_start_time = time.time()
 
             if train_dataset.patch_size is not None:
                 input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks = batch
@@ -330,6 +331,8 @@ def train(
                     return best_val_rmse
 
                 model.train()
+
+                iter_start_time = time.time()
 
         # End of epoch summary
         avg_train_loss = sum(train_losses) / len(train_losses)

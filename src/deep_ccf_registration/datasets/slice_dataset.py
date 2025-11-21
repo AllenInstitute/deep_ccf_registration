@@ -192,6 +192,7 @@ class SliceDataset(Dataset):
         else:
             orientation = [orientation]
         self._orientation = orientation
+        self._slice_ranges = {orientation: [self._get_slice_range(subject=subject, orientation=orientation) for subject in self._dataset_meta] for orientation in orientation}
         self._registration_downsample_factor = registration_downsample_factor
         self._warps = self._load_warps(tensorstore_aws_credentials_method=tensorstore_aws_credentials_method)
         self._crop_warp_to_bounding_box = crop_warp_to_bounding_box
@@ -311,9 +312,7 @@ class SliceDataset(Dataset):
         tuple[int, int]
             Tuple of (dataset_idx, slice_idx) identifying the specific slice.
         """
-        slice_ranges = [self._get_slice_range(
-            subject=subject, orientation=orientation
-        ) for subject in self._dataset_meta]
+        slice_ranges = self._slice_ranges[orientation]
 
         num_slices_per_subject = [len(slice_range) for slice_range in slice_ranges]
 
@@ -368,7 +367,7 @@ class SliceDataset(Dataset):
         list[int]
             List of number of slices for each subject.
         """
-        return [len(self._get_slice_range(subject, orientation)) for subject in self._dataset_meta]
+        return [len(x) for x in self._slice_ranges[orientation]]
 
     def _build_patch_index(self) -> list[Patch]:
         """
@@ -387,7 +386,7 @@ class SliceDataset(Dataset):
         for orientation in self._orientation:
             for dataset_idx, subject_meta in enumerate(self._dataset_meta):
                 # Get slice range for this subject
-                slice_range = self._get_slice_range(subject_meta, orientation)
+                slice_range = self._slice_ranges[orientation][dataset_idx]
 
                 for slice_idx in slice_range:
                     # Get all patch positions for this slice
