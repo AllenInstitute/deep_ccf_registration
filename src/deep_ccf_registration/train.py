@@ -1,3 +1,5 @@
+import time
+from datetime import timedelta
 from pathlib import Path
 from typing import ContextManager, Any
 from contextlib import nullcontext
@@ -101,7 +103,8 @@ def train(
         min_delta: float = 1e-4,
         autocast_context: ContextManager = nullcontext(),
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
-        exclude_background_pixels: bool = True
+        exclude_background_pixels: bool = True,
+        log_iter_interval: int = 10
 ):
     """
     Train slice registration model
@@ -128,6 +131,7 @@ def train(
     region_ccf_ids_map: `RegionAcronymCCFIdsMap`
     exclude_background_pixels: whether to use a tissue mask to exclude background pixels in loss/evaluation.
         Otherwise, just excludes pad pixels
+    log_iter_interval: how often to log training iterations
 
     Returns
     -------
@@ -156,6 +160,10 @@ def train(
     logger.info(f"Validation samples: {len(val_dataloader.dataset)}")
     logger.info(f"Device: {device}")
 
+    iteration_times = []
+    training_start_time = time.time()
+    total_iterations = len(train_dataloader) * n_epochs
+
     for epoch in range(1, n_epochs + 1):
         # Set epoch for distributed training
         if isinstance(train_dataloader.sampler, DistributedSampler):
@@ -167,6 +175,8 @@ def train(
         train_mask_losses = []
 
         for batch_idx, batch in enumerate(train_dataloader):
+            iter_start_time = time.time()
+
             if train_dataset.patch_size is not None:
                 input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks = batch
             else:
@@ -220,6 +230,27 @@ def train(
                 train_mask_losses.append(tissue_loss.item())
 
             global_step += 1
+
+            iter_time = time.time() - iter_start_time
+            iteration_times.append(iter_time)
+
+            # Log every N iterations
+            if global_step % log_iter_interval == 0:
+                avg_iter_time = sum(iteration_times[-100:]) / min(len(iteration_times),
+                                                                  100)  # Last 100 iters
+                remaining_iters = total_iterations - global_step
+                eta_seconds = remaining_iters * avg_iter_time
+                eta_str = str(timedelta(seconds=int(eta_seconds)))
+
+                elapsed_time = time.time() - training_start_time
+                elapsed_str = str(timedelta(seconds=int(elapsed_time)))
+
+                logger.info(
+                    f"Step {global_step}/{total_iterations} | "
+                    f"Iter time: {iter_time:.3f}s | Avg: {avg_iter_time:.3f}s | "
+                    f"Loss: {loss.item():.6f} | "
+                    f"Elapsed: {elapsed_str} | ETA: {eta_str}"
+                )
 
             # Periodic evaluation
             if global_step % loss_eval_interval == 0:
