@@ -4,10 +4,12 @@ from pathlib import Path
 
 import albumentations
 import click
+import mlflow
 import numpy as np
 from monai.networks.nets import UNet
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
+
 from torch.utils.data import DataLoader, Subset
 from contextlib import nullcontext
 from loguru import logger
@@ -114,10 +116,14 @@ def main(config_path: Path):
         tensorstore_aws_credentials_method=config.tensorstore_aws_credentials_method,
         crop_warp_to_bounding_box=config.crop_warp_to_bounding_box,
         patch_size=config.patch_size,
-        mode=TrainMode.TRAIN,
+        mode=TrainMode.TEST if config.debug else TrainMode.TRAIN,   # deterministic if debug
         normalize_orientation_map=config.normalize_orientation_map,
         limit_sagittal_slices_to_hemisphere=config.limit_sagittal_slices_to_hemisphere,
         input_image_transforms=[
+            albumentations.PadIfNeeded(min_height=512, min_width=512),
+            albumentations.ToTensorV2()
+        ],
+        mask_transforms=[
             albumentations.PadIfNeeded(min_height=512, min_width=512),
             albumentations.ToTensorV2()
         ],
@@ -145,6 +151,10 @@ def main(config_path: Path):
             albumentations.PadIfNeeded(min_height=512, min_width=512),
             albumentations.ToTensorV2()
         ],
+        mask_transforms=[
+            albumentations.PadIfNeeded(min_height=512, min_width=512),
+            albumentations.ToTensorV2()
+        ],
         output_points_transforms=[
             albumentations.PadIfNeeded(min_height=512, min_width=512),
             albumentations.ToTensorV2()
@@ -155,8 +165,8 @@ def main(config_path: Path):
     )
 
     if config.debug:
-        train_dataset = Subset(train_dataset, indices=[95])
-        val_dataset = Subset(val_dataset, indices=[95])
+        train_dataset = Subset(train_dataset, indices=[1000])
+        val_dataset = Subset(val_dataset, indices=[1000])
 
     train_eval_subset = Subset(train_dataset, indices=random.sample(range(len(train_dataset)), k=int(len(train_dataset) * config.train_eval_frac)))
     val_eval_subset = Subset(val_dataset, indices=random.sample(range(len(val_dataset)), k=int(len(val_dataset) * config.val_eval_frac)))
@@ -202,8 +212,8 @@ def main(config_path: Path):
         in_channels=1,
         out_channels=4 if config.exclude_background_pixels else 3,
         dropout=0.0,
-        channels=(8, 16, 32, 64, 128, 256, 512),
-        strides=(2, 2, 2, 2, 2, 2, 2),
+        channels=config.unet_channels,
+        strides=config.unet_stride,
     )
 
     if config.load_checkpoint:
@@ -236,30 +246,45 @@ def main(config_path: Path):
         region_ccf_ids_map = json.load(f)
     region_ccf_ids_map = RegionAcronymCCFIdsMap.model_validate(region_ccf_ids_map)
 
-    # Train model
-    best_val_rmse = train(
-        train_dataloader=train_dataloader,
-        val_dataloader=val_dataloader,
-        train_eval_dataloader=train_eval_dataloader,
-        val_eval_dataloader=val_eval_dataloader,
-        model=model,
-        optimizer=opt,
-        n_epochs=config.n_epochs,
-        model_weights_out_dir=config.model_weights_out_dir,
-        learning_rate=config.learning_rate,
-        decay_learning_rate=config.decay_learning_rate,
-        warmup_iters=config.warmup_iters,
-        loss_eval_interval=config.loss_eval_interval,
-        patience=config.patience,
-        min_delta=config.min_delta,
-        autocast_context=autocast_context,
-        device=device,
-        ccf_annotations=ccf_annotations,
-        ls_template=ls_template,
-        ls_template_parameters=ls_template_parameters,
-        region_ccf_ids_map=region_ccf_ids_map,
-        exclude_background_pixels=config.exclude_background_pixels
-    )
+    if config.mlflow_tracking_uri:
+        mlflow.set_tracking_uri(config.mlflow_tracking_uri)
+
+    mlflow.set_experiment(config.mlflow_experiment_name)
+
+    # disable seeding so mlflow run name can be unique
+    state = random.getstate()
+    random.seed()
+
+    mlflow_run = mlflow.start_run() if config.use_mlflow else nullcontext()
+    with mlflow_run:
+        mlflow.log_params(params=config.get_mlflow_params())
+
+        # Restore original seeded state
+        random.setstate(state)
+
+        best_val_rmse = train(
+            train_dataloader=train_dataloader,
+            val_dataloader=val_dataloader,
+            train_eval_dataloader=train_eval_dataloader,
+            val_eval_dataloader=val_eval_dataloader,
+            model=model,
+            optimizer=opt,
+            n_epochs=config.n_epochs,
+            model_weights_out_dir=config.model_weights_out_dir,
+            learning_rate=config.learning_rate,
+            decay_learning_rate=config.decay_learning_rate,
+            warmup_iters=config.warmup_iters,
+            loss_eval_interval=config.loss_eval_interval,
+            patience=config.patience,
+            min_delta=config.min_delta,
+            autocast_context=autocast_context,
+            device=device,
+            ccf_annotations=ccf_annotations,
+            ls_template=ls_template,
+            ls_template_parameters=ls_template_parameters,
+            region_ccf_ids_map=region_ccf_ids_map,
+            exclude_background_pixels=config.exclude_background_pixels
+        )
 
     logger.info("=" * 60)
     logger.info(f"Training completed! Best validation RMSE: {best_val_rmse:.6f}")

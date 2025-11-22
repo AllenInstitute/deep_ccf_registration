@@ -1,8 +1,8 @@
 import random
-from pathlib import Path
 from typing import Optional
 
 import albumentations
+import mlflow
 import numpy as np
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
@@ -71,6 +71,7 @@ def evaluate(
         ls_template_parameters: AntsImageParameters,
         region_ccf_ids_map: RegionAcronymCCFIdsMap,
         iteration: int,
+        is_train: bool,
         device: str = "cuda",
         exclude_background_pixels: bool = True,
 ) -> tuple[float, dict[str, float], dict[str, float], float, float, float]:
@@ -85,6 +86,7 @@ def evaluate(
     :param iteration
     :param exclude_background_pixels: whether to use a tissue mask to exclude background pixels
         Otherwise, just excludes pad pixels
+    :param is_train: Whether train or val
     :return: tuple of: (rmse in microns ignoring background (just tissue), mapping from major brain
         region to dice, mapping from small region to dice)
     """
@@ -211,7 +213,8 @@ def evaluate(
                     gt_template_points=gt_patch,
                     mask=(gt_ccf_annot != 0) if exclude_background_pixels else mask.bool().numpy()
                 )
-                plt.show()
+                mlflow.log_figure(fig, f"inference/{"train" if is_train else "val"}_slice_{slice_indices[i]}_y_{patch_ys[i]}_x_{patch_xs[i]}_step_{iteration}.png")
+                plt.close(fig)
 
             _update_confusion_matrix(
                 confusion_matrix=major_confusion_matrix,

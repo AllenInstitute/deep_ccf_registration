@@ -545,16 +545,21 @@ class SliceDataset(Dataset):
             mask = self._calculate_tissue_mask(
                 template_points=output_points
             )
-            if self._mask_transforms:
-                mask = albumentations.Compose(self._mask_transforms)(image=mask)['image']
         else:
-            mask = _calculate_non_pad_mask(input_image=input_image_transformed, pad_transform=pad_transform)
+            mask = _calculate_non_pad_mask(
+                shape=self._patch_size if self._patch_size is not None else input_image_transformed.shape, pad_transform=pad_transform)
+
+        if self._mask_transforms:
+            mask = albumentations.Compose(self._mask_transforms)(image=mask)['image']
+
+        if len(mask.shape) == 3:
+            mask = mask.squeeze()
 
         if self._output_points_transforms is not None:
             output_points = albumentations.Compose(self._output_points_transforms)(image=output_points)[
                 'image']
 
-        mask = mask.squeeze()
+
 
         if self.patch_size is not None:
             res = input_image_transformed, output_points, dataset_idx, slice_idx, patch_y, patch_x, orientation.value, pad_transform, mask
@@ -718,10 +723,10 @@ class SliceDataset(Dataset):
         tissue_mask = (ccf_annotations != 0).astype('uint8')
         return tissue_mask
 
-def _calculate_non_pad_mask(input_image: np.ndarray, pad_transform: dict[str, Any]):
-    mask = np.zeros_like(input_image, dtype="uint8")
+def _calculate_non_pad_mask(shape: tuple[int, int], pad_transform: dict[str, Any]):
+    mask = np.zeros(shape, dtype="uint8")
     if pad_transform:
-        mask[:,
+        mask[
             pad_transform['pad_top']:pad_transform['pad_top']+pad_transform['shape'][0],
             pad_transform['pad_left']:pad_transform['pad_left']+pad_transform['shape'][1]
         ] = 1

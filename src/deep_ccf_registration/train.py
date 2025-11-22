@@ -6,6 +6,7 @@ from contextlib import nullcontext
 import os
 import math
 
+import mlflow
 import numpy as np
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
@@ -104,7 +105,7 @@ def train(
         autocast_context: ContextManager = nullcontext(),
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         exclude_background_pixels: bool = True,
-        log_iter_interval: int = 10
+        log_iter_interval: int = 10,
 ):
     """
     Train slice registration model
@@ -232,6 +233,11 @@ def train(
 
             global_step += 1
 
+            mlflow.log_metrics({
+                "train/mse_loss": mse_loss.item(),
+                "train/learning_rate": optimizer.param_groups[0]['lr'],
+            }, step=global_step)
+
             iter_time = time.time() - iter_start_time
             iteration_times.append(iter_time)
 
@@ -264,7 +270,8 @@ def train(
                     region_ccf_ids_map=region_ccf_ids_map,
                     device=device,
                     iteration=global_step,
-                    exclude_background_pixels=exclude_background_pixels
+                    exclude_background_pixels=exclude_background_pixels,
+                    is_train=True
                 )
                 val_rmse, val_major_region_dice, val_small_region_dice, val_tissue_mask_precision, val_tissue_mask_recall, val_tissue_mask_f1 = evaluate(
                     val_loader=val_eval_dataloader,
@@ -275,7 +282,8 @@ def train(
                     region_ccf_ids_map=region_ccf_ids_map,
                     device=device,
                     iteration=global_step,
-                    exclude_background_pixels=exclude_background_pixels
+                    exclude_background_pixels=exclude_background_pixels,
+                    is_train=False
                 )
 
                 current_lr = optimizer.param_groups[0]['lr']
@@ -287,6 +295,17 @@ def train(
                     val_major_region_dice) if len(val_major_region_dice) > 0 else np.nan
                 val_small_dice_avg = sum(val_small_region_dice.values()) / len(
                     val_small_region_dice) if len(val_small_region_dice) > 0 else np.nan
+
+                mlflow.log_metrics(metrics={
+                    "eval/train_rmse": train_rmse,
+                    "eval/val_rmse": val_rmse,
+                    "eval/train_major_dice": train_major_dice_avg,
+                    "eval/val_major_dice": val_major_dice_avg,
+                    "eval/train_small_dice": train_small_dice_avg,
+                    "eval/val_small_dice": val_small_dice_avg,
+                },
+                    step=global_step
+                )
 
                 if exclude_background_pixels:
                     mask_log = f"Train mask precision: {train_tissue_mask_precision} | Train mask recall {train_tissue_mask_recall} | Train mask f1 {train_tissue_mask_f1} | "
@@ -319,6 +338,10 @@ def train(
                         },
                         f=checkpoint_path,
                     )
+
+                    mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
+                    mlflow.log_metric("best_val_rmse", best_val_rmse, step=global_step)
+
                     logger.info(f"New best model saved! Val RMSE: {val_rmse:.6f}")
                 else:
                     patience_counter += 1
@@ -328,6 +351,8 @@ def train(
                 if patience_counter >= patience:
                     logger.info(f"\nEarly stopping triggered after {global_step} steps")
                     logger.info(f"Best validation RMSE: {best_val_rmse:.6f}")
+                    mlflow.log_metric("final_best_val_rmse", best_val_rmse)
+
                     return best_val_rmse
 
                 model.train()
@@ -339,6 +364,11 @@ def train(
         avg_mse_loss = sum(train_mse_losses) / len(train_mse_losses)
         if exclude_background_pixels:
             avg_mask_loss = sum(train_mask_losses) / len(train_mask_losses)
+
+        mlflow.log_metrics(metrics={
+                "epoch/train_mse_loss": avg_mse_loss,
+            }, step=global_step)
+
         logger.info(f"\n{'=' * 60}")
         mask_loss_log = f"| Avg mask loss {avg_mask_loss:.6f}" if exclude_background_pixels else ""
         logger.info(f"Epoch {epoch}/{n_epochs} completed | Avg Train Loss: {avg_train_loss:.6f} | Avg mse loss {avg_mse_loss:.6f} {mask_loss_log}")
@@ -358,4 +388,7 @@ def train(
         )
 
     logger.info(f"\nTraining completed! Best validation loss: {best_val_rmse:.6f}")
+
+    mlflow.log_metric("final_best_val_rmse", best_val_rmse)
+
     return best_val_rmse

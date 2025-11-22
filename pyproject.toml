@@ -12,6 +12,7 @@ dependencies = [
     "albumentationsx>=2.0.12",
     "click>=8.3.0",
     "loguru>=0.7.3",
+    "mlflow>=3.6.0",
     "monai>=1.5.1",
     "pydantic>=2.11.9",
     "scikit-image>=0.25.2",
