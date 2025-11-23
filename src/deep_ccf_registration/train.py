@@ -18,7 +18,7 @@ import torch.nn.functional as F
 
 from deep_ccf_registration.datasets.slice_dataset import SliceDataset
 from deep_ccf_registration.inference import evaluate, RegionAcronymCCFIdsMap
-from deep_ccf_registration.losses.mse import HemisphereAgnosticMSE
+from deep_ccf_registration.losses.coord_loss import HemisphereAgnosticCoordLoss
 from deep_ccf_registration.metadata import SliceOrientation
 
 
@@ -106,6 +106,7 @@ def train(
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         exclude_background_pixels: bool = True,
         log_iter_interval: int = 10,
+        tissue_loss_weight: float = 1.0
 ):
     """
     Train slice registration model
@@ -133,6 +134,7 @@ def train(
     exclude_background_pixels: whether to use a tissue mask to exclude background pixels in loss/evaluation.
         Otherwise, just excludes pad pixels
     log_iter_interval: how often to log training iterations
+    tissue_loss_weight: tissue loss weight
 
     Returns
     -------
@@ -144,11 +146,11 @@ def train(
 
     os.makedirs(model_weights_out_dir, exist_ok=True)
 
-    mse = HemisphereAgnosticMSE(
+    coord_loss = HemisphereAgnosticCoordLoss(
         ml_dim_size=ls_template.shape[0],
         template_parameters=ls_template_parameters
     )
-    best_val_rmse = float("inf")
+    best_val_coord_loss = float("inf")
     patience_counter = 0
     global_step = 0
     lr_decay_iters = len(train_dataloader) * n_epochs
@@ -172,7 +174,7 @@ def train(
 
         model.train()
         train_losses = []
-        train_mse_losses = []
+        train_coord_losses = []
         train_mask_losses = []
 
         iter_start_time = time.time()
@@ -201,7 +203,7 @@ def train(
             optimizer.zero_grad()
             with autocast_context:
                 model_out = model(input_images)
-                mse_loss = mse(
+                coordinate_loss = coord_loss(
                     pred_template_points=model_out[:, :-1] if exclude_background_pixels else model_out,
                     true_template_points=target_template_points,
                     tissue_masks=tissue_masks,
@@ -218,23 +220,22 @@ def train(
                         tissue_loss_per_pixel=tissue_loss_per_pixel,
                         input_image_transforms=input_image_transforms
                     )
-                    loss = mse_loss + 0.1 * tissue_loss
+                    loss = coordinate_loss + tissue_loss
                 else:
-                    loss = mse_loss
+                    loss = coordinate_loss
 
-            # Backward pass
             loss.backward()
             optimizer.step()
 
             train_losses.append(loss.item())
-            train_mse_losses.append(mse_loss.item())
+            train_coord_losses.append(coordinate_loss.item())
             if exclude_background_pixels:
                 train_mask_losses.append(tissue_loss.item())
 
             global_step += 1
 
             mlflow.log_metrics({
-                "train/mse_loss": mse_loss.item(),
+                "train/coord_loss": coordinate_loss.item(),
                 "train/learning_rate": optimizer.param_groups[0]['lr'],
             }, step=global_step)
 
@@ -261,7 +262,7 @@ def train(
 
             # Periodic evaluation
             if global_step % loss_eval_interval == 0:
-                train_rmse, train_major_region_dice, train_small_region_dice, train_tissue_mask_precision, train_tissue_mask_recall, train_tissue_mask_f1 = evaluate(
+                train_rmse, train_major_region_dice, train_small_region_dice, train_tissue_mask_dice = evaluate(
                     val_loader=train_eval_dataloader,
                     model=model,
                     ccf_annotations=ccf_annotations,
@@ -273,7 +274,7 @@ def train(
                     exclude_background_pixels=exclude_background_pixels,
                     is_train=True
                 )
-                val_rmse, val_major_region_dice, val_small_region_dice, val_tissue_mask_precision, val_tissue_mask_recall, val_tissue_mask_f1 = evaluate(
+                val_rmse, val_major_region_dice, val_small_region_dice, val_tissue_mask_dice = evaluate(
                     val_loader=val_eval_dataloader,
                     model=model,
                     ccf_annotations=ccf_annotations,
@@ -308,8 +309,8 @@ def train(
                 )
 
                 if exclude_background_pixels:
-                    mask_log = f"Train mask precision: {train_tissue_mask_precision} | Train mask recall {train_tissue_mask_recall} | Train mask f1 {train_tissue_mask_f1} | "
-                    f"Val mask precision: {val_tissue_mask_precision} | Val mask recall {val_tissue_mask_recall} | Val mask f1 {val_tissue_mask_f1} | "
+                    mask_log = f"Train mask dice: {train_tissue_mask_dice} | "
+                    f"Val mask dice: {val_tissue_mask_dice} | "
                 else:
                     mask_log = ""
                 logger.info(
@@ -322,8 +323,8 @@ def train(
                 )
 
                 # Check for improvement
-                if val_rmse < best_val_rmse - min_delta:
-                    best_val_rmse = val_rmse
+                if val_rmse < best_val_coord_loss - min_delta:
+                    best_val_coord_loss = val_rmse
                     patience_counter = 0
 
                     # Save best model
@@ -340,7 +341,7 @@ def train(
                     )
 
                     mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
-                    mlflow.log_metric("best_val_rmse", best_val_rmse, step=global_step)
+                    mlflow.log_metric("best_val_rmse", best_val_coord_loss, step=global_step)
 
                     logger.info(f"New best model saved! Val RMSE: {val_rmse:.6f}")
                 else:
@@ -350,10 +351,10 @@ def train(
                 # Early stopping
                 if patience_counter >= patience:
                     logger.info(f"\nEarly stopping triggered after {global_step} steps")
-                    logger.info(f"Best validation RMSE: {best_val_rmse:.6f}")
-                    mlflow.log_metric("final_best_val_rmse", best_val_rmse)
+                    logger.info(f"Best validation MAE: {best_val_coord_loss:.6f}")
+                    mlflow.log_metric("final_best_val_rmse", best_val_coord_loss)
 
-                    return best_val_rmse
+                    return best_val_coord_loss
 
                 model.train()
 
@@ -361,17 +362,17 @@ def train(
 
         # End of epoch summary
         avg_train_loss = sum(train_losses) / len(train_losses)
-        avg_mse_loss = sum(train_mse_losses) / len(train_mse_losses)
+        avg_coord_loss = sum(train_coord_losses) / len(train_coord_losses)
         if exclude_background_pixels:
             avg_mask_loss = sum(train_mask_losses) / len(train_mask_losses)
 
         mlflow.log_metrics(metrics={
-                "epoch/train_mse_loss": avg_mse_loss,
+                "epoch/train_coord_loss": avg_coord_loss,
             }, step=global_step)
 
         logger.info(f"\n{'=' * 60}")
         mask_loss_log = f"| Avg mask loss {avg_mask_loss:.6f}" if exclude_background_pixels else ""
-        logger.info(f"Epoch {epoch}/{n_epochs} completed | Avg Train Loss: {avg_train_loss:.6f} | Avg mse loss {avg_mse_loss:.6f} {mask_loss_log}")
+        logger.info(f"Epoch {epoch}/{n_epochs} completed | Avg Train Loss: {avg_train_loss:.6f} | Avg coord loss {avg_coord_loss:.6f} {mask_loss_log}")
         logger.info(f"{'=' * 60}\n")
 
         # Save epoch checkpoint
@@ -387,8 +388,8 @@ def train(
             f=checkpoint_path,
         )
 
-    logger.info(f"\nTraining completed! Best validation loss: {best_val_rmse:.6f}")
+    logger.info(f"\nTraining completed! Best validation loss: {best_val_coord_loss:.6f}")
 
-    mlflow.log_metric("final_best_val_rmse", best_val_rmse)
+    mlflow.log_metric("final_best_val_coord_loss", best_val_coord_loss)
 
-    return best_val_rmse
+    return best_val_coord_loss

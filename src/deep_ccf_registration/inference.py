@@ -16,7 +16,7 @@ from tqdm import tqdm
 import  torch.nn.functional as F
 
 from deep_ccf_registration.datasets.slice_dataset import SliceDataset
-from deep_ccf_registration.losses.mse import HemisphereAgnosticMSE
+from deep_ccf_registration.losses.coord_loss import HemisphereAgnosticCoordLoss
 from deep_ccf_registration.metadata import SliceOrientation
 from deep_ccf_registration.utils.utils import get_ccf_annotations
 from deep_ccf_registration.utils.visualization import create_diagnostic_image
@@ -74,7 +74,7 @@ def evaluate(
         is_train: bool,
         device: str = "cuda",
         exclude_background_pixels: bool = True,
-) -> tuple[float, dict[str, float], dict[str, float], float, float, float]:
+) -> tuple[float, dict[str, float], dict[str, float], float]:
     """
     :param val_loader: validation DataLoader
     :param model: model
@@ -100,8 +100,8 @@ def evaluate(
     major_region_map = _build_class_mapping(region_ccf_ids_map.major_regions)
     small_region_map = _build_class_mapping(region_ccf_ids_map.small_regions)
 
-    sum_squared_errors = 0.0
-    mse_denominator = 0
+    errors = 0.0
+    coord_error_denominator = 0
     tissue_mask_tp_sum = 0
     tissue_mask_fp_sum = 0
     tissue_mask_fn_sum = 0
@@ -111,7 +111,7 @@ def evaluate(
     major_confusion_matrix = np.zeros((n_major_classes, n_major_classes), dtype=np.int64)
     small_confusion_matrix = np.zeros((n_small_classes, n_small_classes), dtype=np.int64)
 
-    mse = HemisphereAgnosticMSE(
+    mae = HemisphereAgnosticCoordLoss(
         ml_dim_size=ls_template.shape[0],
         template_parameters=ls_template_parameters
     )
@@ -183,35 +183,36 @@ def evaluate(
 
             orientation = SliceOrientation(orientations[i])
 
-            patch_squared_errors = mse(
+            patch_errors = mae(
                 pred_template_points=pred_patch.unsqueeze(0),
                 true_template_points=gt_patch.unsqueeze(0),
                 orientations=[orientation],
                 tissue_masks=torch.ones_like(mask).unsqueeze(0), # calculate squared error over all pixels
-                per_channel_squared_error=True
+                per_channel_error=True
             )
 
             if exclude_background_pixels:
-                sum_squared_errors += patch_squared_errors[0][:, gt_tissue_mask].sum(dim=0).sum()
-                mse_denominator += gt_tissue_mask.sum()
+                errors += patch_errors[0][:, gt_tissue_mask].sum(dim=0).sum()
+                coord_error_denominator += gt_tissue_mask.sum()
                 tissue_mask_tp_sum += ((gt_tissue_mask == 1) & (mask.cpu().numpy() == 1)).sum()
                 tissue_mask_fp_sum += ((gt_tissue_mask == 0) & (mask.cpu().numpy() == 1)).sum()
                 tissue_mask_fn_sum += ((gt_tissue_mask == 1) & (mask.cpu().numpy() == 0)).sum()
             else:
-                sum_squared_errors += patch_squared_errors[0][:, mask.bool()].sum(dim=0).sum()
-                mse_denominator += mask.sum()
+                errors += patch_errors[0][:, mask.bool()].sum(dim=0).sum()
+                coord_error_denominator += mask.sum()
 
             if slice_indices[i] == random_sample_for_viz:
                 fig = create_diagnostic_image(
                     input_image=input_images[i].cpu().squeeze(0),
                     slice_idx=slice_indices[i],
-                    squared_errors=patch_squared_errors.cpu().numpy().squeeze(0),
+                    errors=patch_errors.cpu().numpy().squeeze(0),
                     pred_ccf_annotations=pred_ccf_annot,
                     gt_ccf_annotations=gt_ccf_annot,
                     iteration=iteration,
                     pred_template_points=pred_patch,
                     gt_template_points=gt_patch,
-                    mask=(gt_ccf_annot != 0) if exclude_background_pixels else mask.bool().numpy()
+                    gt_mask=(gt_ccf_annot != 0) if exclude_background_pixels else mask.bool().numpy(),
+                    pred_mask=mask.bool().numpy() if exclude_background_pixels else None,
                 )
                 mlflow.log_figure(fig, f"inference/{"train" if is_train else "val"}_slice_{slice_indices[i]}_y_{patch_ys[i]}_x_{patch_xs[i]}_step_{iteration}.png")
                 plt.close(fig)
@@ -230,17 +231,15 @@ def evaluate(
                 class_mapping=small_region_map
             )
 
-    rmse = np.sqrt(sum_squared_errors / mse_denominator) if mse_denominator > 0 else 0.0
+    rmse = np.sqrt(errors / coord_error_denominator) if coord_error_denominator > 0 else 0.0
 
     # convert to microns
     rmse *= 1000
 
     if exclude_background_pixels:
-        tissue_mask_precision = tissue_mask_tp_sum / (tissue_mask_tp_sum + tissue_mask_fp_sum)
-        tissue_mask_recall = tissue_mask_tp_sum / (tissue_mask_tp_sum + tissue_mask_fn_sum)
-        tissue_mask_f1 = 2 * tissue_mask_precision * tissue_mask_recall / (tissue_mask_precision + tissue_mask_recall)
+        tissue_mask_dice = (2 * tissue_mask_tp_sum) / (tissue_mask_fp_sum + tissue_mask_fn_sum + 1e-8)
     else:
-        tissue_mask_precision, tissue_mask_recall, tissue_mask_f1 = None, None, None
+        tissue_mask_dice = None
 
     logger.info('Calculating dice scores from confusion matrices')
     major_region_dice = _calc_dice_from_confusion_matrix(
@@ -253,7 +252,7 @@ def evaluate(
         region_map=region_ccf_ids_map.small_regions
     )
 
-    return rmse, major_region_dice, small_region_dice, tissue_mask_precision, tissue_mask_recall, tissue_mask_f1
+    return rmse, major_region_dice, small_region_dice, tissue_mask_dice
 
 
 def _build_class_mapping(region_map: dict[str, list[int]]) -> dict[int, int]:
