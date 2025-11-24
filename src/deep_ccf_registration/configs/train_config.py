@@ -1,6 +1,6 @@
 from aind_smartspim_transform_utils.utils.utils import AcquisitionDirection
-from pydantic import BaseModel, Field, field_validator
-from typing import Optional, Literal, Tuple
+from pydantic import BaseModel, Field
+from typing import Optional, Literal
 from pathlib import Path
 
 from deep_ccf_registration.metadata import SliceOrientation
@@ -24,7 +24,7 @@ class TrainConfig(BaseModel):
     limit_sagittal_slices_to_hemisphere: bool = False
     batch_size: int = Field(32, gt=0)
     num_workers: int = Field(0, ge=0)
-    exclude_background_pixels: bool = True
+    exclude_background_pixels: bool = False
 
     load_checkpoint: Optional[Path] = None
 
@@ -73,36 +73,3 @@ class TrainConfig(BaseModel):
     unet_dropout: float = 0.0
     unet_feature_channels: int = 64
     unet_head_size: str = "small"
-
-    def get_mlflow_params(self) -> dict:
-        """Return parameters to log to MLflow"""
-        return {
-            # Training hyperparameters
-            "batch_size": self.batch_size,
-            "learning_rate": self.learning_rate,
-            "weight_decay": self.weight_decay,
-            "n_epochs": self.n_epochs,
-            "decay_learning_rate": self.decay_learning_rate,
-            "warmup_iters": self.warmup_iters,
-            "patience": self.patience,
-            "min_delta": self.min_delta,
-
-            # Model architecture
-            "unet_channels": self.unet_channels,
-            "unet_stride": self.unet_stride,
-
-            # Data config
-            "train_val_split": self.train_val_split,
-            "crop_warp_to_bounding_box": self.crop_warp_to_bounding_box,
-            "patch_size": str(self.patch_size) if self.patch_size else None,
-            "orientation": self.orientation.value if self.orientation else None,
-            "exclude_background_pixels": self.exclude_background_pixels,
-
-            # Training config
-            "mixed_precision": self.mixed_precision,
-            "seed": self.seed,
-            "num_workers": self.num_workers,
-            "eval_iters": self.eval_iters,
-            "train_eval_frac": self.train_eval_frac,
-            "val_eval_frac": self.val_eval_frac,
-        }

@@ -215,7 +215,7 @@ def main(config_path: Path):
         channels=config.unet_channels,
         strides=config.unet_stride,
         out_coords=3,
-        include_tissue_mask=False,
+        include_tissue_mask=config.exclude_background_pixels,
         head_size=config.unet_head_size,
     )
 
@@ -260,7 +260,7 @@ def main(config_path: Path):
 
     mlflow_run = mlflow.start_run() if config.use_mlflow else nullcontext()
     with mlflow_run:
-        mlflow.log_params(params=config.get_mlflow_params())
+        mlflow.log_params(params=config.model_dump())
 
         # Restore original seeded state
         random.setstate(state)
