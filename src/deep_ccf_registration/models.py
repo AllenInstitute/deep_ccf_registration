@@ -10,10 +10,6 @@ class UNetWithRegressionHeads(nn.Module):
     This architecture uses UNet for feature extraction and then separate task-specific heads:
     - Coordinate regression head: predicts 3D template coordinates
     - Tissue mask classification head: predicts tissue presence (binary)
-
-    This approach allows the network to learn specialized representations for coordinate regression
-    vs tissue mask classification, potentially improving precision compared to the standard UNet
-    that tries to output both as separate channels.
     """
 
     def __init__(
@@ -22,8 +18,8 @@ class UNetWithRegressionHeads(nn.Module):
         in_channels: int = 1,
         feature_channels: int = 64,
         dropout: float = 0.0,
-        channels: list[int] = None,
-        strides: list[int] = None,
+        channels: tuple[int, ...] = (32, 64, 128, 256, 512, 1024),
+        strides: tuple[int, ...] = (2, 2, 2, 2, 2, 2),
         out_coords: int = 3,
         include_tissue_mask: bool = True,
         head_size: str = "small",
@@ -43,11 +39,6 @@ class UNetWithRegressionHeads(nn.Module):
         """
         super().__init__()
 
-        if channels is None:
-            channels = [32, 64, 128, 256, 512, 1024]
-        if strides is None:
-            strides = [2, 2, 2, 2, 2, 2]
-
         self.out_coords = out_coords
         self.include_tissue_mask = include_tissue_mask
 
@@ -61,7 +52,7 @@ class UNetWithRegressionHeads(nn.Module):
             strides=strides,
         )
 
-        # Coordinate regression head: depth/width varies by head_size
+        # Coordinate regression head
         if head_size == "small":
             self.coord_head = nn.Sequential(
                 nn.Conv2d(feature_channels, 32, kernel_size=1),
@@ -95,7 +86,7 @@ class UNetWithRegressionHeads(nn.Module):
         else:
             raise ValueError(f"Unknown head_size: {head_size}")
 
-        # Tissue mask classification head: separate from coordinate regression
+        # Tissue mask classification head
         if include_tissue_mask:
             self.mask_head = nn.Sequential(
                 nn.Conv2d(feature_channels, 32, kernel_size=1),

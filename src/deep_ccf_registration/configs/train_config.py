@@ -70,6 +70,9 @@ class TrainConfig(BaseModel):
     # number of channels in each layer of the unet in the encoder
     unet_channels: tuple[int, ...]
     unet_stride: tuple[int, ...]
+    unet_dropout: float = 0.0
+    unet_feature_channels: int = 64
+    unet_head_size: str = "small"
 
     def get_mlflow_params(self) -> dict:
         """Return parameters to log to MLflow"""

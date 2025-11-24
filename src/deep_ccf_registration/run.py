@@ -210,13 +210,13 @@ def main(config_path: Path):
     model = UNetWithRegressionHeads(
         spatial_dims=2,
         in_channels=1,
-        feature_channels=64,
-        dropout=0.0,
+        feature_channels=config.unet_feature_channels,
+        dropout=config.unet_dropout,
         channels=config.unet_channels,
         strides=config.unet_stride,
         out_coords=3,
         include_tissue_mask=False,
-        head_size="small",
+        head_size=config.unet_head_size,
     )
 
     if config.load_checkpoint:

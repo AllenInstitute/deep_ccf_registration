@@ -16,7 +16,7 @@ from tqdm import tqdm
 import  torch.nn.functional as F
 
 from deep_ccf_registration.datasets.slice_dataset import SliceDataset
-from deep_ccf_registration.losses.coord_loss import HemisphereAgnosticCoordLoss
+from deep_ccf_registration.losses.coord_loss import HemisphereAgnosticCoordLoss, mirror_points
 from deep_ccf_registration.metadata import SliceOrientation
 from deep_ccf_registration.utils.utils import get_ccf_annotations
 from deep_ccf_registration.utils.visualization import create_diagnostic_image
@@ -74,6 +74,7 @@ def evaluate(
         is_train: bool,
         device: str = "cuda",
         exclude_background_pixels: bool = True,
+        viz_slice_indices: Optional[list[int]] = None,
 ) -> tuple[float, dict[str, float], dict[str, float], float]:
     """
     :param val_loader: validation DataLoader
@@ -87,7 +88,9 @@ def evaluate(
     :param exclude_background_pixels: whether to use a tissue mask to exclude background pixels
         Otherwise, just excludes pad pixels
     :param is_train: Whether train or val
-    :return: tuple of: (rmse in microns ignoring background (just tissue), mapping from major brain
+    :param viz_slice_indices: Fixed list of slice indices to visualize throughout training.
+        If None, no visualizations are saved. If provided, only slices matching these indices are visualized.
+    :return: tuple of: rmse in microns, mapping from major brain
         region to dice, mapping from small region to dice)
     """
     slice_dataset: SliceDataset = val_loader.dataset
@@ -113,14 +116,8 @@ def evaluate(
     major_confusion_matrix = np.zeros((n_major_classes, n_major_classes), dtype=np.int64)
     small_confusion_matrix = np.zeros((n_small_classes, n_small_classes), dtype=np.int64)
 
-    mae = HemisphereAgnosticCoordLoss(
-        ml_dim_size=ls_template.shape[0],
-        template_parameters=ls_template_parameters
-    )
-
-    random_batch_for_viz_idx = random.choice(range(len(val_loader)))
-
     model.eval()
+    sample_idx = 0
     for batch_idx, batch in enumerate(tqdm(val_loader, desc="Evaluation")):
         if slice_dataset.patch_size is not None:
             input_images, gt_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, masks = batch
@@ -138,11 +135,6 @@ def evaluate(
             masks = (F.sigmoid(pred_tissue_logits) > 0.5).to(torch.uint8)
         else:
             pred_ls_template_points = model_out
-
-        if batch_idx == random_batch_for_viz_idx:
-            random_sample_for_viz = random.choice(slice_indices.cpu().tolist())
-        else:
-            random_sample_for_viz = None
 
         for i in range(pred_ls_template_points.shape[0]):
             pred_patch = pred_ls_template_points[i]  # (3, H, W)
@@ -190,7 +182,8 @@ def evaluate(
 
             # Calculate flipped error (pred vs flipped gt) for sagittal slices
             if orientation == SliceOrientation.SAGITTAL:
-                gt_flipped = mae._mirror_points(gt_patch.unsqueeze(0))
+                gt_flipped = mirror_points(gt_patch.unsqueeze(0), ml_dim_size=ls_template.shape[0],
+                                           template_parameters=ls_template_parameters)
                 flipped_error = (pred_patch.unsqueeze(0) - gt_flipped) ** 2
             else:
                 flipped_error = direct_error  # For non-sagittal, flipped = direct
@@ -215,7 +208,8 @@ def evaluate(
             # Use direct error for diagnostic visualization
             patch_errors = direct_error
 
-            if slice_indices[i] == random_sample_for_viz:
+            # Visualize if this sample index is in the fixed visualization indices
+            if viz_slice_indices is not None and sample_idx in viz_slice_indices:
                 fig = create_diagnostic_image(
                     input_image=input_images[i].cpu().squeeze(0),
                     slice_idx=slice_indices[i],
@@ -228,8 +222,10 @@ def evaluate(
                     gt_mask=(gt_ccf_annot != 0) if exclude_background_pixels else mask.bool().numpy(),
                     pred_mask=mask.bool().numpy() if exclude_background_pixels else None,
                 )
-                mlflow.log_figure(fig, f"inference/{"train" if is_train else "val"}_slice_{slice_indices[i]}_y_{patch_ys[i]}_x_{patch_xs[i]}_step_{iteration}.png")
+                mlflow.log_figure(fig, f"inference/{"train" if is_train else "val"}/slice_{slice_indices[i]}/y_{patch_ys[i]}_x_{patch_xs[i]}/step_{iteration}.png")
                 plt.close(fig)
+
+            sample_idx += 1
 
             _update_confusion_matrix(
                 confusion_matrix=major_confusion_matrix,

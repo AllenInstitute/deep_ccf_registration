@@ -106,7 +106,7 @@ def train(
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         exclude_background_pixels: bool = True,
         log_iter_interval: int = 10,
-        tissue_loss_weight: float = 1.0
+        n_eval_visualize: int = 10
 ):
     """
     Train slice registration model
@@ -134,7 +134,7 @@ def train(
     exclude_background_pixels: whether to use a tissue mask to exclude background pixels in loss/evaluation.
         Otherwise, just excludes pad pixels
     log_iter_interval: how often to log training iterations
-    tissue_loss_weight: tissue loss weight
+    n_eval_visualize: how many samples to visualize during evaluation
 
     Returns
     -------
@@ -155,6 +155,12 @@ def train(
     global_step = 0
     lr_decay_iters = len(train_dataloader) * n_epochs
     min_lr = learning_rate / 10 # should be ~= learning_rate/10 per Chinchilla
+
+    train_viz_indices = list(range(min(n_eval_visualize, len(train_eval_dataloader.dataset))))
+    val_viz_indices = list(range(min(n_eval_visualize, len(val_eval_dataloader.dataset))))
+
+    logger.info(f"Fixed train visualization indices: {train_viz_indices}")
+    logger.info(f"Fixed val visualization indices: {val_viz_indices}")
 
     model.to(device)
 
@@ -272,7 +278,8 @@ def train(
                     device=device,
                     iteration=global_step,
                     exclude_background_pixels=exclude_background_pixels,
-                    is_train=True
+                    is_train=True,
+                    viz_slice_indices=train_viz_indices
                 )
                 val_rmse, val_major_region_dice, val_small_region_dice, val_tissue_mask_dice = evaluate(
                     val_loader=val_eval_dataloader,
@@ -284,7 +291,8 @@ def train(
                     device=device,
                     iteration=global_step,
                     exclude_background_pixels=exclude_background_pixels,
-                    is_train=False
+                    is_train=False,
+                    viz_slice_indices=val_viz_indices
                 )
 
                 current_lr = optimizer.param_groups[0]['lr']

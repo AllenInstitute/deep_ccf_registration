@@ -68,7 +68,7 @@ class HemisphereAgnosticCoordLoss(nn.Module):
             error_direct: torch.Tensor,
             per_channel=False,
     ) -> torch.Tensor:
-        ml_flipped = self._mirror_points(pred=pred_template_points)
+        ml_flipped = mirror_points(pred=pred_template_points, template_parameters=self._template_parameters, ml_dim_size=self._ml_dim_size)
 
         if per_channel:
             err_flipped = (ml_flipped - true_template_points) ** 2
@@ -78,22 +78,22 @@ class HemisphereAgnosticCoordLoss(nn.Module):
 
         return torch.minimum(error_direct, err_flipped)
 
-    def _mirror_points(self, pred: torch.Tensor):
-        flipped = pred.clone()
+def mirror_points(pred: torch.Tensor, template_parameters: AntsImageParameters, ml_dim_size: int):
+    flipped = pred.clone()
 
-        # 1. Convert to index space
-        for dim in range(self._template_parameters.dims):
-            flipped[:, dim] -= self._template_parameters.origin[dim]
-            flipped[:, dim] *= self._template_parameters.direction[dim]
-            flipped[:, dim] /= self._template_parameters.scale[dim]
+    # 1. Convert to index space
+    for dim in range(template_parameters.dims):
+        flipped[:, dim] -= template_parameters.origin[dim]
+        flipped[:, dim] *= template_parameters.direction[dim]
+        flipped[:, dim] /= template_parameters.scale[dim]
 
-        # 2. Flip ML in index space
-        flipped[..., 0] = self._ml_dim_size-1 - flipped[..., 0]
+    # 2. Flip ML in index space
+    flipped[..., 0] = ml_dim_size-1 - flipped[..., 0]
 
-        # 3. Convert back to physical
-        for dim in range(self._template_parameters.dims):
-            flipped[:, dim] *= self._template_parameters.scale[dim]
-            flipped[:, dim] *= self._template_parameters.direction[dim]
-            flipped[:, dim] += self._template_parameters.origin[dim]
+    # 3. Convert back to physical
+    for dim in range(template_parameters.dims):
+        flipped[:, dim] *= template_parameters.scale[dim]
+        flipped[:, dim] *= template_parameters.direction[dim]
+        flipped[:, dim] += template_parameters.origin[dim]
 
-        return flipped
+    return flipped
