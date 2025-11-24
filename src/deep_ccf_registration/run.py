@@ -61,8 +61,6 @@ def main(config_path: Path):
     if config.device == "auto":
         if torch.cuda.is_available():
             device = "cuda"
-        elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-            device = "mps"
         else:
             device = "cpu"
     else:
@@ -120,15 +118,15 @@ def main(config_path: Path):
         normalize_orientation_map=config.normalize_orientation_map,
         limit_sagittal_slices_to_hemisphere=config.limit_sagittal_slices_to_hemisphere,
         input_image_transforms=[
-            albumentations.PadIfNeeded(min_height=512, min_width=512),
+            albumentations.PadIfNeeded(min_height=config.patch_size[0], min_width=config.patch_size[1]),
             albumentations.ToTensorV2()
         ],
         mask_transforms=[
-            albumentations.PadIfNeeded(min_height=512, min_width=512),
+            albumentations.PadIfNeeded(min_height=config.patch_size[0], min_width=config.patch_size[1]),
             albumentations.ToTensorV2()
         ],
         output_points_transforms=[
-            albumentations.PadIfNeeded(min_height=512, min_width=512),
+            albumentations.PadIfNeeded(min_height=config.patch_size[0], min_width=config.patch_size[1]),
             albumentations.ToTensorV2()
         ],
         ccf_annotations=ccf_annotations,
@@ -148,15 +146,15 @@ def main(config_path: Path):
         normalize_orientation_map=config.normalize_orientation_map,
         limit_sagittal_slices_to_hemisphere=config.limit_sagittal_slices_to_hemisphere,
         input_image_transforms=[
-            albumentations.PadIfNeeded(min_height=512, min_width=512),
+            albumentations.PadIfNeeded(min_height=config.patch_size[0], min_width=config.patch_size[1]),
             albumentations.ToTensorV2()
         ],
         mask_transforms=[
-            albumentations.PadIfNeeded(min_height=512, min_width=512),
+            albumentations.PadIfNeeded(min_height=config.patch_size[0], min_width=config.patch_size[1]),
             albumentations.ToTensorV2()
         ],
         output_points_transforms=[
-            albumentations.PadIfNeeded(min_height=512, min_width=512),
+            albumentations.PadIfNeeded(min_height=config.patch_size[0], min_width=config.patch_size[1]),
             albumentations.ToTensorV2()
         ],
         ccf_annotations=ccf_annotations,
@@ -210,13 +208,17 @@ def main(config_path: Path):
     model = UNetWithRegressionHeads(
         spatial_dims=2,
         in_channels=1,
-        feature_channels=config.unet_feature_channels,
-        dropout=config.unet_dropout,
-        channels=config.unet_channels,
-        strides=config.unet_stride,
+        feature_channels=config.model.unet_feature_channels,
+        dropout=config.model.unet_dropout,
+        channels=config.model.unet_channels,
+        strides=config.model.unet_stride,
         out_coords=3,
         include_tissue_mask=config.exclude_background_pixels,
-        head_size=config.unet_head_size,
+        head_size=config.model.unet_head_size,
+        use_positional_encoding=config.model.unet_use_positional_encoding,
+        pos_encoding_channels=config.model.unet_pos_encoding_channels,
+        image_height=config.patch_size[0],
+        image_width=config.patch_size[1],
     )
 
     if config.load_checkpoint:

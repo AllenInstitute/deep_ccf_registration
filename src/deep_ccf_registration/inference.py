@@ -222,7 +222,8 @@ def evaluate(
                     gt_mask=(gt_ccf_annot != 0) if exclude_background_pixels else mask.bool().numpy(),
                     pred_mask=mask.bool().numpy() if exclude_background_pixels else None,
                 )
-                mlflow.log_figure(fig, f"inference/{"train" if is_train else "val"}/slice_{slice_indices[i]}/y_{patch_ys[i]}_x_{patch_xs[i]}/step_{iteration}.png")
+                fig_filename = f"slice_{slice_indices[i]}_y_{patch_ys[i]}_x_{patch_xs[i]}_step_{iteration}.png"
+                mlflow.log_figure(fig, f"inference/{"train" if is_train else "val"}/slice_{slice_indices[i]}/y_{patch_ys[i]}_x_{patch_xs[i]}/{fig_filename}")
                 plt.close(fig)
 
             sample_idx += 1
@@ -256,11 +257,11 @@ def evaluate(
     logger.info(f"RMSE (flipped GT): {rmse_flipped:.2f} microns")
 
     # Log to MLflow as well
-    mlflow.log_metrics({
+    mlflow.log_metrics(metrics={
         f"eval/rmse_hemisphere_agnostic_{'train' if is_train else 'val'}": rmse,
         f"eval/rmse_direct_{'train' if is_train else 'val'}": rmse_direct,
         f"eval/rmse_flipped_{'train' if is_train else 'val'}": rmse_flipped,
-    })
+    }, step=iteration)
 
     if exclude_background_pixels:
         tissue_mask_dice = (2 * tissue_mask_tp_sum) / (tissue_mask_fp_sum + tissue_mask_fn_sum + 1e-8)

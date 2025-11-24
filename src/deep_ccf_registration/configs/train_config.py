@@ -6,6 +6,16 @@ from pathlib import Path
 from deep_ccf_registration.metadata import SliceOrientation
 
 
+class ModelConfig(BaseModel):
+    # number of channels in each layer of the unet in the encoder
+    unet_channels: tuple[int, ...]
+    unet_stride: tuple[int, ...]
+    unet_dropout: float = 0.0
+    unet_feature_channels: int = 64
+    unet_head_size: str = "small"
+    unet_use_positional_encoding: bool = True
+    unet_pos_encoding_channels: int = 16
+
 class TrainConfig(BaseModel):
     dataset_meta_path: Path
     train_val_split: float = Field(0.8, ge=0.0, le=1.0)
@@ -67,9 +77,4 @@ class TrainConfig(BaseModel):
 
     use_mlflow: bool = True
 
-    # number of channels in each layer of the unet in the encoder
-    unet_channels: tuple[int, ...]
-    unet_stride: tuple[int, ...]
-    unet_dropout: float = 0.0
-    unet_feature_channels: int = 64
-    unet_head_size: str = "small"
+    model: ModelConfig
