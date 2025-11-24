@@ -101,6 +101,8 @@ def evaluate(
     small_region_map = _build_class_mapping(region_ccf_ids_map.small_regions)
 
     errors = 0.0
+    errors_direct = 0.0
+    errors_flipped = 0.0
     coord_error_denominator = 0
     tissue_mask_tp_sum = 0
     tissue_mask_fp_sum = 0
@@ -183,23 +185,35 @@ def evaluate(
 
             orientation = SliceOrientation(orientations[i])
 
-            patch_errors = mae(
-                pred_template_points=pred_patch.unsqueeze(0),
-                true_template_points=gt_patch.unsqueeze(0),
-                orientations=[orientation],
-                tissue_masks=torch.ones_like(mask).unsqueeze(0), # calculate squared error over all pixels
-                per_channel_error=True
-            )
+            # Calculate direct error (pred vs gt)
+            direct_error = (pred_patch.unsqueeze(0) - gt_patch.unsqueeze(0)) ** 2
+
+            # Calculate flipped error (pred vs flipped gt) for sagittal slices
+            if orientation == SliceOrientation.SAGITTAL:
+                gt_flipped = mae._mirror_points(gt_patch.unsqueeze(0))
+                flipped_error = (pred_patch.unsqueeze(0) - gt_flipped) ** 2
+            else:
+                flipped_error = direct_error  # For non-sagittal, flipped = direct
+
+            # Hemisphere-agnostic error (minimum of the two)
+            hemisphere_agnostic_error = torch.minimum(direct_error, flipped_error)
 
             if exclude_background_pixels:
-                errors += patch_errors[0][:, gt_tissue_mask].sum(dim=0).sum()
+                errors_direct += direct_error[0][:, gt_tissue_mask].sum(dim=0).sum()
+                errors_flipped += flipped_error[0][:, gt_tissue_mask].sum(dim=0).sum()
+                errors += hemisphere_agnostic_error[0][:, gt_tissue_mask].sum(dim=0).sum()
                 coord_error_denominator += gt_tissue_mask.sum()
                 tissue_mask_tp_sum += ((gt_tissue_mask == 1) & (mask.cpu().numpy() == 1)).sum()
                 tissue_mask_fp_sum += ((gt_tissue_mask == 0) & (mask.cpu().numpy() == 1)).sum()
                 tissue_mask_fn_sum += ((gt_tissue_mask == 1) & (mask.cpu().numpy() == 0)).sum()
             else:
-                errors += patch_errors[0][:, mask.bool()].sum(dim=0).sum()
+                errors_direct += direct_error[0][:, mask.bool()].sum(dim=0).sum()
+                errors_flipped += flipped_error[0][:, mask.bool()].sum(dim=0).sum()
+                errors += hemisphere_agnostic_error[0][:, mask.bool()].sum(dim=0).sum()
                 coord_error_denominator += mask.sum()
+
+            # Use direct error for diagnostic visualization
+            patch_errors = direct_error
 
             if slice_indices[i] == random_sample_for_viz:
                 fig = create_diagnostic_image(
@@ -232,9 +246,25 @@ def evaluate(
             )
 
     rmse = np.sqrt(errors / coord_error_denominator) if coord_error_denominator > 0 else 0.0
+    rmse_direct = np.sqrt(errors_direct / coord_error_denominator) if coord_error_denominator > 0 else 0.0
+    rmse_flipped = np.sqrt(errors_flipped / coord_error_denominator) if coord_error_denominator > 0 else 0.0
 
     # convert to microns
     rmse *= 1000
+    rmse_direct *= 1000
+    rmse_flipped *= 1000
+
+    # Log the three error metrics
+    logger.info(f"RMSE (hemisphere-agnostic/min): {rmse:.2f} microns")
+    logger.info(f"RMSE (direct to GT): {rmse_direct:.2f} microns")
+    logger.info(f"RMSE (flipped GT): {rmse_flipped:.2f} microns")
+
+    # Log to MLflow as well
+    mlflow.log_metrics({
+        f"eval/rmse_hemisphere_agnostic_{'train' if is_train else 'val'}": rmse,
+        f"eval/rmse_direct_{'train' if is_train else 'val'}": rmse_direct,
+        f"eval/rmse_flipped_{'train' if is_train else 'val'}": rmse_flipped,
+    })
 
     if exclude_background_pixels:
         tissue_mask_dice = (2 * tissue_mask_tp_sum) / (tissue_mask_fp_sum + tissue_mask_fn_sum + 1e-8)

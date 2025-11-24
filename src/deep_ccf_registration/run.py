@@ -6,7 +6,6 @@ import albumentations
 import click
 import mlflow
 import numpy as np
-from monai.networks.nets import UNet
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 
@@ -25,6 +24,7 @@ from deep_ccf_registration.datasets.slice_dataset import (
 )
 from deep_ccf_registration.metadata import SubjectMetadata
 from deep_ccf_registration.train import train
+from deep_ccf_registration.models import UNetWithRegressionHeads
 
 logger.remove()
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -207,13 +207,16 @@ def main(config_path: Path):
     logger.info(f"Num train eval slices: {len(train_eval_subset)}")
     logger.info(f"Num val eval slices: {len(val_eval_subset)}")
 
-    model = UNet(
+    model = UNetWithRegressionHeads(
         spatial_dims=2,
         in_channels=1,
-        out_channels=4 if config.exclude_background_pixels else 3,
+        feature_channels=64,
         dropout=0.0,
         channels=config.unet_channels,
         strides=config.unet_stride,
+        out_coords=3,
+        include_tissue_mask=False,
+        head_size="small",
     )
 
     if config.load_checkpoint:
