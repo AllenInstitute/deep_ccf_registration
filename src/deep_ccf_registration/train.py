@@ -105,8 +105,8 @@ def train(
         autocast_context: ContextManager = nullcontext(),
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         exclude_background_pixels: bool = True,
-        checkpoint_interval: int = 10,
         n_eval_visualize: int = 10,
+        log_interval: int = 10
 ):
     """
     Train slice registration model
@@ -133,8 +133,8 @@ def train(
     region_ccf_ids_map: `RegionAcronymCCFIdsMap`
     exclude_background_pixels: whether to use a tissue mask to exclude background pixels in loss/evaluation.
         Otherwise, just excludes pad pixels
-    checkpoint_interval: how often to log training iterations and save checkpoint
     n_eval_visualize: how many samples to visualize during evaluation
+    log_interval: how often to log
 
     Returns
     -------
@@ -248,7 +248,7 @@ def train(
             iter_time = time.time() - iter_start_time
             iteration_times.append(iter_time)
 
-            if global_step % checkpoint_interval == 0:
+            if global_step % log_interval == 0:
                 avg_iter_time = sum(iteration_times[-100:]) / min(len(iteration_times),
                                                                   100)  # Last 100 iters
                 remaining_iters = total_iterations - global_step
@@ -263,18 +263,6 @@ def train(
                     f"Iter time: {iter_time:.3f}s | Avg: {avg_iter_time:.3f}s | "
                     f"Loss: {loss.item():.6f} | "
                     f"Elapsed: {elapsed_str} | ETA: {eta_str}"
-                )
-
-                checkpoint_path = Path(model_weights_out_dir) / f"iter_{global_step}.pt"
-                torch.save(
-                    obj={
-                        'epoch': epoch,
-                        'global_step': global_step,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'train_loss': loss.item(),
-                    },
-                    f=checkpoint_path,
                 )
 
             # Periodic evaluation
@@ -366,6 +354,17 @@ def train(
                 else:
                     patience_counter += 1
                     logger.info(f"No improvement. Patience: {patience_counter}/{patience}")
+
+                    torch.save(
+                        obj={
+                            'epoch': epoch,
+                            'global_step': global_step,
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'val_rmse': val_rmse,
+                        },
+                        f=Path(model_weights_out_dir) / f"{global_step}.pt",
+                    )
 
                 # Early stopping
                 if patience_counter >= patience:

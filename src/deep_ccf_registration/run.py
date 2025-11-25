@@ -310,7 +310,6 @@ def main(config_path: Path):
             ls_template_parameters=ls_template_parameters,
             region_ccf_ids_map=region_ccf_ids_map,
             exclude_background_pixels=config.exclude_background_pixels,
-            checkpoint_interval=config.checkpoint_interval,
         )
 
     logger.info("=" * 60)
