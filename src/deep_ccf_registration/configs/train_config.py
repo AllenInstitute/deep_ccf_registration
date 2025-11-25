@@ -72,8 +72,7 @@ class TrainConfig(BaseModel):
 
     mlflow_experiment_name: str = "slice_registration"
 
-    # only use for local development
-    mlflow_tracking_uri: Optional[Path] = None
+    mlflow_tracking_uri: Optional[str] = None
 
     use_mlflow: bool = True
 
