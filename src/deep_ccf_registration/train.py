@@ -105,8 +105,8 @@ def train(
         autocast_context: ContextManager = nullcontext(),
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         exclude_background_pixels: bool = True,
-        log_iter_interval: int = 10,
-        n_eval_visualize: int = 10
+        checkpoint_interval: int = 10,
+        n_eval_visualize: int = 10,
 ):
     """
     Train slice registration model
@@ -133,7 +133,7 @@ def train(
     region_ccf_ids_map: `RegionAcronymCCFIdsMap`
     exclude_background_pixels: whether to use a tissue mask to exclude background pixels in loss/evaluation.
         Otherwise, just excludes pad pixels
-    log_iter_interval: how often to log training iterations
+    checkpoint_interval: how often to log training iterations and save checkpoint
     n_eval_visualize: how many samples to visualize during evaluation
 
     Returns
@@ -248,8 +248,7 @@ def train(
             iter_time = time.time() - iter_start_time
             iteration_times.append(iter_time)
 
-            # Log every N iterations
-            if global_step % log_iter_interval == 0:
+            if global_step % checkpoint_interval == 0:
                 avg_iter_time = sum(iteration_times[-100:]) / min(len(iteration_times),
                                                                   100)  # Last 100 iters
                 remaining_iters = total_iterations - global_step
@@ -264,6 +263,18 @@ def train(
                     f"Iter time: {iter_time:.3f}s | Avg: {avg_iter_time:.3f}s | "
                     f"Loss: {loss.item():.6f} | "
                     f"Elapsed: {elapsed_str} | ETA: {eta_str}"
+                )
+
+                checkpoint_path = Path(model_weights_out_dir) / f"iter_{global_step}.pt"
+                torch.save(
+                    obj={
+                        'epoch': epoch,
+                        'global_step': global_step,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'train_loss': loss.item(),
+                    },
+                    f=checkpoint_path,
                 )
 
             # Periodic evaluation
@@ -383,18 +394,6 @@ def train(
         logger.info(f"Epoch {epoch}/{n_epochs} completed | Avg Train Loss: {avg_train_loss:.6f} | Avg coord loss {avg_coord_loss:.6f} {mask_loss_log}")
         logger.info(f"{'=' * 60}\n")
 
-        # Save epoch checkpoint
-        checkpoint_path = Path(model_weights_out_dir) / f"epoch_{epoch}.pt"
-        torch.save(
-            obj={
-                'epoch': epoch,
-                'global_step': global_step,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'train_loss': avg_train_loss,
-            },
-            f=checkpoint_path,
-        )
 
     logger.info(f"\nTraining completed! Best validation loss: {best_val_coord_loss:.6f}")
 

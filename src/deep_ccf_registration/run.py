@@ -288,7 +288,8 @@ def main(config_path: Path):
             ls_template=ls_template,
             ls_template_parameters=ls_template_parameters,
             region_ccf_ids_map=region_ccf_ids_map,
-            exclude_background_pixels=config.exclude_background_pixels
+            exclude_background_pixels=config.exclude_background_pixels,
+            checkpoint_interval=config.
         )
 
     logger.info("=" * 60)
