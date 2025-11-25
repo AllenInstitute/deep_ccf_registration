@@ -256,6 +256,7 @@ def main(config_path: Path):
 
     mlflow.set_experiment(config.mlflow_experiment_name)
     mlflow.enable_system_metrics_logging()
+    mlflow.pytorch.autolog()
 
     # disable seeding so mlflow run name can be unique
     state = random.getstate()
