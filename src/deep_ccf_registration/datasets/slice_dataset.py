@@ -593,7 +593,7 @@ class SliceDataset(Dataset):
             tissue_bbox: TissueBoundingBox,
             patch_x: Optional[int] = None,
             patch_y: Optional[int] = None,
-    ):
+    ) -> tuple[np.ndarray, int, int]:
         """
         Extract patch from slice or whole slice if patch_x, patch_y is None and self._patch_size is None.
         Only extracts a region from within `tissue_bbox`.
@@ -613,14 +613,7 @@ class SliceDataset(Dataset):
 
         Returns
         -------
-        tuple
-            Tuple containing:
-            - patch : torch.Tensor
-                Extracted patch.
-            - patch_y : int
-                Actual starting y coordinate used.
-            - patch_x : int
-                Actual starting x coordinate used.
+        tuple of patch, start_y, start_x
         """
         # Create view restricted to bounding box (coordinates still absolute)
         slice_2d_bbox = slice_2d[
@@ -646,9 +639,7 @@ class SliceDataset(Dataset):
                 patch_y = random.randint(tissue_bbox.y, max(tissue_bbox.y, tissue_bbox.y + h - ph))
                 patch_x = random.randint(tissue_bbox.x, max(tissue_bbox.x, tissue_bbox.x + w - pw))
 
-        patch = torch.from_numpy(
-            slice_2d_bbox[patch_y:patch_y + ph, patch_x:patch_x + pw].read().result()
-        )
+        patch = slice_2d_bbox[patch_y:patch_y + ph, patch_x:patch_x + pw].read().result()
 
         return patch, patch_y, patch_x
 
