@@ -5,15 +5,24 @@ import aind_smartspim_transform_utils
 import numpy as np
 import pandas as pd
 import tensorstore
-import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from aind_smartspim_transform_utils.utils.utils import convert_from_ants_space
-from aind_smartspim_transform_utils.utils import utils
+from retry import retry
 from tensorstore import TensorStore
 
 from deep_ccf_registration.metadata import AcquisitionAxis
 from deep_ccf_registration.utils.interpolation import interpolate
 from deep_ccf_registration.utils.logging_utils import timed_func, timed
+
+
+@retry(tries=3, delay=1, backoff=2)
+def _read_tensorstore_region(array, min_coords, max_coords):
+    """Read a cropped region from tensorstore with retry logic for transient failures."""
+    return array[
+        min_coords[0]:max_coords[0],
+        min_coords[1]:max_coords[1],
+        min_coords[2]:max_coords[2]
+    ].read().result()
 
 
 @timed_func
@@ -142,7 +151,7 @@ def apply_transforms_to_points(
             )
         else:
             if isinstance(warp, TensorStore):
-                warp = warp[:].read().result()
+                warp = _read_tensorstore_region(warp, slice(None), slice(None), slice(None))
 
     displacements = interpolate(
         array=warp,
@@ -213,11 +222,7 @@ def get_cropped_region_from_array(
 
     # Crop the array
     if isinstance(array, tensorstore.TensorStore):
-        cropped_array = array[
-                       min_coords[0]:max_coords[0],
-                       min_coords[1]:max_coords[1],
-                       min_coords[2]:max_coords[2]
-                       ].read().result()
+        cropped_array = _read_tensorstore_region(array, min_coords, max_coords)
     else:
         cropped_array = array[
                        min_coords[0]:max_coords[0],
