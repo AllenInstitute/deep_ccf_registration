@@ -181,7 +181,6 @@ def main(config_path: Path):
         val_dataset = Subset(val_dataset, indices=[1000])
 
     train_eval_subset = Subset(train_dataset, indices=random.sample(range(len(train_dataset)), k=int(len(train_dataset) * config.train_eval_frac)))
-    val_eval_subset = Subset(val_dataset, indices=random.sample(range(len(val_dataset)), k=int(len(val_dataset) * config.val_eval_frac)))
 
     train_dataloader = DataLoader(
         dataset=train_dataset,
@@ -205,19 +204,10 @@ def main(config_path: Path):
         num_workers=config.num_workers,
         pin_memory=(device == "cuda"),
     )
-    val_eval_dataloader = DataLoader(
-        dataset=val_eval_subset,
-        batch_size=config.batch_size,
-        shuffle=False,
-        num_workers=config.num_workers,
-        pin_memory=(device == "cuda"),
-    )
 
     logger.info(f"Num train slices: {len(train_dataset)}")
     logger.info(f"Num val slices: {len(val_dataset)}")
-
     logger.info(f"Num train eval slices: {len(train_eval_subset)}")
-    logger.info(f"Num val eval slices: {len(val_eval_subset)}")
 
     model = UNetWithRegressionHeads(
         spatial_dims=2,
@@ -293,7 +283,6 @@ def main(config_path: Path):
             train_dataloader=train_dataloader,
             val_dataloader=val_dataloader,
             train_eval_dataloader=train_eval_dataloader,
-            val_eval_dataloader=val_eval_dataloader,
             model=model,
             optimizer=opt,
             n_epochs=config.n_epochs,
@@ -371,5 +360,5 @@ def split_train_val_test(
 
 
 if __name__ == "__main__":
-    multiprocessing.set_start_method('spawn', force=True)
+    multiprocessing.set_start_method('spawn', force=True)   # tensorstore complains "fork" not allowed
     main()

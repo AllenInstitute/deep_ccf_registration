@@ -5,6 +5,7 @@ from typing import ContextManager, Any
 from contextlib import nullcontext
 import os
 import math
+import random
 
 import mlflow
 import numpy as np
@@ -87,7 +88,6 @@ def train(
         train_dataloader,
         val_dataloader,
         train_eval_dataloader,
-        val_eval_dataloader,
         model: UNet,
         optimizer,
         n_epochs: int,
@@ -115,6 +115,7 @@ def train(
     ----------
     train_dataloader: DataLoader for training data
     val_dataloader: DataLoader for validation data
+    train_eval_dataloader: DataLoader for evaluating test set
     model: Neural network model to train
     optimizer: Optimizer for training
     n_epochs: Number of epochs to train
@@ -156,8 +157,8 @@ def train(
     lr_decay_iters = len(train_dataloader) * n_epochs
     min_lr = learning_rate / 10 # should be ~= learning_rate/10 per Chinchilla
 
-    train_viz_indices = list(range(min(n_eval_visualize, len(train_eval_dataloader.dataset))))
-    val_viz_indices = list(range(min(n_eval_visualize, len(val_eval_dataloader.dataset))))
+    train_viz_indices = random.sample(range(len(train_eval_dataloader.dataset)), k=min(n_eval_visualize, len(train_eval_dataloader.dataset)))
+    val_viz_indices = random.sample(range(len(val_dataloader.dataset)), k=min(n_eval_visualize, len(val_dataloader.dataset)))
 
     logger.info(f"Fixed train visualization indices: {train_viz_indices}")
     logger.info(f"Fixed val visualization indices: {val_viz_indices}")
@@ -167,6 +168,7 @@ def train(
     logger.info(f"Starting training for {n_epochs} epochs")
     logger.info(f"Training samples: {len(train_dataloader.dataset)}")
     logger.info(f"Validation samples: {len(val_dataloader.dataset)}")
+    logger.info(f"Training eval samples: {len(train_eval_dataloader.dataset)}")
     logger.info(f"Device: {device}")
 
     iteration_times = []
@@ -281,7 +283,7 @@ def train(
                     viz_slice_indices=train_viz_indices
                 )
                 val_rmse, val_major_region_dice, val_small_region_dice, val_tissue_mask_dice = evaluate(
-                    val_loader=val_eval_dataloader,
+                    val_loader=val_dataloader,
                     model=model,
                     ccf_annotations=ccf_annotations,
                     ls_template=ls_template,

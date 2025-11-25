@@ -60,9 +60,6 @@ class TrainConfig(BaseModel):
     seed: int = 1234
     debug: bool = False
 
-    # how much of the train set to use for evaluation
-    train_eval_frac: float = 1.0
-
     # how much of the validation set to use for evaluation
     val_eval_frac: float = 1.0
 
