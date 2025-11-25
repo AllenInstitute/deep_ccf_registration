@@ -195,6 +195,7 @@ class SliceDataset(Dataset):
         self._slice_ranges = {orientation: [self._get_slice_range(subject=subject, orientation=orientation) for subject in self._dataset_meta] for orientation in orientation}
         self._registration_downsample_factor = registration_downsample_factor
         self._warps = self._load_warps(tensorstore_aws_credentials_method=tensorstore_aws_credentials_method)
+        self._volumes = self._load_volumes(tensorstore_aws_credentials_method=tensorstore_aws_credentials_method)
         self._crop_warp_to_bounding_box = crop_warp_to_bounding_box
         self._patch_size = patch_size
         self._mode = mode
@@ -295,6 +296,35 @@ class SliceDataset(Dataset):
                 ).result()
             warps.append(warp)
         return warps
+
+    def _load_volumes(self, tensorstore_aws_credentials_method: str = "default") -> list[tensorstore.TensorStore]:
+        """
+        Load stitched volumes for all subjects in the dataset.
+
+        Parameters
+        ----------
+        tensorstore_aws_credentials_method : str, default="default"
+            Credentials lookup method for tensorstore.
+
+        Returns
+        -------
+        list[tensorstore.TensorStore]
+            List of volume tensorstores for each subject.
+        """
+        volumes = []
+        for experiment_meta in self._dataset_meta:
+            volume = tensorstore.open(
+                spec={
+                    'driver': 'auto',
+                    'kvstore': create_kvstore(
+                        path=str(experiment_meta.stitched_volume_path) + f'/{self._registration_downsample_factor}',
+                        aws_credentials_method="anonymous"
+                    )
+                },
+                read=True
+            ).result()
+            volumes.append(volume)
+        return volumes
 
     def _get_slice_from_idx(self, idx: int, orientation: SliceOrientation) -> tuple[int, int]:
         """
@@ -445,18 +475,8 @@ class SliceDataset(Dataset):
         acquisition_axes = experiment_meta.axes
         slice_axis = experiment_meta.get_slice_axis(orientation=orientation)
 
-        # Load volume and extract patch
-        volume = tensorstore.open(
-            spec={
-                'driver': 'auto',
-                'kvstore': create_kvstore(
-                    path=str(
-                        experiment_meta.stitched_volume_path) + f'/{self._registration_downsample_factor}',
-                    aws_credentials_method="anonymous"
-                )
-            },
-            read=True
-        ).result()
+        # Get cached volume
+        volume = self._volumes[dataset_idx]
 
         volume_slice = [0, 0, slice(None), slice(None), slice(None)]
         volume_slice[slice_axis.dimension + 2] = slice_idx  # + 2 since first 2 dims unused
