@@ -1,3 +1,4 @@
+import multiprocessing
 import os
 import sys
 from importlib.metadata import distribution
@@ -370,4 +371,5 @@ def split_train_val_test(
 
 
 if __name__ == "__main__":
+    multiprocessing.set_start_method('spawn', force=True)
     main()
