@@ -329,23 +329,22 @@ def train(
                     f"LR: {current_lr:.6e}"
                 )
 
+                checkpoint_path = Path(model_weights_out_dir) / f"{global_step}.pt"
+                torch.save(
+                    obj={
+                        'epoch': epoch,
+                        'global_step': global_step,
+                        'model_state_dict': model.state_dict(),
+                        'optimizer_state_dict': optimizer.state_dict(),
+                        'val_rmse': val_rmse,
+                    },
+                    f=checkpoint_path,
+                )
+
                 # Check for improvement
                 if val_rmse < best_val_coord_loss - min_delta:
                     best_val_coord_loss = val_rmse
                     patience_counter = 0
-
-                    # Save best model
-                    checkpoint_path = Path(model_weights_out_dir) / "model.pt"
-                    torch.save(
-                        obj={
-                            'epoch': epoch,
-                            'global_step': global_step,
-                            'model_state_dict': model.state_dict(),
-                            'optimizer_state_dict': optimizer.state_dict(),
-                            'val_rmse': val_rmse,
-                        },
-                        f=checkpoint_path,
-                    )
 
                     mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
                     mlflow.log_metric("best_val_rmse", best_val_coord_loss, step=global_step)
@@ -354,17 +353,6 @@ def train(
                 else:
                     patience_counter += 1
                     logger.info(f"No improvement. Patience: {patience_counter}/{patience}")
-
-                    torch.save(
-                        obj={
-                            'epoch': epoch,
-                            'global_step': global_step,
-                            'model_state_dict': model.state_dict(),
-                            'optimizer_state_dict': optimizer.state_dict(),
-                            'val_rmse': val_rmse,
-                        },
-                        f=Path(model_weights_out_dir) / f"{global_step}.pt",
-                    )
 
                 # Early stopping
                 if patience_counter >= patience:
