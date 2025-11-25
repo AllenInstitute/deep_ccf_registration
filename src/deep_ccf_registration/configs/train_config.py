@@ -60,8 +60,8 @@ class TrainConfig(BaseModel):
     seed: int = 1234
     debug: bool = False
 
-    # how much of the validation set to use for evaluation
-    val_eval_frac: float = 1.0
+    # how much of the train set to use for evaluation
+    train_eval_frac: float = 1.0
 
     # path to bounding boxes conforming to schema: dict[str, Optional[TissueBoundingBox]]
     # mapping subject id to list of optional bounding boxes. bbox may be null if no tissue in slice
