@@ -99,7 +99,7 @@ def train(
         learning_rate: float = 0.001,
         decay_learning_rate: bool = True,
         warmup_iters: int = 1000,
-        loss_eval_interval: int = 500,
+        eval_interval: int = 500,
         patience: int = 10,
         min_delta: float = 1e-4,
         autocast_context: ContextManager = nullcontext(),
@@ -122,7 +122,7 @@ def train(
     learning_rate: Initial learning rate
     decay_learning_rate: Whether to decay learning rate during training
     warmup_iters: Number of warmup iterations for learning rate
-    loss_eval_interval: Evaluate loss every N iterations
+    eval_interval: Evaluate model every N iterations
     patience: Number of evaluations without improvement before stopping
     min_delta: Minimum change in validation loss to be considered improvement
     autocast_context: Context manager for mixed precision training
@@ -278,7 +278,7 @@ def train(
                 )
 
             # Periodic evaluation
-            if global_step % loss_eval_interval == 0:
+            if global_step % eval_interval == 0:
                 train_rmse, train_major_region_dice, train_small_region_dice, train_tissue_mask_dice = evaluate(
                     val_loader=train_eval_dataloader,
                     model=model,

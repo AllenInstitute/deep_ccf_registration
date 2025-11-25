@@ -60,7 +60,7 @@ class UNetWithRegressionHeads(nn.Module):
         self.unet_backbone = UNet(
             spatial_dims=spatial_dims,
             in_channels=in_channels,
-            out_channels=feature_channels,
+            out_channels=feature_channels + 1 if include_tissue_mask else feature_channels,
             dropout=dropout,
             channels=channels,
             strides=strides,
@@ -113,16 +113,6 @@ class UNetWithRegressionHeads(nn.Module):
         else:
             raise ValueError(f"Unknown head_size: {head_size}")
 
-        # Tissue mask classification head
-        if include_tissue_mask:
-            self.mask_head = nn.Sequential(
-                nn.Conv2d(input_channels, 32, kernel_size=1),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(32, 16, kernel_size=1),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(16, 1, kernel_size=1),
-            )
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass
@@ -142,18 +132,24 @@ class UNetWithRegressionHeads(nn.Module):
         # Extract features from UNet backbone
         features = self.unet_backbone(x)
 
+        if self.include_tissue_mask:
+            coord_features = features[:, :-1]
+            mask_logits = features[:, -1].unsqueeze(1)
+        else:
+            coord_features = features
+            mask_logits = None
+
         # Concatenate with positional encoding if enabled
         if self.use_positional_encoding:
             pos_encoding = self.pos_embedding.expand(B, -1, -1, -1)
-            features = torch.cat([features, pos_encoding], dim=1)
+            features = torch.cat([coord_features, pos_encoding], dim=1)
 
         # Predict coordinates using regression head
         coords = self.coord_head(features)
 
         # Predict tissue mask using classification head
         if self.include_tissue_mask:
-            mask = self.mask_head(features)
-            output = torch.cat([coords, mask], dim=1)
+            output = torch.cat([coords, mask_logits], dim=1)
         else:
             output = coords
 

@@ -45,7 +45,7 @@ class TrainConfig(BaseModel):
     warmup_iters: int = Field(1000, ge=0)
     checkpoint_interval: int = Field(100, ge=0)
 
-    loss_eval_interval: int = Field(500, gt=0)
+    eval_interval: int = Field(500, gt=0)
     eval_iters: int = Field(100, gt=0)
     patience: int = Field(10, gt=0)
     min_delta: float = Field(1e-4, ge=0.0)

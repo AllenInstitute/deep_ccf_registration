@@ -264,7 +264,7 @@ def evaluate(
     }, step=iteration)
 
     if exclude_background_pixels:
-        tissue_mask_dice = (2 * tissue_mask_tp_sum) / (tissue_mask_fp_sum + tissue_mask_fn_sum + 1e-8)
+        tissue_mask_dice = (2 * tissue_mask_tp_sum) / (2 * tissue_mask_tp_sum + tissue_mask_fp_sum + tissue_mask_fn_sum + 1e-8)
     else:
         tissue_mask_dice = None
 
