@@ -1,5 +1,5 @@
 from aind_smartspim_transform_utils.utils.utils import AcquisitionDirection
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, Literal
 from pathlib import Path
 
@@ -7,6 +7,8 @@ from deep_ccf_registration.metadata import SliceOrientation
 
 
 class ModelConfig(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
     # number of channels in each layer of the unet in the encoder
     unet_channels: tuple[int, ...]
     unet_stride: tuple[int, ...]
