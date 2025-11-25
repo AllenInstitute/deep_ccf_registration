@@ -1,5 +1,6 @@
 import os
 import sys
+from importlib.metadata import distribution
 from pathlib import Path
 
 import albumentations
@@ -29,6 +30,18 @@ from deep_ccf_registration.models import UNetWithRegressionHeads
 logger.remove()
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logger.add(sys.stderr, level=log_level)
+
+
+def _get_git_commit_from_package(package_name="deep-ccf-registration"):
+    """Extract git commit from installed package"""
+    dist = distribution(package_name)
+
+    direct_url_text = dist.read_text("direct_url.json")
+
+    direct_url = json.loads(direct_url_text)
+    commit = direct_url["vcs_info"]["commit_id"]
+    url = direct_url["url"]
+    return commit, url
 
 @click.command()
 @click.option(
@@ -265,6 +278,12 @@ def main(config_path: Path):
     mlflow_run = mlflow.start_run() if config.use_mlflow else nullcontext()
     with mlflow_run:
         mlflow.log_params(params=config.model_dump())
+        try:
+            commit, repo_url = _get_git_commit_from_package()
+            mlflow.set_tag("mlflow.source.git.commit", commit)
+            mlflow.set_tag("mlflow.source.git.repoURL", repo_url)
+        except:
+            logger.warning('Could not parse git commit')
 
         # Restore original seeded state
         random.setstate(state)
