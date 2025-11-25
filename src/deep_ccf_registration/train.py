@@ -280,7 +280,8 @@ def train(
                     iteration=global_step,
                     exclude_background_pixels=exclude_background_pixels,
                     is_train=True,
-                    viz_slice_indices=train_viz_indices
+                    viz_slice_indices=train_viz_indices,
+                    autocast_context=autocast_context,
                 )
                 val_rmse, val_major_region_dice, val_small_region_dice, val_tissue_mask_dice = evaluate(
                     val_loader=val_dataloader,
@@ -293,7 +294,8 @@ def train(
                     iteration=global_step,
                     exclude_background_pixels=exclude_background_pixels,
                     is_train=False,
-                    viz_slice_indices=val_viz_indices
+                    viz_slice_indices=val_viz_indices,
+                    autocast_context=autocast_context,
                 )
 
                 current_lr = optimizer.param_groups[0]['lr']

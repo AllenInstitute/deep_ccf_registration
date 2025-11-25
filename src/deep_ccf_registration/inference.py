@@ -1,5 +1,6 @@
 import random
-from typing import Optional
+from contextlib import nullcontext
+from typing import ContextManager, Optional
 
 import albumentations
 import mlflow
@@ -75,6 +76,7 @@ def evaluate(
         device: str = "cuda",
         exclude_background_pixels: bool = True,
         viz_slice_indices: Optional[list[int]] = None,
+        autocast_context: ContextManager = nullcontext(),
 ) -> tuple[float, dict[str, float], dict[str, float], float]:
     """
     :param val_loader: validation DataLoader
@@ -128,7 +130,8 @@ def evaluate(
         gt_template_points = gt_template_points.cpu()
 
         # Run inference
-        model_out = model(input_images).cpu()
+        with autocast_context:
+            model_out = model(input_images).cpu()
         if exclude_background_pixels:
             pred_ls_template_points = model_out[:, :-1]
             pred_tissue_logits = model_out[:, -1]
