@@ -29,9 +29,9 @@ from deep_ccf_registration.utils.utils import get_ccf_annotations
 
 
 @retry(tries=3, delay=1, backoff=2)
-def _read_slice_patch(slice_2d_bbox: tensorstore.TensorStore, patch_y: int, ph: int, patch_x: int, pw: int) -> np.ndarray:
+def _read_slice_patch(slice_2d_bbox: tensorstore.TensorStore, patch_y: int, ph: int, patch_x: int, pw: int) -> tensorstore.Future:
     """Read a slice patch from tensorstore with retry logic for transient failures."""
-    return slice_2d_bbox[patch_y:patch_y + ph, patch_x:patch_x + pw].read().result()
+    return slice_2d_bbox[patch_y:patch_y + ph, patch_x:patch_x + pw].read()
 
 
 @dataclass
@@ -489,14 +489,14 @@ class SliceDataset(Dataset):
         volume_slice[slice_axis.dimension + 2] = slice_idx  # + 2 since first 2 dims unused
 
         with timed():
-                input_image, patch_y, patch_x = self._extract_slice_image(
+                input_image, patch_y, patch_x, patch_height, patch_width = self._extract_slice_image(
                     slice_2d=volume[tuple(volume_slice)],
                     patch_x=patch_x,
                     patch_y=patch_y,
                     tissue_bbox=self._tissue_bboxes[experiment_meta.subject_id][slice_idx]
                 )
 
-        height, width = input_image.shape
+        height, width = patch_height, patch_width
 
         point_grid = _create_coordinate_dataframe(
             patch_height=height,
@@ -525,6 +525,8 @@ class SliceDataset(Dataset):
         )
 
         output_points = ls_template_points.reshape((height, width, 3))
+
+        input_image = input_image.result()
 
         if self._normalize_orientation_map is not None:
             input_image, output_points = self._normalize_orientation(
@@ -620,7 +622,7 @@ class SliceDataset(Dataset):
             tissue_bbox: TissueBoundingBox,
             patch_x: Optional[int] = None,
             patch_y: Optional[int] = None,
-    ) -> tuple[np.ndarray, int, int]:
+    ) -> tuple[tensorstore.Future, int, int, int, int]:
         """
         Extract patch from slice or whole slice if patch_x, patch_y is None and self._patch_size is None.
         Only extracts a region from within `tissue_bbox`.
@@ -668,7 +670,7 @@ class SliceDataset(Dataset):
 
         patch = _read_slice_patch(slice_2d_bbox=slice_2d_bbox, patch_y=patch_y, ph=ph, patch_x=patch_x, pw=pw)
 
-        return patch, patch_y, patch_x
+        return patch, patch_y, patch_x, ph, pw
 
     def _normalize_orientation(
         self,
