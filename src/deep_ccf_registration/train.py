@@ -16,6 +16,7 @@ from torch.utils.data import Subset
 from torch.utils.data.distributed import DistributedSampler
 from loguru import logger
 import torch.nn.functional as F
+from tqdm import tqdm
 
 from deep_ccf_registration.datasets.slice_dataset import SliceDataset
 from deep_ccf_registration.inference import evaluate, RegionAcronymCCFIdsMap
@@ -171,9 +172,8 @@ def train(
     logger.info(f"Training eval samples: {len(train_eval_dataloader.dataset)}")
     logger.info(f"Device: {device}")
 
-    iteration_times = []
-    training_start_time = time.time()
     total_iterations = len(train_dataloader) * n_epochs
+    pbar = tqdm(total=total_iterations, desc="Training")
 
     for epoch in range(1, n_epochs + 1):
         # Set epoch for distributed training
@@ -186,8 +186,6 @@ def train(
         train_mask_losses = []
 
         for batch_idx, batch in enumerate(train_dataloader):
-            iter_start_time = time.time()
-
             if train_dataset.patch_size is not None:
                 input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks = batch
             else:
@@ -246,25 +244,8 @@ def train(
                 "train/learning_rate": optimizer.param_groups[0]['lr'],
             }, step=global_step)
 
-            iter_time = time.time() - iter_start_time
-            iteration_times.append(iter_time)
-
-            if global_step % log_interval == 0:
-                avg_iter_time = sum(iteration_times[-100:]) / min(len(iteration_times),
-                                                                  100)  # Last 100 iters
-                remaining_iters = total_iterations - global_step
-                eta_seconds = remaining_iters * avg_iter_time
-                eta_str = str(timedelta(seconds=int(eta_seconds)))
-
-                elapsed_time = time.time() - training_start_time
-                elapsed_str = str(timedelta(seconds=int(elapsed_time)))
-
-                logger.info(
-                    f"Step {global_step}/{total_iterations} | "
-                    f"Iter time: {iter_time:.3f}s | Avg: {avg_iter_time:.3f}s | "
-                    f"Loss: {loss.item():.6f} | "
-                    f"Elapsed: {elapsed_str} | ETA: {eta_str}"
-                )
+            pbar.set_postfix({"loss": f"{loss.item():.6f}", "coord_loss": f"{coordinate_loss.item():.6f}"})
+            pbar.update(1)
 
             # Periodic evaluation
             if global_step % eval_interval == 0:
@@ -366,8 +347,6 @@ def train(
                     return best_val_coord_loss
 
                 model.train()
-
-                iter_start_time = time.time()
 
         # End of epoch summary
         avg_train_loss = sum(train_losses) / len(train_losses)
