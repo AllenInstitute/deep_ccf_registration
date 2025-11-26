@@ -16,6 +16,7 @@ from aind_smartspim_transform_utils.utils.utils import AcquisitionDirection, \
     convert_from_ants_space
 from loguru import logger
 from pydantic import BaseModel
+from retry import retry
 from skimage.exposure import rescale_intensity
 from torch.utils.data import Dataset
 
@@ -25,6 +26,12 @@ from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 from deep_ccf_registration.utils.transforms import transform_points_to_template_ants_space, \
     apply_transforms_to_points
 from deep_ccf_registration.utils.utils import get_ccf_annotations
+
+
+@retry(tries=3, delay=1, backoff=2)
+def _read_slice_patch(slice_2d_bbox: tensorstore.TensorStore, patch_y: int, ph: int, patch_x: int, pw: int) -> np.ndarray:
+    """Read a slice patch from tensorstore with retry logic for transient failures."""
+    return slice_2d_bbox[patch_y:patch_y + ph, patch_x:patch_x + pw].read().result()
 
 
 @dataclass
@@ -659,7 +666,7 @@ class SliceDataset(Dataset):
                 patch_y = random.randint(tissue_bbox.y, max(tissue_bbox.y, tissue_bbox.y + h - ph))
                 patch_x = random.randint(tissue_bbox.x, max(tissue_bbox.x, tissue_bbox.x + w - pw))
 
-        patch = slice_2d_bbox[patch_y:patch_y + ph, patch_x:patch_x + pw].read().result()
+        patch = _read_slice_patch(slice_2d_bbox=slice_2d_bbox, patch_y=patch_y, ph=ph, patch_x=patch_x, pw=pw)
 
         return patch, patch_y, patch_x
 

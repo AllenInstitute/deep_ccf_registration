@@ -22,6 +22,7 @@ from deep_ccf_registration.datasets.slice_dataset import SliceDataset
 from deep_ccf_registration.inference import evaluate, RegionAcronymCCFIdsMap
 from deep_ccf_registration.losses.coord_loss import HemisphereAgnosticCoordLoss
 from deep_ccf_registration.metadata import SliceOrientation
+from deep_ccf_registration.utils.logging_utils import timed
 
 
 # https://github.com/karpathy/nanoGPT/blob/master/train.py
@@ -207,7 +208,8 @@ def train(
             # Forward pass
             optimizer.zero_grad()
             with autocast_context:
-                model_out = model(input_images)
+                with timed():
+                    model_out = model(input_images)
                 coordinate_loss = coord_loss(
                     pred_template_points=model_out[:, :-1] if exclude_background_pixels else model_out,
                     true_template_points=target_template_points,
