@@ -185,9 +185,8 @@ def train(
         train_coord_losses = []
         train_mask_losses = []
 
-        iter_start_time = time.time()
-
         for batch_idx, batch in enumerate(train_dataloader):
+            iter_start_time = time.time()
 
             if train_dataset.patch_size is not None:
                 input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks = batch
