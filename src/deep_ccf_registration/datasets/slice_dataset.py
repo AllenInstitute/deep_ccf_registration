@@ -10,7 +10,6 @@ import ants
 import numpy as np
 import pandas as pd
 import tensorstore
-import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from aind_smartspim_transform_utils.utils.utils import AcquisitionDirection, \
     convert_from_ants_space
@@ -29,9 +28,9 @@ from deep_ccf_registration.utils.utils import get_ccf_annotations
 
 
 @retry(tries=3, delay=1, backoff=2)
-def _read_slice_patch(slice_2d_bbox: tensorstore.TensorStore, patch_y: int, ph: int, patch_x: int, pw: int) -> tensorstore.Future:
+def _read_slice_patch(slice_2d_bbox: tensorstore.TensorStore, patch_y: int, ph: int, patch_x: int, pw: int) -> np.ndarray:
     """Read a slice patch from tensorstore with retry logic for transient failures."""
-    return slice_2d_bbox[patch_y:patch_y + ph, patch_x:patch_x + pw].read()
+    return slice_2d_bbox[patch_y:patch_y + ph, patch_x:patch_x + pw].read().result()
 
 
 @dataclass
@@ -526,8 +525,6 @@ class SliceDataset(Dataset):
 
         output_points = ls_template_points.reshape((height, width, 3))
 
-        input_image = input_image.result()
-
         if self._normalize_orientation_map is not None:
             input_image, output_points = self._normalize_orientation(
                 slice=input_image,
@@ -622,7 +619,7 @@ class SliceDataset(Dataset):
             tissue_bbox: TissueBoundingBox,
             patch_x: Optional[int] = None,
             patch_y: Optional[int] = None,
-    ) -> tuple[tensorstore.Future, int, int, int, int]:
+    ) -> tuple[np.ndarray, int, int, int, int]:
         """
         Extract patch from slice or whole slice if patch_x, patch_y is None and self._patch_size is None.
         Only extracts a region from within `tissue_bbox`.
@@ -729,7 +726,7 @@ class SliceDataset(Dataset):
                     slice = np.fliplr(slice)
                     template_points = np.fliplr(template_points)
 
-        if swapped.tolist() != range(3):
+        if swapped.tolist() != list(range(3)):
             slice = np.transpose(slice)
             template_points = np.permute_dims(template_points, axes=[1, 0, 2])
 
