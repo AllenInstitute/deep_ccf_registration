@@ -263,3 +263,461 @@ class TestNormalizeOrientation:
         # After flipud+fliplr+transpose -> position [0,0]
         assert normalized_slice[0, 0] == 400
         np.testing.assert_array_equal(normalized_points[0, 0], [13, 23, 33])
+
+
+class TestCreateCoordinateDataframe:
+    """Tests for the _create_coordinate_dataframe function."""
+
+    def test_basic_coordinate_creation(self):
+        """Test basic coordinate dataframe creation."""
+        axes = [
+            AcquisitionAxis(
+                dimension=0,
+                direction=AcquisitionDirection.LEFT_TO_RIGHT,
+                name=AcqusitionAxesName.X,
+                unit="um",
+                resolution=1.0
+            ),
+            AcquisitionAxis(
+                dimension=1,
+                direction=AcquisitionDirection.SUPERIOR_TO_INFERIOR,
+                name=AcqusitionAxesName.Y,
+                unit="um",
+                resolution=1.0
+            ),
+            AcquisitionAxis(
+                dimension=2,
+                direction=AcquisitionDirection.ANTERIOR_TO_POSTERIOR,
+                name=AcqusitionAxesName.Z,
+                unit="um",
+                resolution=1.0
+            )
+        ]
+        slice_axis = axes[0]
+
+        df = _create_coordinate_dataframe(
+            patch_height=2,
+            patch_width=3,
+            start_x=10,
+            start_y=20,
+            fixed_index_value=5,
+            slice_axis=slice_axis,
+            axes=axes
+        )
+
+        # Verify shape
+        assert len(df) == 6  # 2 * 3 = 6 points
+        assert list(df.columns) == ['x', 'y', 'z']
+
+        # Verify slice dimension is fixed
+        assert all(df['x'] == 5)
+
+        # Verify y coordinates (height dimension)
+        assert sorted(df['y'].unique()) == [20, 21]
+
+        # Verify z coordinates (width dimension)
+        assert sorted(df['z'].unique()) == [10, 11, 12]
+
+    def test_coordinate_ordering(self):
+        """Test that coordinates are ordered correctly (row-major)."""
+        axes = [
+            AcquisitionAxis(
+                dimension=0,
+                direction=AcquisitionDirection.LEFT_TO_RIGHT,
+                name=AcqusitionAxesName.X,
+                unit="um",
+                resolution=1.0
+            ),
+            AcquisitionAxis(
+                dimension=1,
+                direction=AcquisitionDirection.SUPERIOR_TO_INFERIOR,
+                name=AcqusitionAxesName.Y,
+                unit="um",
+                resolution=1.0
+            ),
+            AcquisitionAxis(
+                dimension=2,
+                direction=AcquisitionDirection.ANTERIOR_TO_POSTERIOR,
+                name=AcqusitionAxesName.Z,
+                unit="um",
+                resolution=1.0
+            )
+        ]
+        slice_axis = axes[0]
+
+        df = _create_coordinate_dataframe(
+            patch_height=2,
+            patch_width=2,
+            start_x=0,
+            start_y=0,
+            fixed_index_value=0,
+            slice_axis=slice_axis,
+            axes=axes
+        )
+
+        # With indexing='ij', coordinates should be:
+        # (y=0, z=0), (y=0, z=1), (y=1, z=0), (y=1, z=1)
+        expected_coords = [
+            (0, 0, 0),
+            (0, 0, 1),
+            (0, 1, 0),
+            (0, 1, 1)
+        ]
+
+        for i, (x, y, z) in enumerate(expected_coords):
+            assert df.iloc[i]['x'] == x
+            assert df.iloc[i]['y'] == y
+            assert df.iloc[i]['z'] == z
+
+
+class TestCalculateNonPadMask:
+    """Tests for the _calculate_non_pad_mask function."""
+
+    def test_no_padding(self):
+        """Test mask creation with no padding."""
+        mask = _calculate_non_pad_mask(shape=(10, 20), pad_transform={})
+
+        assert mask.shape == (10, 20)
+        assert mask.dtype == np.uint8
+        assert np.all(mask == 1)
+
+    def test_with_padding(self):
+        """Test mask creation with padding."""
+        pad_transform = {
+            'pad_top': 2,
+            'pad_left': 3,
+            'shape': (5, 8)  # Original image size before padding
+        }
+
+        mask = _calculate_non_pad_mask(shape=(10, 15), pad_transform=pad_transform)
+
+        assert mask.shape == (10, 15)
+
+        # Check padded region is 0
+        assert np.all(mask[:2, :] == 0)  # Top padding
+        assert np.all(mask[:, :3] == 0)  # Left padding
+
+        # Check non-padded region is 1
+        # Original image is at [2:7, 3:11]
+        assert np.all(mask[2:7, 3:11] == 1)
+
+    def test_padding_values(self):
+        """Test specific padding boundaries."""
+        pad_transform = {
+            'pad_top': 1,
+            'pad_left': 1,
+            'shape': (3, 3)
+        }
+
+        mask = _calculate_non_pad_mask(shape=(5, 5), pad_transform=pad_transform)
+
+        # Non-pad region should be [1:4, 1:4]
+        expected_mask = np.zeros((5, 5), dtype='uint8')
+        expected_mask[1:4, 1:4] = 1
+
+        np.testing.assert_array_equal(mask, expected_mask)
+
+
+class TestTissueBoundingBox:
+    """Tests for the TissueBoundingBox pydantic model."""
+
+    def test_creation(self):
+        """Test basic creation of TissueBoundingBox."""
+        bbox = TissueBoundingBox(y=10, x=20, width=100, height=50)
+
+        assert bbox.y == 10
+        assert bbox.x == 20
+        assert bbox.width == 100
+        assert bbox.height == 50
+
+    def test_validation(self):
+        """Test that pydantic validates types."""
+        # Valid
+        bbox = TissueBoundingBox(y=10, x=20, width=100, height=50)
+        assert isinstance(bbox, TissueBoundingBox)
+
+        # Test with whole number floats (should be coerced to int)
+        bbox = TissueBoundingBox(y=10.0, x=20.0, width=100.0, height=50.0)
+        assert bbox.y == 10
+        assert bbox.x == 20
+
+        # Test that fractional floats raise validation error
+        with pytest.raises(Exception):  # pydantic.ValidationError
+            TissueBoundingBox(y=10.5, x=20, width=100, height=50)
+
+
+class TestPatch:
+    """Tests for the Patch dataclass."""
+
+    def test_creation(self):
+        """Test creating a Patch instance."""
+        patch = Patch(
+            dataset_idx=0,
+            slice_idx=5,
+            x=100,
+            y=200,
+            orientation=SliceOrientation.SAGITTAL
+        )
+
+        assert patch.dataset_idx == 0
+        assert patch.slice_idx == 5
+        assert patch.x == 100
+        assert patch.y == 200
+        assert patch.orientation == SliceOrientation.SAGITTAL
+
+    def test_equality(self):
+        """Test that patches can be compared for equality."""
+        patch1 = Patch(
+            dataset_idx=0,
+            slice_idx=5,
+            x=100,
+            y=200,
+            orientation=SliceOrientation.SAGITTAL
+        )
+        patch2 = Patch(
+            dataset_idx=0,
+            slice_idx=5,
+            x=100,
+            y=200,
+            orientation=SliceOrientation.SAGITTAL
+        )
+        patch3 = Patch(
+            dataset_idx=1,
+            slice_idx=5,
+            x=100,
+            y=200,
+            orientation=SliceOrientation.SAGITTAL
+        )
+
+        assert patch1 == patch2
+        assert patch1 != patch3
+
+
+class TestGetPatchPositions:
+    """Tests for the _get_patch_positions method of SliceDataset."""
+
+    def test_no_patch_size(self):
+        """Test when patch_size is None."""
+        dataset = object.__new__(SliceDataset)
+        dataset._patch_size = None
+
+        bbox = TissueBoundingBox(y=10, x=20, width=100, height=50)
+        positions = dataset._get_patch_positions(bbox)
+
+        # Should return single position at bounding box start
+        assert positions == [(10, 20)]
+
+    def test_single_patch_fits_exactly(self):
+        """Test when bounding box exactly fits one patch."""
+        dataset = object.__new__(SliceDataset)
+        dataset._patch_size = (50, 100)
+
+        bbox = TissueBoundingBox(y=10, x=20, width=100, height=50)
+        positions = dataset._get_patch_positions(bbox)
+
+        # Should return single position
+        assert len(positions) == 1
+        assert positions[0] == (10, 20)
+
+    def test_multiple_patches_no_overlap(self):
+        """Test tiling multiple patches with no overlap."""
+        dataset = object.__new__(SliceDataset)
+        dataset._patch_size = (25, 50)
+
+        bbox = TissueBoundingBox(y=0, x=0, width=100, height=50)
+        positions = dataset._get_patch_positions(bbox)
+
+        # Should tile 2x2 = 4 patches
+        expected = [
+            (0, 0), (0, 50),
+            (25, 0), (25, 50)
+        ]
+        assert positions == expected
+
+    def test_patch_larger_than_bbox(self):
+        """Test when patch is larger than bounding box."""
+        dataset = object.__new__(SliceDataset)
+        dataset._patch_size = (100, 200)
+
+        bbox = TissueBoundingBox(y=10, x=20, width=50, height=30)
+        positions = dataset._get_patch_positions(bbox)
+
+        # Should return single position at bounding box start
+        assert len(positions) == 1
+        assert positions[0] == (10, 20)
+
+    def test_edge_adjustment(self):
+        """Test that patches are adjusted at edges."""
+        dataset = object.__new__(SliceDataset)
+        dataset._patch_size = (30, 30)
+
+        bbox = TissueBoundingBox(y=0, x=0, width=50, height=50)
+        positions = dataset._get_patch_positions(bbox)
+
+        # Should have patches at (0,0), (0,20), (20,0), (20,20)
+        # Last patches adjusted to fit within bbox
+        assert (0, 0) in positions
+        assert (0, 20) in positions  # width=50, 50-30=20
+        assert (20, 0) in positions  # height=50, 50-30=20
+        assert (20, 20) in positions
+
+
+class TestGetSliceFromIdx:
+    """Tests for the _get_slice_from_idx method of SliceDataset."""
+
+    def test_single_subject(self):
+        """Test with a single subject."""
+        dataset = object.__new__(SliceDataset)
+        dataset._slice_ranges = {
+            SliceOrientation.SAGITTAL: [[0, 1, 2, 3, 4]]
+        }
+
+        dataset_idx, slice_idx = dataset._get_slice_from_idx(
+            idx=2,
+            orientation=SliceOrientation.SAGITTAL
+        )
+
+        assert dataset_idx == 0
+        assert slice_idx == 2
+
+    def test_multiple_subjects(self):
+        """Test with multiple subjects."""
+        dataset = object.__new__(SliceDataset)
+        dataset._slice_ranges = {
+            SliceOrientation.SAGITTAL: [
+                [0, 1, 2],      # Subject 0: 3 slices
+                [0, 1, 2, 3],   # Subject 1: 4 slices
+                [0, 1]          # Subject 2: 2 slices
+            ]
+        }
+
+        # Test first subject
+        dataset_idx, slice_idx = dataset._get_slice_from_idx(
+            idx=0,
+            orientation=SliceOrientation.SAGITTAL
+        )
+        assert dataset_idx == 0
+        assert slice_idx == 0
+
+        # Test last slice of first subject
+        dataset_idx, slice_idx = dataset._get_slice_from_idx(
+            idx=2,
+            orientation=SliceOrientation.SAGITTAL
+        )
+        assert dataset_idx == 0
+        assert slice_idx == 2
+
+        # Test first slice of second subject (global idx=3)
+        dataset_idx, slice_idx = dataset._get_slice_from_idx(
+            idx=3,
+            orientation=SliceOrientation.SAGITTAL
+        )
+        assert dataset_idx == 1
+        assert slice_idx == 0
+
+        # Test third subject
+        dataset_idx, slice_idx = dataset._get_slice_from_idx(
+            idx=7,
+            orientation=SliceOrientation.SAGITTAL
+        )
+        assert dataset_idx == 2
+        assert slice_idx == 0
+
+    def test_non_contiguous_slice_indices(self):
+        """Test with non-contiguous slice indices."""
+        dataset = object.__new__(SliceDataset)
+        dataset._slice_ranges = {
+            SliceOrientation.SAGITTAL: [
+                [5, 10, 15],  # Subject 0: slices 5, 10, 15
+            ]
+        }
+
+        # Global index 1 should map to slice 10
+        dataset_idx, slice_idx = dataset._get_slice_from_idx(
+            idx=1,
+            orientation=SliceOrientation.SAGITTAL
+        )
+        assert dataset_idx == 0
+        assert slice_idx == 10
+
+
+class TestGetNumSlicesInAxisPerSubject:
+    """Tests for the _get_num_slices_in_axis_per_subject method."""
+
+    def test_counts(self):
+        """Test that correct counts are returned."""
+        dataset = object.__new__(SliceDataset)
+        dataset._slice_ranges = {
+            SliceOrientation.SAGITTAL: [
+                [0, 1, 2],
+                [0, 1, 2, 3, 4],
+                [0]
+            ]
+        }
+
+        counts = dataset._get_num_slices_in_axis_per_subject(
+            orientation=SliceOrientation.SAGITTAL
+        )
+
+        assert counts == [3, 5, 1]
+
+
+class TestDatasetLen:
+    """Tests for the __len__ method of SliceDataset."""
+
+    def test_train_mode_single_orientation(self):
+        """Test length in train mode with single orientation."""
+        dataset = object.__new__(SliceDataset)
+        dataset._mode = TrainMode.TRAIN
+        dataset._patch_size = (256, 256)
+        dataset._orientation = [SliceOrientation.SAGITTAL]
+        dataset._slice_ranges = {
+            SliceOrientation.SAGITTAL: [
+                [0, 1, 2],
+                [0, 1, 2, 3, 4]
+            ]
+        }
+
+        assert len(dataset) == 8  # 3 + 5
+
+    def test_train_mode_multiple_orientations(self):
+        """Test length in train mode with multiple orientations."""
+        dataset = object.__new__(SliceDataset)
+        dataset._mode = TrainMode.TRAIN
+        dataset._patch_size = (256, 256)
+        dataset._orientation = [
+            SliceOrientation.SAGITTAL,
+            SliceOrientation.CORONAL
+        ]
+        dataset._slice_ranges = {
+            SliceOrientation.SAGITTAL: [[0, 1, 2]],
+            SliceOrientation.CORONAL: [[0, 1]]
+        }
+
+        assert len(dataset) == 5  # 3 + 2
+
+    def test_test_mode_with_patches(self):
+        """Test length in test mode with precomputed patches."""
+        dataset = object.__new__(SliceDataset)
+        dataset._mode = TrainMode.TEST
+        dataset._patch_size = (256, 256)
+        dataset._precomputed_patches = [
+            Patch(0, 0, 0, 0, SliceOrientation.SAGITTAL),
+            Patch(0, 0, 256, 0, SliceOrientation.SAGITTAL),
+            Patch(0, 0, 0, 256, SliceOrientation.SAGITTAL),
+        ]
+
+        assert len(dataset) == 3
+
+    def test_test_mode_no_patch_size(self):
+        """Test length in test mode without patch size."""
+        dataset = object.__new__(SliceDataset)
+        dataset._mode = TrainMode.TEST
+        dataset._patch_size = None
+        dataset._orientation = [SliceOrientation.SAGITTAL]
+        dataset._slice_ranges = {
+            SliceOrientation.SAGITTAL: [[0, 1, 2]]
+        }
+
+        # Should use slice count, not patch count
+        assert len(dataset) == 3
