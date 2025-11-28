@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -44,7 +46,11 @@ def _prepare_grid_sample(
     # Convert array to torch tensor with shape (1, 3, D, H, W)
     # grid_sample expects (batch, channels, depth, height, width)
     if isinstance(array, np.ndarray):
-        array = torch.from_numpy(array)
+        with warnings.catch_warnings():
+            # suppress warning "The given NumPy array is not writable, and PyTorch does not support non-writable tensors."
+            # we are not writing, so it is ok
+            warnings.simplefilter("ignore")
+            array = torch.from_numpy(array)
     if len(array.shape) == 4:
         array = array.permute(3, 0, 1, 2).unsqueeze(0)  # (1, 3, D, H, W)
     elif len(array.shape) == 3:
