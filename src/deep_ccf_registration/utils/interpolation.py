@@ -3,7 +3,7 @@ import torch
 import torch.nn.functional as F
 
 
-def interpolate(array: np.ndarray, grid: np.ndarray, mode: str):
+def interpolate(array: np.ndarray | torch.Tensor, grid: np.ndarray | torch.Tensor, mode: str):
     array, grid = _prepare_grid_sample(
         array=array,
         voxels=grid,
@@ -20,8 +20,8 @@ def interpolate(array: np.ndarray, grid: np.ndarray, mode: str):
 
 
 def _prepare_grid_sample(
-    array: np.ndarray,
-    voxels: np.ndarray
+    array: np.ndarray | torch.Tensor,
+    voxels: np.ndarray | torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Takes the voxels and array and converts them to a format
@@ -43,7 +43,8 @@ def _prepare_grid_sample(
 
     # Convert array to torch tensor with shape (1, 3, D, H, W)
     # grid_sample expects (batch, channels, depth, height, width)
-    array = torch.from_numpy(array)
+    if isinstance(array, np.ndarray):
+        array = torch.from_numpy(array)
     if len(array.shape) == 4:
         array = array.permute(3, 0, 1, 2).unsqueeze(0)  # (1, 3, D, H, W)
     elif len(array.shape) == 3:
@@ -63,7 +64,9 @@ def _prepare_grid_sample(
     # Reshape for grid_sample: (1, N, 1, 1, 3) for 3D sampling
     # where N is the number of points
     n_points = len(voxels)
-    normalized_voxels = torch.from_numpy(normalized_voxels)
+
+    if isinstance(normalized_voxels, np.ndarray):
+        normalized_voxels = torch.from_numpy(normalized_voxels)
 
     if array.dtype == torch.float16:
         normalized_voxels = normalized_voxels.half()

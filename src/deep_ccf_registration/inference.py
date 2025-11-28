@@ -6,7 +6,6 @@ import mlflow
 import numpy as np
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
-from aind_smartspim_transform_utils.utils.utils import convert_from_ants_space
 from loguru import logger
 from matplotlib import pyplot as plt
 from pydantic import BaseModel, Field
@@ -16,8 +15,9 @@ from tqdm import tqdm
 import  torch.nn.functional as F
 
 from deep_ccf_registration.datasets.slice_dataset import SliceDataset
-from deep_ccf_registration.losses.coord_loss import HemisphereAgnosticCoordLoss, mirror_points
+from deep_ccf_registration.losses.coord_loss import mirror_points
 from deep_ccf_registration.metadata import SliceOrientation
+from deep_ccf_registration.utils.transforms import convert_from_ants_space_tensor
 from deep_ccf_registration.utils.utils import get_ccf_annotations
 from deep_ccf_registration.utils.visualization import create_diagnostic_image
 
@@ -126,11 +126,11 @@ def evaluate(
             input_images, gt_template_points, dataset_indices, slice_indices, orientations, input_image_transforms, masks = batch
 
         input_images = input_images.to(device)
-        gt_template_points = gt_template_points.cpu()
+        gt_template_points = gt_template_points.to(device)
 
         # Run inference
         with autocast_context:
-            model_out = model(input_images).cpu()
+            model_out = model(input_images)
         if exclude_background_pixels:
             pred_ls_template_points = model_out[:, :-1]
             pred_tissue_logits = model_out[:, -1]
@@ -164,15 +164,15 @@ def evaluate(
                     gt_shape=gt_patch.shape[1:]
                 ).squeeze(0)
 
-            pred_index_space = convert_from_ants_space(template_parameters=ls_template_parameters,
-                                                       physical_pts=pred_patch.permute((1, 2, 0)).reshape((-1, 3)).numpy())
-            gt_index_space = convert_from_ants_space(template_parameters=ls_template_parameters,
-                                                     physical_pts=gt_patch.permute((1, 2, 0)).reshape((-1, 3)).numpy())
+            pred_index_space = convert_from_ants_space_tensor(template_parameters=ls_template_parameters,
+                                                       physical_pts=pred_patch.permute((1, 2, 0)).reshape((-1, 3)))
+            gt_index_space = convert_from_ants_space_tensor(template_parameters=ls_template_parameters,
+                                                     physical_pts=gt_patch.permute((1, 2, 0)).reshape((-1, 3)))
 
-            pred_ccf_annot = get_ccf_annotations(ccf_annotations, pred_index_space).reshape(
+            pred_ccf_annot = get_ccf_annotations(ccf_annotations, pred_index_space, return_np=False).reshape(
                 pred_patch.shape[1:])
             pred_ccf_annot[(1 - mask).bool()] = 0
-            gt_ccf_annot = get_ccf_annotations(ccf_annotations, gt_index_space).reshape(
+            gt_ccf_annot = get_ccf_annotations(ccf_annotations, gt_index_space, return_np=False).reshape(
                 gt_patch.shape[1:])
 
             gt_tissue_mask = gt_ccf_annot != 0
@@ -194,18 +194,18 @@ def evaluate(
             hemisphere_agnostic_error = torch.minimum(direct_error, flipped_error)
 
             if exclude_background_pixels:
-                errors_direct += direct_error[0][:, gt_tissue_mask].sum(dim=0).sum()
-                errors_flipped += flipped_error[0][:, gt_tissue_mask].sum(dim=0).sum()
-                errors += hemisphere_agnostic_error[0][:, gt_tissue_mask].sum(dim=0).sum()
-                coord_error_denominator += gt_tissue_mask.sum()
-                tissue_mask_tp_sum += ((gt_tissue_mask == 1) & (mask.cpu().numpy() == 1)).sum()
-                tissue_mask_fp_sum += ((gt_tissue_mask == 0) & (mask.cpu().numpy() == 1)).sum()
-                tissue_mask_fn_sum += ((gt_tissue_mask == 1) & (mask.cpu().numpy() == 0)).sum()
+                errors_direct += direct_error[0][:, gt_tissue_mask].sum().item()
+                errors_flipped += flipped_error[0][:, gt_tissue_mask].sum().item()
+                errors += hemisphere_agnostic_error[0][:, gt_tissue_mask].sum().item()
+                coord_error_denominator += gt_tissue_mask.sum().item()
+                tissue_mask_tp_sum += ((gt_tissue_mask == 1) & (mask == 1)).sum().item()
+                tissue_mask_fp_sum += ((gt_tissue_mask == 0) & (mask == 1)).sum().item()
+                tissue_mask_fn_sum += ((gt_tissue_mask == 1) & (mask == 0)).sum().item()
             else:
-                errors_direct += direct_error[0][:, mask.bool()].sum(dim=0).sum()
-                errors_flipped += flipped_error[0][:, mask.bool()].sum(dim=0).sum()
-                errors += hemisphere_agnostic_error[0][:, mask.bool()].sum(dim=0).sum()
-                coord_error_denominator += mask.sum()
+                errors_direct += direct_error[0][:, mask.bool()].sum().item()
+                errors_flipped += flipped_error[0][:, mask.bool()].sum().item()
+                errors += hemisphere_agnostic_error[0][:, mask.bool()].sum().item()
+                coord_error_denominator += mask.sum().item()
 
             # Use direct error for diagnostic visualization
             patch_errors = direct_error
@@ -216,13 +216,13 @@ def evaluate(
                     input_image=input_images[i].cpu().squeeze(0),
                     slice_idx=slice_indices[i],
                     errors=patch_errors.cpu().numpy().squeeze(0),
-                    pred_ccf_annotations=pred_ccf_annot,
-                    gt_ccf_annotations=gt_ccf_annot,
+                    pred_ccf_annotations=pred_ccf_annot.cpu().numpy(),
+                    gt_ccf_annotations=gt_ccf_annot.cpu().numpy(),
                     iteration=iteration,
-                    pred_template_points=pred_patch,
-                    gt_template_points=gt_patch,
-                    gt_mask=(gt_ccf_annot != 0) if exclude_background_pixels else mask.bool().numpy(),
-                    pred_mask=mask.bool().numpy() if exclude_background_pixels else None,
+                    pred_template_points=pred_patch.cpu(),
+                    gt_template_points=gt_patch.cpu(),
+                    gt_mask=(gt_ccf_annot != 0).cpu().numpy() if exclude_background_pixels else mask.cpu().bool().numpy(),
+                    pred_mask=mask.cpu().bool().numpy() if exclude_background_pixels else None,
                 )
                 fig_filename = f"slice_{slice_indices[i]}_y_{patch_ys[i]}_x_{patch_xs[i]}_step_{iteration}.png"
                 mlflow.log_figure(fig, f"inference/{"train" if is_train else "val"}/slice_{slice_indices[i]}/y_{patch_ys[i]}_x_{patch_xs[i]}/{fig_filename}")

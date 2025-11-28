@@ -189,13 +189,16 @@ def fetch_complete_colormap() -> dict[int, list]:
     return colormap
 
 
-def get_ccf_annotations(ccf_annotations: np.ndarray, pts: np.ndarray):
+def get_ccf_annotations(ccf_annotations: np.ndarray | torch.Tensor, pts: np.ndarray | torch.Tensor, return_np: bool = True):
     labels = interpolate(
         array=ccf_annotations.astype(np.float32),
         grid=pts,
         mode='nearest'
     )
 
-    labels = labels.squeeze().cpu().numpy().astype(int)  # (M*N,)
+    labels = labels.squeeze().int()
+
+    if return_np:
+        labels = labels.numpy()
 
     return labels
