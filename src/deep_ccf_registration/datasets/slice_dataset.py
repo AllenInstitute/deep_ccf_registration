@@ -135,7 +135,7 @@ class SliceDataset(Dataset):
                  dataset_meta: list[SubjectMetadata],
                  ls_template_parameters: AntsImageParameters,
                  tissue_bboxes: TissueBoundingBoxes,
-                 ccf_annotations: Optional[np.ndarray] = None,
+                 ccf_annotations_path: Optional[Path] = None,
                  orientation: Optional[SliceOrientation] = None,
                  registration_downsample_factor: int = 3,
                  tensorstore_aws_credentials_method: str = "default",
@@ -218,12 +218,19 @@ class SliceDataset(Dataset):
 
         self._ls_template_parameters = ls_template_parameters
         self._precomputed_patches = self._build_patch_index() if mode == TrainMode.TEST and patch_size is not None else None
-        self._ccf_annotations = ccf_annotations
+        self._ccf_annotations_path = ccf_annotations_path
+        self._ccf_annotations = None
         self._return_tissue_mask = return_tissue_mask
 
     @property
     def patch_size(self) -> Optional[tuple[int, int]]:
         return self._patch_size
+
+    @property
+    def ccf_annotations(self) -> np.ndarray:
+        if self._ccf_annotations is None:
+            self._ccf_annotations = np.load(self._ccf_annotations_path, mmap_mode='r')
+        return self._ccf_annotations
 
     def _get_patch_positions(
             self,
@@ -734,7 +741,7 @@ class SliceDataset(Dataset):
 
     def _calculate_tissue_mask(self, template_points: np.ndarray):
         index_pts = convert_from_ants_space(template_parameters=self._ls_template_parameters, physical_pts=template_points.reshape((-1, 3)))
-        ccf_annotations = get_ccf_annotations(self._ccf_annotations, index_pts).reshape(
+        ccf_annotations = get_ccf_annotations(self.ccf_annotations, index_pts).reshape(
             template_points.shape[:-1])
 
         tissue_mask = (ccf_annotations != 0).astype('uint8')

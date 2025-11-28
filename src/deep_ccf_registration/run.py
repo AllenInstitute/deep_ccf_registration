@@ -151,7 +151,7 @@ def main(config_path: Path):
             albumentations.PadIfNeeded(min_height=config.patch_size[0], min_width=config.patch_size[1]),
             albumentations.ToTensorV2()
         ],
-        ccf_annotations=ccf_annotations,
+        ccf_annotations_path=ccf_annotations_path,
         return_tissue_mask=config.exclude_background_pixels,
         tissue_bboxes=tissue_bboxes
     )
@@ -179,7 +179,7 @@ def main(config_path: Path):
             albumentations.PadIfNeeded(min_height=config.patch_size[0], min_width=config.patch_size[1]),
             albumentations.ToTensorV2()
         ],
-        ccf_annotations=ccf_annotations,
+        ccf_annotations_path=ccf_annotations_path,
         return_tissue_mask=config.exclude_background_pixels,
         tissue_bboxes=tissue_bboxes
     )
