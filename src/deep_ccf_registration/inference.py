@@ -118,6 +118,8 @@ def evaluate(
     major_confusion_matrix = torch.zeros((n_major_classes, n_major_classes), dtype=torch.int64, device=device)
     small_confusion_matrix = torch.zeros((n_small_classes, n_small_classes), dtype=torch.int64, device=device)
 
+    ccf_annotations = torch.from_numpy(ccf_annotations.astype(np.float32)).to(device)
+
     model.eval()
     sample_idx = 0
 

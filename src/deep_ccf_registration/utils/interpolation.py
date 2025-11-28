@@ -58,10 +58,18 @@ def _prepare_grid_sample(
     else:
         raise ValueError(f'cannot handle array of shape {array_shape}')
 
+    # Move array to same device as voxels
+    if isinstance(voxels, torch.Tensor):
+        array = array.to(voxels.device)
+
     # Convert voxel indices to normalized coordinates [-1, 1]
     # grid_sample expects coordinates in (x, y, z) order for the last dimension
-    array_shape = np.array(array_shape[:3])
-    normalized_voxels = 2.0 * voxels / (array_shape - 1) - 1.0
+    if isinstance(voxels, torch.Tensor):
+        array_shape_tensor = torch.tensor(array_shape[:3], dtype=voxels.dtype, device=voxels.device)
+    else:
+        array_shape_tensor = np.array(array_shape[:3])
+
+    normalized_voxels = 2.0 * voxels / (array_shape_tensor - 1) - 1.0
 
     # grid_sample expects coordinates in (W, H, D) order, but our voxels are in (D, H, W)
     # So we need to reorder: [D, H, W] -> [W, H, D]
