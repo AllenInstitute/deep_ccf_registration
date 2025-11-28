@@ -88,7 +88,7 @@ def mirror_points(pred: torch.Tensor, template_parameters: AntsImageParameters, 
         flipped[:, dim] /= template_parameters.scale[dim]
 
     # 2. Flip ML in index space
-    flipped[..., 0] = ml_dim_size-1 - flipped[..., 0]
+    flipped[:, 0] = ml_dim_size-1 - flipped[:, 0]
 
     # 3. Convert back to physical
     for dim in range(template_parameters.dims):
