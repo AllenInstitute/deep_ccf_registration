@@ -190,8 +190,16 @@ def fetch_complete_colormap() -> dict[int, list]:
 
 
 def get_ccf_annotations(ccf_annotations: np.ndarray | torch.Tensor, pts: np.ndarray | torch.Tensor, return_np: bool = True):
+    # Only convert to float32 if not already (avoid creating copies in tight loops)
+    if isinstance(ccf_annotations, np.ndarray):
+        if ccf_annotations.dtype != np.float32:
+            ccf_annotations = ccf_annotations.astype(np.float32)
+    elif isinstance(ccf_annotations, torch.Tensor):
+        if ccf_annotations.dtype != torch.float32:
+            ccf_annotations = ccf_annotations.float()
+
     labels = interpolate(
-        array=ccf_annotations.astype(np.float32),
+        array=ccf_annotations,
         grid=pts,
         mode='nearest'
     )

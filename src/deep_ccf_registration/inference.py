@@ -117,6 +117,9 @@ def evaluate(
     major_confusion_matrix = np.zeros((n_major_classes, n_major_classes), dtype=np.int64)
     small_confusion_matrix = np.zeros((n_small_classes, n_small_classes), dtype=np.int64)
 
+    # Convert ccf_annotations to float32 due to F.grid_sample call
+    ccf_annotations = ccf_annotations.astype(np.float32)
+
     model.eval()
     sample_idx = 0
     for batch_idx, batch in enumerate(tqdm(val_loader, desc="Evaluation")):
