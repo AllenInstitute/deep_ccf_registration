@@ -196,7 +196,7 @@ def main(config_path: Path):
         shuffle=False,
         num_workers=config.num_workers,
         pin_memory=(device == "cuda"),
-        prefetch_factor=config.dataloader_prefetch_factor,
+        prefetch_factor=None,
     )
 
     train_eval_dataloader = DataLoader(
@@ -205,7 +205,7 @@ def main(config_path: Path):
         shuffle=False,
         num_workers=config.num_workers,
         pin_memory=(device == "cuda"),
-        prefetch_factor=config.dataloader_prefetch_factor,
+        prefetch_factor=None,
     )
 
     logger.info(f"Num train slices: {len(train_dataset)}")
