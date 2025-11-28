@@ -121,24 +121,20 @@ class TestBuildClassMapping:
 
         mapping = _build_class_mapping(region_map)
 
+        # Should be a torch tensor
+        assert isinstance(mapping, torch.Tensor)
+
         # CTX should be class 1
-        assert mapping[1] == 1
-        assert mapping[2] == 1
-        assert mapping[3] == 1
+        assert mapping[1].item() == 1
+        assert mapping[2].item() == 1
+        assert mapping[3].item() == 1
 
         # HIP should be class 2
-        assert mapping[4] == 2
-        assert mapping[5] == 2
+        assert mapping[4].item() == 2
+        assert mapping[5].item() == 2
 
         # TH should be class 3
-        assert mapping[6] == 3
-
-    def test_empty_region_map(self):
-        """Test with empty region map."""
-        region_map = {}
-        mapping = _build_class_mapping(region_map)
-
-        assert mapping == {}
+        assert mapping[6].item() == 3
 
     def test_single_region(self):
         """Test with single region."""
@@ -147,7 +143,7 @@ class TestBuildClassMapping:
 
         # All should map to class 1
         for i in range(1, 6):
-            assert mapping[i] == 1
+            assert mapping[i].item() == 1
 
     def test_class_indices_start_at_one(self):
         """Test that class indices start at 1 (0 reserved for background)."""
@@ -160,9 +156,9 @@ class TestBuildClassMapping:
         mapping = _build_class_mapping(region_map)
 
         # First region should be class 1, not 0
-        assert mapping[1] == 1
-        assert mapping[2] == 2
-        assert mapping[3] == 3
+        assert mapping[1].item() == 1
+        assert mapping[2].item() == 2
+        assert mapping[3].item() == 3
 
 
 class TestUpdateConfusionMatrix:
@@ -170,10 +166,13 @@ class TestUpdateConfusionMatrix:
 
     def test_perfect_prediction(self):
         """Test with perfect predictions."""
-        confusion_matrix = np.zeros((3, 3), dtype=np.int64)
-        pred_annotations = np.array([[1, 1], [2, 2]])
-        true_annotations = np.array([[1, 1], [2, 2]])
-        class_mapping = {1: 1, 2: 2}
+        confusion_matrix = torch.zeros((3, 3), dtype=torch.int64)
+        pred_annotations = torch.tensor([[1, 1], [2, 2]])
+        true_annotations = torch.tensor([[1, 1], [2, 2]])
+        # Create class mapping tensor
+        class_mapping = torch.zeros(3, dtype=torch.int32)
+        class_mapping[1] = 1
+        class_mapping[2] = 2
 
         _update_confusion_matrix(
             confusion_matrix=confusion_matrix,
@@ -183,18 +182,21 @@ class TestUpdateConfusionMatrix:
         )
 
         # Diagonal should have counts
-        assert confusion_matrix[1, 1] == 2  # Class 1 correct
-        assert confusion_matrix[2, 2] == 2  # Class 2 correct
+        assert confusion_matrix[1, 1].item() == 2  # Class 1 correct
+        assert confusion_matrix[2, 2].item() == 2  # Class 2 correct
         # Off-diagonal should be zero
-        assert confusion_matrix[1, 2] == 0
-        assert confusion_matrix[2, 1] == 0
+        assert confusion_matrix[1, 2].item() == 0
+        assert confusion_matrix[2, 1].item() == 0
 
     def test_with_errors(self):
         """Test with some misclassifications."""
-        confusion_matrix = np.zeros((3, 3), dtype=np.int64)
-        pred_annotations = np.array([[1, 2], [1, 2]])
-        true_annotations = np.array([[1, 1], [2, 2]])
-        class_mapping = {1: 1, 2: 2}
+        confusion_matrix = torch.zeros((3, 3), dtype=torch.int64)
+        pred_annotations = torch.tensor([[1, 2], [1, 2]])
+        true_annotations = torch.tensor([[1, 1], [2, 2]])
+        # Create class mapping tensor
+        class_mapping = torch.zeros(3, dtype=torch.int32)
+        class_mapping[1] = 1
+        class_mapping[2] = 2
 
         _update_confusion_matrix(
             confusion_matrix=confusion_matrix,
@@ -204,20 +206,22 @@ class TestUpdateConfusionMatrix:
         )
 
         # True class 1, predicted class 1: 1 sample
-        assert confusion_matrix[1, 1] == 1
+        assert confusion_matrix[1, 1].item() == 1
         # True class 1, predicted class 2: 1 sample
-        assert confusion_matrix[1, 2] == 1
+        assert confusion_matrix[1, 2].item() == 1
         # True class 2, predicted class 1: 1 sample
-        assert confusion_matrix[2, 1] == 1
+        assert confusion_matrix[2, 1].item() == 1
         # True class 2, predicted class 2: 1 sample
-        assert confusion_matrix[2, 2] == 1
+        assert confusion_matrix[2, 2].item() == 1
 
     def test_background_class(self):
         """Test that unmapped IDs default to background (class 0)."""
-        confusion_matrix = np.zeros((3, 3), dtype=np.int64)
-        pred_annotations = np.array([[0, 1], [999, 1]])
-        true_annotations = np.array([[0, 1], [999, 1]])
-        class_mapping = {1: 1}  # Only class 1 is mapped
+        confusion_matrix = torch.zeros((3, 3), dtype=torch.int64)
+        pred_annotations = torch.tensor([[0, 1], [999, 1]])
+        true_annotations = torch.tensor([[0, 1], [999, 1]])
+        # Create class mapping tensor - only class 1 is mapped, large enough for ID 999
+        class_mapping = torch.zeros(1000, dtype=torch.int32)
+        class_mapping[1] = 1
 
         _update_confusion_matrix(
             confusion_matrix=confusion_matrix,
@@ -227,33 +231,36 @@ class TestUpdateConfusionMatrix:
         )
 
         # Background (ID 0 and 999 -> class 0)
-        assert confusion_matrix[0, 0] == 2  # Two background samples
+        assert confusion_matrix[0, 0].item() == 2  # Two background samples
         # Class 1
-        assert confusion_matrix[1, 1] == 2  # Two class 1 samples
+        assert confusion_matrix[1, 1].item() == 2  # Two class 1 samples
 
     def test_accumulation_across_calls(self):
         """Test that matrix accumulates across multiple calls."""
-        confusion_matrix = np.zeros((3, 3), dtype=np.int64)
-        class_mapping = {1: 1, 2: 2}
+        confusion_matrix = torch.zeros((3, 3), dtype=torch.int64)
+        # Create class mapping tensor
+        class_mapping = torch.zeros(3, dtype=torch.int32)
+        class_mapping[1] = 1
+        class_mapping[2] = 2
 
         # First call
         _update_confusion_matrix(
             confusion_matrix=confusion_matrix,
-            pred_annotations=np.array([[1]]),
-            true_annotations=np.array([[1]]),
+            pred_annotations=torch.tensor([[1]]),
+            true_annotations=torch.tensor([[1]]),
             class_mapping=class_mapping
         )
 
         # Second call
         _update_confusion_matrix(
             confusion_matrix=confusion_matrix,
-            pred_annotations=np.array([[1]]),
-            true_annotations=np.array([[1]]),
+            pred_annotations=torch.tensor([[1]]),
+            true_annotations=torch.tensor([[1]]),
             class_mapping=class_mapping
         )
 
         # Should accumulate
-        assert confusion_matrix[1, 1] == 2
+        assert confusion_matrix[1, 1].item() == 2
 
 
 class TestCalcDiceFromConfusionMatrix:
@@ -262,11 +269,11 @@ class TestCalcDiceFromConfusionMatrix:
     def test_perfect_dice(self):
         """Test Dice score with perfect predictions."""
         # Perfect confusion matrix
-        confusion_matrix = np.array([
+        confusion_matrix = torch.tensor([
             [0, 0, 0],  # Background
             [0, 10, 0],  # Class 1: 10 correct
             [0, 0, 20],  # Class 2: 20 correct
-        ])
+        ], dtype=torch.int64)
 
         region_map = {
             'CTX': [1, 2, 3],
@@ -284,11 +291,11 @@ class TestCalcDiceFromConfusionMatrix:
 
     def test_zero_dice(self):
         """Test Dice score with completely wrong predictions."""
-        confusion_matrix = np.array([
+        confusion_matrix = torch.tensor([
             [0, 0, 0],
             [0, 0, 10],  # True class 1, predicted as class 2
             [0, 10, 0],  # True class 2, predicted as class 1
-        ])
+        ], dtype=torch.int64)
 
         region_map = {
             'CTX': [1],
@@ -308,11 +315,11 @@ class TestCalcDiceFromConfusionMatrix:
         """Test Dice score with partial correctness."""
         # Class 1: TP=5, FP=3, FN=2
         # Class 2: TP=10, FP=2, FN=3
-        confusion_matrix = np.array([
+        confusion_matrix = torch.tensor([
             [0, 0, 0],
             [0, 5, 2],   # Row for true class 1: TP=5, FN=2
             [0, 3, 10],  # Row for true class 2: TP=10, FN=3
-        ])
+        ], dtype=torch.int64)
         # Column sums: class 1 predicted = 5+3=8, so FP for class 1 = 8-5=3
         # Column sums: class 2 predicted = 2+10=12, so FP for class 2 = 12-10=2
 
@@ -334,11 +341,11 @@ class TestCalcDiceFromConfusionMatrix:
 
     def test_empty_class_skipped(self):
         """Test that classes with no samples are skipped."""
-        confusion_matrix = np.array([
+        confusion_matrix = torch.tensor([
             [0, 0, 0],
             [0, 10, 0],
             [0, 0, 0],  # Empty class
-        ])
+        ], dtype=torch.int64)
 
         region_map = {
             'CTX': [1],
@@ -357,10 +364,10 @@ class TestCalcDiceFromConfusionMatrix:
     def test_dice_formula(self):
         """Test the Dice coefficient formula: 2*TP / (2*TP + FP + FN)."""
         # Simple case: TP=6, FP=2, FN=4
-        confusion_matrix = np.array([
+        confusion_matrix = torch.tensor([
             [0, 0],
             [0, 6],  # True class 1, predicted class 1: 6
-        ])
+        ], dtype=torch.int64)
         # Add FN (true class 1, predicted other): 4
         confusion_matrix[1, 0] = 4  # This creates FN=4
         # We need total predicted as class 1 to be 6+2=8

@@ -13,6 +13,7 @@ from monai.networks.nets import UNet
 from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 import  torch.nn.functional as F
+import psutil
 
 from deep_ccf_registration.datasets.slice_dataset import SliceDataset
 from deep_ccf_registration.losses.coord_loss import mirror_points
@@ -114,14 +115,16 @@ def evaluate(
 
     n_major_classes = len(region_ccf_ids_map.major_regions) + 1  # +1 for background
     n_small_classes = len(region_ccf_ids_map.small_regions) + 1  # +1 for background
-    major_confusion_matrix = np.zeros((n_major_classes, n_major_classes), dtype=np.int64)
-    small_confusion_matrix = np.zeros((n_small_classes, n_small_classes), dtype=np.int64)
-
-    # Convert ccf_annotations to float32 due to F.grid_sample call
-    ccf_annotations = ccf_annotations.astype(np.float32)
+    major_confusion_matrix = torch.zeros((n_major_classes, n_major_classes), dtype=torch.int64, device=device)
+    small_confusion_matrix = torch.zeros((n_small_classes, n_small_classes), dtype=torch.int64, device=device)
 
     model.eval()
     sample_idx = 0
+
+    process = psutil.Process()
+    mem_before = process.memory_info().rss / 1024 / 1024 / 1024  # GB
+    logger.debug(f"[MEM] Before batch loop: {mem_before:.2f} GB")
+
     for batch_idx, batch in enumerate(tqdm(val_loader, desc="Evaluation")):
         if slice_dataset.patch_size is not None:
             input_images, gt_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, masks = batch
@@ -141,7 +144,15 @@ def evaluate(
         else:
             pred_ls_template_points = model_out
 
+        mem_after_inference = process.memory_info().rss / 1024 / 1024 / 1024
+        if batch_idx == 0:
+            logger.debug(f"[MEM] After model inference (batch 0): {mem_after_inference:.2f} GB (+{mem_after_inference - mem_before:.2f} GB)")
+
         for i in range(pred_ls_template_points.shape[0]):
+            if batch_idx == 0 and i == 0:
+                mem_start_sample = process.memory_info().rss / 1024 / 1024 / 1024
+                logger.debug(f"[MEM] Start of first sample: {mem_start_sample:.2f} GB")
+
             pred_patch = pred_ls_template_points[i]  # (3, H, W)
             gt_patch = gt_template_points[i]  # (3, H, W)
             mask = masks[i]
@@ -177,6 +188,10 @@ def evaluate(
             pred_ccf_annot[(1 - mask).bool()] = 0
             gt_ccf_annot = get_ccf_annotations(ccf_annotations, gt_index_space, return_np=False).reshape(
                 gt_patch.shape[1:])
+
+            if batch_idx == 0 and i == 0:
+                mem_after_ccf = process.memory_info().rss / 1024 / 1024 / 1024
+                logger.debug(f"[MEM] After get_ccf_annotations (sample 0): {mem_after_ccf:.2f} GB (+{mem_after_ccf - mem_start_sample:.2f} GB)")
 
             gt_tissue_mask = gt_ccf_annot != 0
 
@@ -287,57 +302,63 @@ def evaluate(
     return rmse, major_region_dice, small_region_dice, tissue_mask_dice
 
 
-def _build_class_mapping(region_map: dict[str, list[int]]) -> dict[int, int]:
+def _build_class_mapping(region_map: dict[str, list[int]]) -> torch.Tensor:
     """
-    Build mapping from CCF structure ID to class index (0-indexed, 0 is background)
+    Build mapping from CCF structure ID to class index as a lookup tensor
 
     :param region_map: Mapping from region acronym to list of CCF IDs
-    :return: Mapping from CCF structure ID to class index
+    :return: Lookup tensor where index=CCF_ID, value=class_index (0 for background)
     """
-    structure_to_class = {}
+    # Find max CCF ID to determine tensor size
+    max_id = max(max(structure_ids) for structure_ids in region_map.values())
+
+    # Create lookup tensor (index = CCF ID, value = class index, 0 = background)
+    id_to_class = torch.zeros(max_id + 1, dtype=torch.int32)
 
     for class_idx, (acronym, structure_ids) in enumerate(region_map.items(), start=1):
         for struct_id in structure_ids:
-            structure_to_class[struct_id] = class_idx
+            id_to_class[struct_id] = class_idx
 
-    return structure_to_class
+    return id_to_class
 
 
 def _update_confusion_matrix(
-        confusion_matrix: np.ndarray,
-        pred_annotations: np.ndarray,
-        true_annotations: np.ndarray,
-        class_mapping: dict[int, int]
+        confusion_matrix: torch.Tensor,
+        pred_annotations: torch.Tensor,
+        true_annotations: torch.Tensor,
+        class_mapping: torch.Tensor
 ):
     """
     Update confusion matrix with predictions from a patch
 
-    :param confusion_matrix: Confusion matrix to update (modified in-place)
-    :param pred_annotations: Predicted CCF annotations
-    :param true_annotations: Ground truth CCF annotations
-    :param class_mapping: Mapping from CCF structure ID to class index
+    :param confusion_matrix: Confusion matrix to update (modified in-place, torch tensor)
+    :param pred_annotations: Predicted CCF annotations (torch tensor)
+    :param true_annotations: Ground truth CCF annotations (torch tensor)
+    :param class_mapping: Lookup tensor mapping CCF structure ID to class index
     """
-    # Flatten annotations
-    pred_flat = pred_annotations.flatten()
-    true_flat = true_annotations.flatten()
+    class_mapping = class_mapping.to(pred_annotations.device)
 
-    # Map CCF IDs to class indices (default to 0 for background/unmapped)
-    pred_classes = np.array([class_mapping.get(int(pid), 0) for pid in pred_flat])
-    true_classes = np.array([class_mapping.get(int(tid), 0) for tid in true_flat])
+    pred_classes = class_mapping[pred_annotations.long()].flatten()
+    true_classes = class_mapping[true_annotations.long()].flatten()
 
-    # Update confusion matrix
-    for pred_cls, true_cls in zip(pred_classes, true_classes):
-        confusion_matrix[true_cls, pred_cls] += 1
+    # Stack to create (true_class, pred_class) pairs
+    indices_2d = torch.stack([true_classes, pred_classes], dim=1)
+
+    # Find unique pairs and count occurrences
+    unique_pairs, counts = torch.unique(indices_2d, dim=0, return_counts=True)
+
+    # Update confusion matrix directly with 2D indices
+    confusion_matrix[unique_pairs[:, 0], unique_pairs[:, 1]] += counts
 
 
 def _calc_dice_from_confusion_matrix(
-        confusion_matrix: np.ndarray,
+        confusion_matrix: torch.Tensor,
         region_map: dict[str, list[int]]
 ) -> dict[str, float]:
     """
     Calculate Dice scores from confusion matrix
 
-    :param confusion_matrix: Confusion matrix (n_classes x n_classes)
+    :param confusion_matrix: Confusion matrix (n_classes x n_classes, torch tensor)
     :param region_map: Mapping from region acronym to list of CCF IDs
     :return: Dictionary mapping region acronym to Dice score
     """
@@ -358,6 +379,6 @@ def _calc_dice_from_confusion_matrix(
         denominator = 2 * tp + fp + fn
         dice = (2 * tp / denominator)
 
-        result[acronym] = float(dice)
+        result[acronym] = float(dice.item())
 
     return result
