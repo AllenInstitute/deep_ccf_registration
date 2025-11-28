@@ -121,10 +121,6 @@ def evaluate(
     model.eval()
     sample_idx = 0
 
-    process = psutil.Process()
-    mem_before = process.memory_info().rss / 1024 / 1024 / 1024  # GB
-    logger.debug(f"[MEM] Before batch loop: {mem_before:.2f} GB")
-
     for batch_idx, batch in enumerate(tqdm(val_loader, desc="Evaluation")):
         if slice_dataset.patch_size is not None:
             input_images, gt_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, masks = batch
@@ -144,15 +140,7 @@ def evaluate(
         else:
             pred_ls_template_points = model_out
 
-        mem_after_inference = process.memory_info().rss / 1024 / 1024 / 1024
-        if batch_idx == 0:
-            logger.debug(f"[MEM] After model inference (batch 0): {mem_after_inference:.2f} GB (+{mem_after_inference - mem_before:.2f} GB)")
-
         for i in range(pred_ls_template_points.shape[0]):
-            if batch_idx == 0 and i == 0:
-                mem_start_sample = process.memory_info().rss / 1024 / 1024 / 1024
-                logger.debug(f"[MEM] Start of first sample: {mem_start_sample:.2f} GB")
-
             pred_patch = pred_ls_template_points[i]  # (3, H, W)
             gt_patch = gt_template_points[i]  # (3, H, W)
             mask = masks[i]
@@ -188,10 +176,6 @@ def evaluate(
             pred_ccf_annot[(1 - mask).bool()] = 0
             gt_ccf_annot = get_ccf_annotations(ccf_annotations, gt_index_space, return_np=False).reshape(
                 gt_patch.shape[1:])
-
-            if batch_idx == 0 and i == 0:
-                mem_after_ccf = process.memory_info().rss / 1024 / 1024 / 1024
-                logger.debug(f"[MEM] After get_ccf_annotations (sample 0): {mem_after_ccf:.2f} GB (+{mem_after_ccf - mem_start_sample:.2f} GB)")
 
             gt_tissue_mask = gt_ccf_annot != 0
 

@@ -1,6 +1,7 @@
 import multiprocessing
 import os
 import sys
+import tempfile
 from importlib.metadata import distribution
 from pathlib import Path
 
@@ -116,6 +117,13 @@ def main(config_path: Path):
     logger.info('loading ccf annotations volume')
     ccf_annotations = ants.image_read(str(config.ccf_annotations_path)).numpy()
 
+    # write ccf_annotations to memmap. this avoids RAM overhead of multiple workers
+    # spawning with a copy of this data
+    ccf_annotations_path = Path(tempfile.mktemp(suffix='.npy'))
+    np.save(ccf_annotations_path, ccf_annotations)
+    del ccf_annotations
+    ccf_annotations = np.load(ccf_annotations_path, mmap_mode='r')
+
     with open(config.tissue_bounding_boxes_path) as f:
         tissue_bboxes = json.load(f)
     tissue_bboxes = TissueBoundingBoxes(bounding_boxes=tissue_bboxes)
@@ -196,7 +204,7 @@ def main(config_path: Path):
         shuffle=False,
         num_workers=config.num_workers,
         pin_memory=(device == "cuda"),
-        prefetch_factor=None,
+        prefetch_factor=config.dataloader_prefetch_factor,
     )
 
     train_eval_dataloader = DataLoader(
@@ -205,7 +213,7 @@ def main(config_path: Path):
         shuffle=False,
         num_workers=config.num_workers,
         pin_memory=(device == "cuda"),
-        prefetch_factor=None,
+        prefetch_factor=config.dataloader_prefetch_factor,
     )
 
     logger.info(f"Num train slices: {len(train_dataset)}")
@@ -308,6 +316,8 @@ def main(config_path: Path):
     logger.info("=" * 60)
     logger.info(f"Training completed! Best validation RMSE: {best_val_rmse:.6f}")
     logger.info("=" * 60)
+
+    os.remove(ccf_annotations_path)
 
 
 def split_train_val_test(
