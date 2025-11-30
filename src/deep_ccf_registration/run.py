@@ -188,7 +188,14 @@ def main(config_path: Path):
         train_dataset = Subset(train_dataset, indices=[1000])
         val_dataset = Subset(val_dataset, indices=[1000])
 
-    train_eval_subset = Subset(train_dataset, indices=random.sample(range(len(train_dataset)), k=int(len(train_dataset) * config.train_eval_frac)))
+    train_eval_subset = Subset(
+        train_dataset,
+        indices=random.sample(range(len(train_dataset)), k=min(len(train_dataset), config.batch_size * config.num_eval_iters))
+    )
+    val_dataset = Subset(
+        val_dataset,
+        indices=random.sample(range(len(val_dataset)), k=min(len(val_dataset), config.batch_size * config.num_eval_iters))
+    )
 
     train_dataloader = DataLoader(
         dataset=train_dataset,
@@ -216,9 +223,9 @@ def main(config_path: Path):
         prefetch_factor=config.dataloader_prefetch_factor,
     )
 
-    logger.info(f"Num train slices: {len(train_dataset)}")
-    logger.info(f"Num val slices: {len(val_dataset)}")
-    logger.info(f"Num train eval slices: {len(train_eval_subset)}")
+    logger.info(f"Num train samples: {len(train_dataset)}")
+    logger.info(f"Num val samples: {len(val_dataset)}")
+    logger.info(f"Num train eval samples: {len(train_eval_subset)}")
 
     model = UNetWithRegressionHeads(
         spatial_dims=2,

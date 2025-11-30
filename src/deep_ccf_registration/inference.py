@@ -457,8 +457,6 @@ def evaluate_batch(
     tissue_mask_dice = DiceScore(
         num_classes=1,
         include_background=False,
-        # setting to micro to ignore warning but doesn't matter since only 1 class
-        average='micro'
     )
 
     sample_count = 0
