@@ -514,7 +514,7 @@ def evaluate_batch(
                     fig = viz_sample(
                         input_image=input_images[sample_idx].cpu().squeeze(0),
                         slice_idx=slice_indices[sample_idx],
-                        errors=error[viz_index].cpu().numpy(),
+                        errors=error[sample_idx].cpu().numpy(),
                         iteration=iteration,
                         pred_coords=pred_coords[sample_idx].cpu(),
                         gt_coords=target_template_points[sample_idx].cpu(),
