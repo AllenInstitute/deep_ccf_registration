@@ -152,7 +152,7 @@ def main(config_path: Path):
             albumentations.ToTensorV2()
         ],
         ccf_annotations_path=ccf_annotations_path,
-        return_tissue_mask=config.exclude_background_pixels,
+        return_tissue_mask=config.predict_tissue_mask,
         tissue_bboxes=tissue_bboxes
     )
 
@@ -180,7 +180,7 @@ def main(config_path: Path):
             albumentations.ToTensorV2()
         ],
         ccf_annotations_path=ccf_annotations_path,
-        return_tissue_mask=config.exclude_background_pixels,
+        return_tissue_mask=config.predict_tissue_mask,
         tissue_bboxes=tissue_bboxes
     )
 
@@ -228,7 +228,7 @@ def main(config_path: Path):
         channels=config.model.unet_channels,
         strides=config.model.unet_stride,
         out_coords=3,
-        include_tissue_mask=config.exclude_background_pixels,
+        include_tissue_mask=config.predict_tissue_mask,
         head_size=config.model.unet_head_size,
         use_positional_encoding=config.model.unet_use_positional_encoding,
         pos_encoding_channels=config.model.unet_pos_encoding_channels,
@@ -309,7 +309,6 @@ def main(config_path: Path):
             ccf_annotations=ccf_annotations,
             ls_template=ls_template,
             ls_template_parameters=ls_template_parameters,
-            region_ccf_ids_map=region_ccf_ids_map,
             exclude_background_pixels=config.exclude_background_pixels,
         )
 

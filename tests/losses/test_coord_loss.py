@@ -48,7 +48,7 @@ class TestMirrorPoints:
         pred[0, 2, :, :] = 50.0        # DV channel
 
         flipped = mirror_points(
-            pred=pred,
+            points=pred,
             template_parameters=simple_template_params,
             ml_dim_size=ml_dim_size
         )
@@ -69,7 +69,7 @@ class TestMirrorPoints:
         pred[0, 2, :, :] = 50.0  # DV channel
 
         flipped = mirror_points(
-            pred=pred,
+            points=pred,
             template_parameters=simple_template_params,
             ml_dim_size=ml_dim_size
         )
@@ -93,13 +93,13 @@ class TestMirrorPoints:
         pred[0, 2, :, :] = 40.0  # DV values
 
         flipped_once = mirror_points(
-            pred=pred,
+            points=pred,
             template_parameters=simple_template_params,
             ml_dim_size=ml_dim_size
         )
 
         flipped_twice = mirror_points(
-            pred=flipped_once,
+            points=flipped_once,
             template_parameters=simple_template_params,
             ml_dim_size=ml_dim_size
         )
@@ -118,7 +118,7 @@ class TestMirrorPoints:
         pred[0, 2, :, :] = 40.0  # DV values
 
         flipped = mirror_points(
-            pred=pred,
+            points=pred,
             template_parameters=simple_template_params,
             ml_dim_size=ml_dim_size
         )
@@ -149,7 +149,7 @@ class TestMirrorPoints:
         pred[0, 2, :, :] = 0.0   # DV values
 
         flipped = mirror_points(
-            pred=pred,
+            points=pred,
             template_parameters=template_params,
             ml_dim_size=ml_dim_size
         )
@@ -180,7 +180,7 @@ class TestMirrorPoints:
         pred[0, 2, :, :] = 6.0  # DV values
 
         flipped = mirror_points(
-            pred=pred,
+            points=pred,
             template_parameters=template_params,
             ml_dim_size=ml_dim_size
         )
@@ -214,7 +214,7 @@ class TestMirrorPoints:
         pred[0, 2, :, :] = 40.0  # DV values
 
         flipped = mirror_points(
-            pred=pred,
+            points=pred,
             template_parameters=template_params,
             ml_dim_size=ml_dim_size
         )
@@ -237,7 +237,7 @@ class TestMirrorPoints:
         pred[:, 2, :, :] = 60.0  # DV values for all batches
 
         flipped = mirror_points(
-            pred=pred,
+            points=pred,
             template_parameters=simple_template_params,
             ml_dim_size=ml_dim_size
         )
@@ -248,7 +248,7 @@ class TestMirrorPoints:
         # Each batch should be mirrored independently
         for i in range(pred.shape[0]):
             single_flipped = mirror_points(
-                pred=pred[i:i+1],
+                points=pred[i:i + 1],
                 template_parameters=simple_template_params,
                 ml_dim_size=ml_dim_size
             )
@@ -267,7 +267,7 @@ class TestMirrorPoints:
         pred[0, 2, :, :] = 50.0   # DV values
 
         flipped = mirror_points(
-            pred=pred,
+            points=pred,
             template_parameters=simple_template_params,
             ml_dim_size=ml_dim_size
         )
@@ -289,7 +289,7 @@ class TestMirrorPoints:
         pred_original = pred.clone()
 
         flipped = mirror_points(
-            pred=pred,
+            points=pred,
             template_parameters=simple_template_params,
             ml_dim_size=ml_dim_size
         )
@@ -314,7 +314,7 @@ class TestMirrorPoints:
         pred[0, 2, 5:, :] = 3.8   # DV values for second half
 
         flipped = mirror_points(
-            pred=pred,
+            points=pred,
             template_parameters=complex_template_params,
             ml_dim_size=ml_dim_size
         )
@@ -339,7 +339,7 @@ class TestMirrorPoints:
         pred_f32[0, 1, :, :] = 30.0
         pred_f32[0, 2, :, :] = 40.0
         flipped_f32 = mirror_points(
-            pred=pred_f32,
+            points=pred_f32,
             template_parameters=simple_template_params,
             ml_dim_size=ml_dim_size
         )
@@ -351,7 +351,7 @@ class TestMirrorPoints:
         pred_f64[0, 1, :, :] = 30.0
         pred_f64[0, 2, :, :] = 40.0
         flipped_f64 = mirror_points(
-            pred=pred_f64,
+            points=pred_f64,
             template_parameters=simple_template_params,
             ml_dim_size=ml_dim_size
         )
@@ -368,7 +368,7 @@ class TestMirrorPoints:
         pred[0, 2, :, :] = 40.0
 
         flipped = mirror_points(
-            pred=pred,
+            points=pred,
             template_parameters=simple_template_params,
             ml_dim_size=ml_dim_size
         )
@@ -387,7 +387,7 @@ class TestMirrorPoints:
         pred.data[0, 2, :, :] = 40.0
 
         flipped = mirror_points(
-            pred=pred,
+            points=pred,
             template_parameters=simple_template_params,
             ml_dim_size=ml_dim_size
         )

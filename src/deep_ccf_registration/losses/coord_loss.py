@@ -24,8 +24,7 @@ class HemisphereAgnosticCoordLoss(nn.Module):
                 pred_template_points: torch.Tensor,
                 true_template_points: torch.Tensor,
                 orientations: list[SliceOrientation],
-                tissue_masks: torch.Tensor,
-                per_channel_error: bool = False
+                masks: torch.Tensor,
                 ) -> torch.Tensor:
         device = pred_template_points.device
         sagittal_mask = torch.tensor(
@@ -33,53 +32,41 @@ class HemisphereAgnosticCoordLoss(nn.Module):
             device=device, dtype=torch.bool
         )
 
-        if per_channel_error:
-            standard_error = (pred_template_points - true_template_points) ** 2
-        else:
-            standard_error = torch.sum((pred_template_points - true_template_points) ** 2,
+        standard_error = torch.sum((pred_template_points - true_template_points) ** 2,
                                        dim=1)
 
         hemisphere_agnostic_err = self._calc_hemisphere_agnostic_error(
             pred_template_points,
             true_template_points,
-            per_channel=per_channel_error,
             error_direct=standard_error,
         )
 
-        weight_mask = tissue_masks + self._lambda_background * (1 - tissue_masks)
+        weight_mask = masks + self._lambda_background * (1 - masks)
 
-        if per_channel_error:
-            standard_loss = standard_error * weight_mask.unsqueeze(1)
-            hemisphere_agnostic_loss = hemisphere_agnostic_err * weight_mask.unsqueeze(1)
-        else:
-            weight_sum = weight_mask.sum(dim=(1, 2)).clamp(min=1)
-            standard_loss = (standard_error * weight_mask).sum(dim=(1, 2)) / weight_sum
-            hemisphere_agnostic_loss = (hemisphere_agnostic_err * weight_mask).sum(
-                dim=(1, 2)) / weight_sum
+        weight_sum = weight_mask.sum(dim=(1, 2)).clamp(min=1)
+        standard_loss = (standard_error * weight_mask).sum(dim=(1, 2)) / weight_sum
+        hemisphere_agnostic_loss = (hemisphere_agnostic_err * weight_mask).sum(
+            dim=(1, 2)) / weight_sum
 
         loss_per_sample = torch.where(sagittal_mask, hemisphere_agnostic_loss, standard_loss)
 
-        return loss_per_sample if per_channel_error else loss_per_sample.mean()
+        return loss_per_sample.mean()
 
     def _calc_hemisphere_agnostic_error(
             self,
             pred_template_points: torch.Tensor,
             true_template_points: torch.Tensor,
             error_direct: torch.Tensor,
-            per_channel=False,
     ) -> torch.Tensor:
-        ml_flipped = mirror_points(pred=pred_template_points, template_parameters=self._template_parameters, ml_dim_size=self._ml_dim_size)
+        ml_flipped = mirror_points(points=pred_template_points, template_parameters=self._template_parameters, ml_dim_size=self._ml_dim_size)
 
-        if per_channel:
-            err_flipped = (ml_flipped - true_template_points) ** 2
-        else:
-            err_flipped = torch.sum((ml_flipped - true_template_points) ** 2,
-                                    dim=1)
+        err_flipped = torch.sum((ml_flipped - true_template_points) ** 2,
+                                dim=1)
 
         return torch.minimum(error_direct, err_flipped)
 
-def mirror_points(pred: torch.Tensor, template_parameters: AntsImageParameters, ml_dim_size: int):
-    flipped = pred.clone()
+def mirror_points(points: torch.Tensor, template_parameters: AntsImageParameters, ml_dim_size: int):
+    flipped = points.clone()
 
     # 1. Convert to index space
     for dim in range(template_parameters.dims):

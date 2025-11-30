@@ -22,6 +22,7 @@ dependencies = [
     "scipy>=1.15.3",
     "tensorstore>=0.1.77",
     "torch>=2.8.0",
+    "torchmetrics>=1.8.2",
     "zarr>=3.1.3",
 ]
 

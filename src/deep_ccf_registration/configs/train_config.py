@@ -37,6 +37,7 @@ class TrainConfig(BaseModel):
     batch_size: int = Field(32, gt=0)
     num_workers: int = Field(0, ge=0)
     exclude_background_pixels: bool = False
+    predict_tissue_mask: bool = True
     dataloader_prefetch_factor: Optional[int] = None
 
     load_checkpoint: Optional[Path] = None

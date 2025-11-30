@@ -575,30 +575,29 @@ class SliceDataset(Dataset):
             pad_transform = {}
 
         if self._return_tissue_mask:
-            mask = self._calculate_tissue_mask(
+            tissue_mask = self._calculate_tissue_mask(
                 template_points=output_points
             )
         else:
-            mask = _calculate_non_pad_mask(
-                shape=self._patch_size if self._patch_size is not None else input_image_transformed.shape, pad_transform=pad_transform)
+            tissue_mask = np.array([])
+        pad_mask = _calculate_non_pad_mask(
+            shape=self._patch_size if self._patch_size is not None else input_image_transformed.shape, pad_transform=pad_transform)
 
         if self._mask_transforms:
-            mask = albumentations.Compose(self._mask_transforms)(image=mask)['image']
+            if self._return_tissue_mask:
+                tissue_mask = albumentations.Compose(self._mask_transforms)(image=tissue_mask)['image']
+            pad_mask = albumentations.Compose(self._mask_transforms)(image=pad_mask)['image']
 
-        if len(mask.shape) == 3:
-            mask = mask.squeeze()
+        if len(tissue_mask.shape) == 3:
+            tissue_mask = tissue_mask.squeeze()
+        if len(pad_mask.shape) == 3:
+            pad_mask = pad_mask.squeeze()
 
         if self._output_points_transforms is not None:
             output_points = albumentations.Compose(self._output_points_transforms)(image=output_points)[
                 'image']
 
-
-
-        if self.patch_size is not None:
-            res = input_image_transformed, output_points, dataset_idx, slice_idx, patch_y, patch_x, orientation.value, pad_transform, mask
-        else:
-            res = input_image_transformed, output_points, dataset_idx, slice_idx, orientation.value, pad_transform, mask
-        return res
+        return input_image_transformed, output_points, dataset_idx, slice_idx, patch_y, patch_x, orientation.value, pad_transform, tissue_mask, pad_mask
 
     def __len__(self):
         """
