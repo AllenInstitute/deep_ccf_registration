@@ -164,7 +164,6 @@ def train(
     ccf_annotations: 25 micron resolution CCF annotation volume
     ls_template: light sheet template volume
     ls_template_parameters: ls template AntsImageParameters
-    region_ccf_ids_map: `RegionAcronymCCFIdsMap`
     exclude_background_pixels: whether to use a tissue mask to exclude background pixels in loss/evaluation.
         Otherwise, just excludes pad pixels
     n_eval_visualize: how many samples to visualize during evaluation
@@ -213,7 +212,7 @@ def train(
         train_mask_losses = []
 
         for batch_idx, batch in enumerate(train_dataloader):
-            input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks, pad_masks = batch
+            input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks, pad_masks, subject_ids = batch
             input_images, target_template_points, tissue_masks, pad_masks = input_images.to(device), target_template_points.to(device), tissue_masks.to(device), pad_masks.to(device)
 
             if decay_learning_rate:

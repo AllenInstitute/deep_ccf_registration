@@ -485,6 +485,7 @@ class SliceDataset(Dataset):
             patch_x, patch_y = None, None
 
         experiment_meta = self._dataset_meta[dataset_idx]
+        subject_id = experiment_meta.subject_id
         acquisition_axes = experiment_meta.axes
         slice_axis = experiment_meta.get_slice_axis(orientation=orientation)
 
@@ -597,7 +598,7 @@ class SliceDataset(Dataset):
             output_points = albumentations.Compose(self._output_points_transforms)(image=output_points)[
                 'image']
 
-        return input_image_transformed, output_points, dataset_idx, slice_idx, patch_y, patch_x, orientation.value, pad_transform, tissue_mask, pad_mask
+        return input_image_transformed, output_points, dataset_idx, slice_idx, patch_y, patch_x, orientation.value, pad_transform, tissue_mask, pad_mask, subject_id
 
     def __len__(self):
         """

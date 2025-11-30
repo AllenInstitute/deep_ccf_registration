@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+from pathlib import Path
 from typing import ContextManager, Optional
 
 import albumentations
@@ -417,10 +418,10 @@ def viz_sample(
     pred_ccf_annot = get_ccf_annotations(ccf_annotations, pred_index_space,
                                          return_np=False).reshape(
         pred_coords.shape[1:])
-    pred_ccf_annot[pad_mask] = 0
+    pred_ccf_annot[~pad_mask] = 0
     gt_ccf_annot = get_ccf_annotations(ccf_annotations, gt_index_space, return_np=False).reshape(
         gt_coords.shape[1:])
-    gt_ccf_annot[pad_mask] = 0
+    gt_ccf_annot[~pad_mask] = 0
 
 
     fig = create_diagnostic_image(
@@ -462,7 +463,7 @@ def evaluate_batch(
     sample_count = 0
 
     for batch_idx, batch in enumerate(tqdm(val_loader, desc="Evaluation")):
-        input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks, pad_masks = batch
+        input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks, pad_masks, subject_ids = batch
         input_images, target_template_points, pad_masks, tissue_masks = input_images.to(device), target_template_points.to(device), pad_masks.to(device), tissue_masks.to(device)
 
         pad_masks = pad_masks.bool()
@@ -523,9 +524,10 @@ def evaluate_batch(
                         ls_template_parameters=ls_template_parameters,
                         ccf_annotations=ccf_annotations,
                     )
-                    fig_filename = f"slice_{slice_indices[sample_idx]}_y_{patch_ys[sample_idx]}_x_{patch_xs[sample_idx]}_step_{iteration}.png"
+                    subject_id = subject_ids[sample_idx]
+                    fig_filename = f"subject_{subject_id}_slice_{slice_indices[sample_idx]}_y_{patch_ys[sample_idx]}_x_{patch_xs[sample_idx]}_step_{iteration}.png"
                     mlflow.log_figure(fig,
-                                      f"inference/{"train" if is_train else "val"}/slice_{slice_indices[sample_idx]}/y_{patch_ys[sample_idx]}_x_{patch_xs[sample_idx]}/{fig_filename}")
+                                      f"inference/{"train" if is_train else "val"}/{"/".join(Path(fig_filename).stem.split("_"))}/{fig_filename}")
                     plt.close(fig)
             sample_count += 1
 
