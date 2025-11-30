@@ -463,7 +463,7 @@ def evaluate_batch(
 
     for batch_idx, batch in enumerate(tqdm(val_loader, desc="Evaluation")):
         input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks, pad_masks = batch
-        input_images, target_template_points, pad_masks, tissue_masks = input_images.to(device), target_template_points.to(device), pad_masks.to(device), tissue_masks
+        input_images, target_template_points, pad_masks, tissue_masks = input_images.to(device), target_template_points.to(device), pad_masks.to(device), tissue_masks.to(device)
 
         pad_masks = pad_masks.bool()
         tissue_masks = tissue_masks.bool()
