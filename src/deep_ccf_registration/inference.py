@@ -452,12 +452,12 @@ def evaluate_batch(
 ):
     model.eval()
 
-    rmse = MeanSquaredError(squared=False)
-    rmse_tissue_only = MeanSquaredError(squared=False)
+    rmse = MeanSquaredError(squared=False).to(device)
+    rmse_tissue_only = MeanSquaredError(squared=False).to(device)
     tissue_mask_dice = DiceScore(
         num_classes=1,
         include_background=False,
-    )
+    ).to(device)
 
     sample_count = 0
 
