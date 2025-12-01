@@ -205,23 +205,6 @@ def main(config_path: Path):
         pin_memory=(device == "cuda"),
         prefetch_factor=config.dataloader_prefetch_factor,
     )
-    val_dataloader = DataLoader(
-        dataset=val_dataset,
-        batch_size=config.batch_size,
-        shuffle=False,
-        num_workers=config.num_workers,
-        pin_memory=(device == "cuda"),
-        prefetch_factor=config.dataloader_prefetch_factor,
-    )
-
-    train_eval_dataloader = DataLoader(
-        dataset=train_eval_subset,
-        batch_size=config.batch_size,
-        shuffle=False,
-        num_workers=config.num_workers,
-        pin_memory=(device == "cuda"),
-        prefetch_factor=config.dataloader_prefetch_factor,
-    )
 
     logger.info(f"Num train samples: {len(train_dataset)}")
     logger.info(f"Num val samples: {len(val_dataset)}")
@@ -299,8 +282,8 @@ def main(config_path: Path):
 
         best_val_rmse = train(
             train_dataloader=train_dataloader,
-            val_dataloader=val_dataloader,
-            train_eval_dataloader=train_eval_dataloader,
+            train_eval_dataset=train_eval_subset,
+            val_dataset=val_dataset,
             model=model,
             optimizer=opt,
             n_epochs=config.n_epochs,

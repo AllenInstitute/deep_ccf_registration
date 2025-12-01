@@ -1,3 +1,4 @@
+import gc
 from contextlib import nullcontext
 from pathlib import Path
 from typing import ContextManager, Optional
@@ -440,7 +441,8 @@ def viz_sample(
 
 def evaluate_batch(
     model: UNet,
-    val_loader: DataLoader,
+    train_dataloader: DataLoader,
+    val_dataset: Subset,
     device: str,
     ls_template: np.ndarray,
     ccf_annotations: np.ndarray,
@@ -451,6 +453,15 @@ def evaluate_batch(
     autocast_context: ContextManager = nullcontext(),
     predict_tissue_mask: bool = True,
 ):
+    val_loader = DataLoader(
+        dataset=val_dataset,
+        batch_size=train_dataloader.batch_size,
+        shuffle=False,
+        num_workers=train_dataloader.num_workers,
+        pin_memory=train_dataloader.pin_memory,
+        prefetch_factor=train_dataloader.prefetch_factor,
+    )
+
     model.eval()
 
     rmse = MeanSquaredError(squared=False).to(device)
@@ -539,5 +550,8 @@ def evaluate_batch(
         tissue_mask_dice = tissue_mask_dice.compute().item()
     else:
         tissue_mask_dice = None
+
+    del val_loader
+    gc.collect()
 
     return rmse, rmse_tissue_only, tissue_mask_dice

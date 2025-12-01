@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from monai.networks.nets import UNet
+from torch.utils.data import Subset
 from torch.utils.data.distributed import DistributedSampler
 from loguru import logger
 import torch.nn.functional as F
@@ -120,8 +121,8 @@ def _evaluate_loss(
 
 def train(
         train_dataloader,
-        val_dataloader,
-        train_eval_dataloader,
+        val_dataset: Subset,
+        train_eval_dataset: Subset,
         model: UNet,
         optimizer,
         n_epochs: int,
@@ -147,7 +148,7 @@ def train(
     Parameters
     ----------
     train_dataloader: DataLoader for training data
-    val_dataloader: DataLoader for validation data
+    val_dataset: DataLoader for validation data
     train_eval_dataloader: DataLoader for evaluating test set
     model: Neural network model to train
     optimizer: Optimizer for training
@@ -184,8 +185,8 @@ def train(
     lr_decay_iters = len(train_dataloader) * n_epochs
     min_lr = learning_rate / 10 # should be ~= learning_rate/10 per Chinchilla
 
-    train_viz_indices = random.sample(range(len(train_eval_dataloader.dataset)), k=min(n_eval_visualize, len(train_eval_dataloader.dataset)))
-    val_viz_indices = random.sample(range(len(val_dataloader.dataset)), k=min(n_eval_visualize, len(val_dataloader.dataset)))
+    train_viz_indices = random.sample(range(len(train_eval_dataset)), k=min(n_eval_visualize, len(train_eval_dataset)))
+    val_viz_indices = random.sample(range(len(val_dataset)), k=min(n_eval_visualize, len(val_dataset)))
 
     logger.info(f"Fixed train visualization indices: {train_viz_indices}")
     logger.info(f"Fixed val visualization indices: {val_viz_indices}")
@@ -194,8 +195,8 @@ def train(
 
     logger.info(f"Starting training for {n_epochs} epochs")
     logger.info(f"Training samples: {len(train_dataloader.dataset)}")
-    logger.info(f"Validation samples: {len(val_dataloader.dataset)}")
-    logger.info(f"Training eval samples: {len(train_eval_dataloader.dataset)}")
+    logger.info(f"Validation samples: {len(val_dataset)}")
+    logger.info(f"Training eval samples: {len(train_eval_dataset)}")
     logger.info(f"Device: {device}")
 
     total_iterations = len(train_dataloader) * n_epochs
@@ -264,7 +265,8 @@ def train(
             if global_step % eval_interval == 0:
                 with torch.no_grad():
                     train_rmse, train_rmse_tissue_only, train_tissue_mask_dice = evaluate_batch(
-                        val_loader=train_eval_dataloader,
+                        train_dataloader=train_dataloader,
+                        val_dataset=train_eval_dataset,
                         model=model,
                         ccf_annotations=ccf_annotations,
                         ls_template=ls_template,
@@ -276,7 +278,8 @@ def train(
                         viz_indices=train_viz_indices,
                     )
                     val_rmse, val_rmse_tissue_only, val_tissue_mask_dice = evaluate_batch(
-                        val_loader=val_dataloader,
+                        train_dataloader=train_dataloader,
+                        val_dataset=val_dataset,
                         model=model,
                         ccf_annotations=ccf_annotations,
                         ls_template=ls_template,
