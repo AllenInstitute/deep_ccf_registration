@@ -276,6 +276,7 @@ def train(
                         is_train=True,
                         autocast_context=autocast_context,
                         viz_indices=train_viz_indices,
+                        exclude_background_pixels=exclude_background_pixels,
                     )
                     val_rmse, val_rmse_tissue_only, val_tissue_mask_dice = evaluate_batch(
                         train_dataloader=train_dataloader,
@@ -288,7 +289,8 @@ def train(
                         iteration=global_step,
                         is_train=False,
                         autocast_context=autocast_context,
-                        viz_indices=val_viz_indices
+                        viz_indices=val_viz_indices,
+                        exclude_background_pixels=exclude_background_pixels,
                     )
 
                 current_lr = optimizer.param_groups[0]['lr']

@@ -407,7 +407,8 @@ def viz_sample(
     slice_idx: int,
     errors: np.ndarray,
     pred_tissue_mask: Optional[torch.Tensor] = None,
-
+    tissue_mask: Optional[torch.Tensor] = None,
+    exclude_background: bool = False
 ):
     pred_index_space = convert_from_ants_space_tensor(template_parameters=ls_template_parameters,
                                                       physical_pts=pred_coords.permute(
@@ -419,10 +420,17 @@ def viz_sample(
     pred_ccf_annot = get_ccf_annotations(ccf_annotations, pred_index_space,
                                          return_np=False).reshape(
         pred_coords.shape[1:])
-    pred_ccf_annot[~pad_mask] = 0
+    if exclude_background:
+        pred_ccf_annot[~tissue_mask] = 0
+    else:
+        pred_ccf_annot[~pad_mask] = 0
     gt_ccf_annot = get_ccf_annotations(ccf_annotations, gt_index_space, return_np=False).reshape(
         gt_coords.shape[1:])
-    gt_ccf_annot[~pad_mask] = 0
+
+    if exclude_background:
+        gt_ccf_annot[~tissue_mask] = 0
+    else:
+        gt_ccf_annot[~pad_mask] = 0
 
 
     fig = create_diagnostic_image(
@@ -434,7 +442,9 @@ def viz_sample(
         iteration=iteration,
         pred_template_points=pred_coords,
         gt_template_points=gt_coords,
-        gt_mask=pad_mask.cpu().bool().numpy(),
+        pad_mask=pad_mask.cpu().bool().numpy(),
+        exclude_background=exclude_background,
+        tissue_mask=tissue_mask.cpu().bool().numpy(),
         pred_mask=pred_tissue_mask.cpu().bool().numpy() if pred_tissue_mask is not None else None,
     )
     return fig
@@ -452,6 +462,7 @@ def evaluate_batch(
     is_train: bool,
     autocast_context: ContextManager = nullcontext(),
     predict_tissue_mask: bool = True,
+    exclude_background_pixels: bool = False
 ):
     val_loader = DataLoader(
         dataset=val_dataset,
@@ -534,6 +545,8 @@ def evaluate_batch(
                         pred_tissue_mask=pred_tissue_masks[sample_idx] if pred_tissue_masks is not None else None,
                         ls_template_parameters=ls_template_parameters,
                         ccf_annotations=ccf_annotations,
+                        exclude_background=exclude_background_pixels,
+                        tissue_mask=tissue_masks[sample_idx]
                     )
                     subject_id = subject_ids[sample_idx]
                     fig_filename = f"subject_{subject_id}_slice_{slice_indices[sample_idx]}_y_{patch_ys[sample_idx]}_x_{patch_xs[sample_idx]}_step_{iteration}.png"

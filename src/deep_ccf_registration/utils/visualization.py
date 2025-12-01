@@ -14,11 +14,13 @@ def create_diagnostic_image(
         pred_ccf_annotations: np.ndarray,
         gt_ccf_annotations: np.ndarray,
         errors: np.ndarray,
-        gt_mask: np.ndarray,
+        pad_mask: np.ndarray,
         slice_idx: int,
         vmax_percentile: float = 95.0,
         pred_mask: Optional[np.ndarray] = None,
+        tissue_mask: Optional[np.ndarray] = None,
         iteration: Optional[int] = None,
+        exclude_background: bool = False
 ):
     """
     Visualize error heatmap, coordinate predictions, and ccf annotation predictions
@@ -32,8 +34,13 @@ def create_diagnostic_image(
     :param slice_idx: slice index for title
     :param vmax_percentile: percentile for colormap max
     :param iteration: optional iteration number
-    :param gt_mask where to calculate metrics
+    :param pad_mask
+    :param tissue_mask
     """
+    if exclude_background:
+        gt_mask = tissue_mask
+    else:
+        gt_mask = pad_mask
     abs_errors = np.sqrt(errors)
     abs_error_total = abs_errors.sum(axis=0)
     mae = abs_error_total[gt_mask].mean() * 1000
@@ -118,15 +125,15 @@ def create_diagnostic_image(
     if pred_mask is not None:
         ax_seg = fig.add_subplot(gs[3, 3])
 
-        intersection = (pred_mask & gt_mask).sum()
-        dice = (2 * intersection) / (pred_mask.sum() + gt_mask.sum() + 1e-8)
+        intersection = (pred_mask & tissue_mask).sum()
+        dice = (2 * intersection) / (pred_mask.sum() + tissue_mask.sum() + 1e-8)
 
         ax_seg.imshow(input_image, cmap='gray')
 
-        false_positive = pred_mask & ~gt_mask
-        false_negative = ~pred_mask & gt_mask
+        false_positive = pred_mask & ~tissue_mask
+        false_negative = ~pred_mask & tissue_mask
 
-        overlay = np.zeros((*gt_mask.shape, 4))
+        overlay = np.zeros((*tissue_mask.shape, 4))
         overlay[false_positive] = [1, 0, 0, 0.7]
         overlay[false_negative] = [0, 0, 1, 0.7]
 
