@@ -19,9 +19,8 @@ from tqdm import tqdm
 import  torch.nn.functional as F
 
 from deep_ccf_registration.datasets.slice_dataset import SliceDataset
-from deep_ccf_registration.losses.coord_loss import mirror_points
 from deep_ccf_registration.metadata import SliceOrientation
-from deep_ccf_registration.utils.transforms import convert_from_ants_space_tensor
+from deep_ccf_registration.utils.transforms import convert_from_ants_space_tensor, mirror_points
 from deep_ccf_registration.utils.utils import get_ccf_annotations
 from deep_ccf_registration.utils.visualization import create_diagnostic_image
 

@@ -153,7 +153,8 @@ def main(config_path: Path):
         ],
         ccf_annotations_path=ccf_annotations_path,
         return_tissue_mask=config.predict_tissue_mask,
-        tissue_bboxes=tissue_bboxes
+        tissue_bboxes=tissue_bboxes,
+        template_ml_dim_size=ls_template.shape[0]
     )
 
     val_dataset = SliceDataset(
@@ -181,12 +182,13 @@ def main(config_path: Path):
         ],
         ccf_annotations_path=ccf_annotations_path,
         return_tissue_mask=config.predict_tissue_mask,
-        tissue_bboxes=tissue_bboxes
+        tissue_bboxes=tissue_bboxes,
+        template_ml_dim_size=ls_template.shape[0]
     )
 
     if config.debug:
-        train_dataset = Subset(train_dataset, indices=[1000])
-        val_dataset = Subset(val_dataset, indices=[1000])
+        train_dataset = Subset(train_dataset, indices=[300])
+        val_dataset = Subset(val_dataset, indices=[300])
 
     train_eval_subset = Subset(
         train_dataset,

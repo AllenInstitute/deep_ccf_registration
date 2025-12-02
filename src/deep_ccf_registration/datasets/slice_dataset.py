@@ -23,7 +23,7 @@ from deep_ccf_registration.metadata import AcquisitionAxis, SubjectMetadata, Sli
 from deep_ccf_registration.utils.logging_utils import timed, timed_func
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 from deep_ccf_registration.utils.transforms import transform_points_to_template_ants_space, \
-    apply_transforms_to_points
+    apply_transforms_to_points, map_points_to_left_hemisphere
 from deep_ccf_registration.utils.utils import get_ccf_annotations
 
 
@@ -135,6 +135,7 @@ class SliceDataset(Dataset):
                  dataset_meta: list[SubjectMetadata],
                  ls_template_parameters: AntsImageParameters,
                  tissue_bboxes: TissueBoundingBoxes,
+                 template_ml_dim_size: int,
                  ccf_annotations_path: Optional[Path] = None,
                  orientation: Optional[SliceOrientation] = None,
                  registration_downsample_factor: int = 3,
@@ -188,6 +189,7 @@ class SliceDataset(Dataset):
             Otherwise, just returns a mask of 1 for image and 0 for pad
         tissue_bboxes: tissue bounding boxes, obtained via `get_tissue_bounding_box.py`.
             Each subject id maps to a list of bounding boxes ordered by slice index, or null if no tissue is present in slices
+        template_ml_dim_size: template ML shape in index space
         """
         super().__init__()
         self._dataset_meta = dataset_meta
@@ -209,6 +211,7 @@ class SliceDataset(Dataset):
         self._input_image_transforms = input_image_transforms
         self._output_points_transforms = output_points_transforms
         self._mask_transforms = mask_transforms
+        self._template_ml_dim_size = template_ml_dim_size
 
         if normalize_orientation_map is not None:
             for axis, orientation in normalize_orientation_map.items():
@@ -532,6 +535,13 @@ class SliceDataset(Dataset):
         )
 
         output_points = ls_template_points.reshape((height, width, 3))
+
+        if orientation == SliceOrientation.SAGITTAL:
+            output_points = map_points_to_left_hemisphere(
+                template_points=output_points,
+                template_parameters=self._ls_template_parameters,
+                ml_dim_size=self._template_ml_dim_size
+            )
 
         if self._normalize_orientation_map is not None:
             input_image, output_points = self._normalize_orientation(

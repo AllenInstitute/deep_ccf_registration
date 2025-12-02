@@ -10,15 +10,14 @@ import numpy as np
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from monai.networks.nets import UNet
+from torch.nn import MSELoss
 from torch.utils.data import Subset
 from torch.utils.data.distributed import DistributedSampler
 from loguru import logger
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from deep_ccf_registration.inference import RegionAcronymCCFIdsMap, evaluate_batch
-from deep_ccf_registration.losses.coord_loss import HemisphereAgnosticCoordLoss
-from deep_ccf_registration.metadata import SliceOrientation
+from deep_ccf_registration.inference import evaluate_batch
 from deep_ccf_registration.utils.logging_utils import timed
 
 
@@ -86,19 +85,20 @@ def _mask_pad_pixels(tissue_loss_per_pixel: torch.Tensor, input_image_transforms
 def _evaluate_loss(
         model_out: torch.Tensor,
         exclude_background_pixels: bool,
-        coord_loss: HemisphereAgnosticCoordLoss,
+        coord_loss: MSELoss,
         target_template_points: torch.Tensor,
         tissue_masks: torch.Tensor,
         pad_masks: torch.Tensor,
-        orientations: torch.Tensor,
         input_image_transforms: dict[str, Any],
         predict_tissue_mask: bool = True,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+    if predict_tissue_mask:
+        pred = model_out[:, :-1]
+    else:
+        pred = model_out
     coordinate_loss = coord_loss(
-        pred_template_points=model_out[:, :-1] if predict_tissue_mask else model_out,
-        true_template_points=target_template_points,
-        masks=tissue_masks if exclude_background_pixels else pad_masks,
-        orientations=[SliceOrientation(x) for x in orientations],
+        pred[torch.stack([tissue_masks] * 3, dim=1)] if exclude_background_pixels else pred[torch.stack([pad_masks] * 3, dim=1)],
+        target_template_points[torch.stack([tissue_masks] * 3, dim=1)] if exclude_background_pixels else target_template_points[torch.stack([pad_masks] * 3, dim=1)],
     )
 
     loss = coordinate_loss
@@ -175,10 +175,7 @@ def train(
     """
     os.makedirs(model_weights_out_dir, exist_ok=True)
 
-    coord_loss = HemisphereAgnosticCoordLoss(
-        ml_dim_size=ls_template.shape[0],
-        template_parameters=ls_template_parameters
-    )
+    coord_loss = MSELoss()
     best_val_coord_loss = float("inf")
     patience_counter = 0
     global_step = 0
@@ -236,9 +233,8 @@ def train(
                     exclude_background_pixels=exclude_background_pixels,
                     coord_loss=coord_loss,
                     target_template_points=target_template_points,
-                    tissue_masks=tissue_masks,
-                    pad_masks=pad_masks,
-                    orientations=orientations,
+                    tissue_masks=tissue_masks.bool(),
+                    pad_masks=pad_masks.bool(),
                     input_image_transforms=input_image_transforms,
                     predict_tissue_mask=predict_tissue_mask,
                 )
