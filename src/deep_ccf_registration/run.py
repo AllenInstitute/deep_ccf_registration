@@ -1,3 +1,4 @@
+import copy
 import multiprocessing
 import os
 import sys
@@ -192,8 +193,15 @@ def main(config_path: Path):
         train_dataset = Subset(train_dataset, indices=[300])
         val_dataset = Subset(val_dataset, indices=[300])
 
+    # setting to TEST mode so that same patches are evaluated each time
+    train_eval_dataset = copy.deepcopy(train_dataset)
+    if isinstance(train_eval_dataset, Subset):
+        train_eval_dataset.dataset.set_mode(mode=TrainMode.TEST)
+    else:
+        train_eval_dataset.set_mode(mode=TrainMode.TEST)
+
     train_eval_subset = Subset(
-        train_dataset,
+        train_eval_dataset,
         indices=random.sample(range(len(train_dataset)), k=min(len(train_dataset), config.batch_size * config.num_eval_iters))
     )
     val_dataset = Subset(
@@ -265,7 +273,6 @@ def main(config_path: Path):
 
     mlflow.set_experiment(config.mlflow_experiment_name)
     mlflow.enable_system_metrics_logging()
-    mlflow.pytorch.autolog()
 
     # disable seeding so mlflow run name can be unique
     state = random.getstate()

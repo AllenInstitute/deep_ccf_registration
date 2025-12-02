@@ -235,6 +235,11 @@ class SliceDataset(Dataset):
             self._ccf_annotations = np.load(self._ccf_annotations_path, mmap_mode='r')
         return self._ccf_annotations
 
+    def set_mode(self, mode: TrainMode):
+        self._mode = mode
+        if mode == TrainMode.TEST and self._precomputed_patches is None and self._patch_size is not None:
+            self._precomputed_patches = self._build_patch_index()
+
     def _get_patch_positions(
             self,
             bounding_box: TissueBoundingBox

@@ -3,6 +3,8 @@ from typing import Optional
 import numpy as np
 import torch
 from matplotlib import pyplot as plt
+import torch.nn.functional as F
+from torchmetrics import MeanSquaredError, MeanAbsoluteError
 
 from deep_ccf_registration.utils.utils import fetch_complete_colormap, visualize_ccf_annotations
 
@@ -43,9 +45,18 @@ def create_diagnostic_image(
         gt_mask = pad_mask
     abs_errors = np.sqrt(errors)
     abs_error_total = abs_errors.sum(axis=0)
-    mae = abs_error_total[gt_mask].mean() * 1000
 
-    rmse = np.sqrt(errors.sum(axis=0)[gt_mask].mean()) * 1000
+    rmse = MeanSquaredError(squared=False)
+    rmse = (rmse(
+        preds=pred_template_points[torch.stack([torch.from_numpy(gt_mask)] * 3, dim=0)],
+        target=gt_template_points[torch.stack([torch.from_numpy(gt_mask)] * 3, dim=0)]
+    ) * 1000).item()
+
+    mae = MeanAbsoluteError()
+    mae = (mae(
+        preds=pred_template_points[torch.stack([torch.from_numpy(gt_mask)] * 3, dim=0)],
+        target=gt_template_points[torch.stack([torch.from_numpy(gt_mask)] * 3, dim=0)]
+    ) * 1000).item()
 
     pred_template_points = pred_template_points.cpu().numpy()
     gt_template_points = gt_template_points.cpu().numpy()
