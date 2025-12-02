@@ -129,7 +129,7 @@ def evaluate(
     model.eval()
     sample_idx = 0
 
-    for batch_idx, batch in enumerate(tqdm(val_loader, desc="Evaluation")):
+    for batch_idx, batch in enumerate(tqdm(val_loader, desc="Evaluation", smoothing=0)):
         if slice_dataset.patch_size is not None:
             input_images, gt_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, masks = batch
         else:

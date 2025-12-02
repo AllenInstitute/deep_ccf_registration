@@ -197,7 +197,7 @@ def train(
     logger.info(f"Device: {device}")
 
     total_iterations = len(train_dataloader) * n_epochs
-    pbar = tqdm(total=total_iterations, desc="Training")
+    pbar = tqdm(total=total_iterations, desc="Training", smoothing=0)
 
     for epoch in range(1, n_epochs + 1):
         # Set epoch for distributed training
