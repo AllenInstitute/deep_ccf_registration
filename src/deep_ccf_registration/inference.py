@@ -453,7 +453,7 @@ def evaluate_batch(
     train_dataloader: DataLoader,
     val_dataset: Subset,
     device: str,
-    ls_template: np.ndarray,
+    ls_template_ml_dim: int,
     ccf_annotations: np.ndarray,
     ls_template_parameters: AntsImageParameters,
     viz_indices: list[int],
@@ -503,7 +503,7 @@ def evaluate_batch(
         # flip pred along AP axis if closer to GT for sagittal slices only
         pred_flipped = mirror_points(
             points=pred_coords,
-            ml_dim_size=ls_template.shape[0],
+            ml_dim_size=ls_template_ml_dim,
             template_parameters=ls_template_parameters
         )
         flipped_error = (pred_flipped - target_template_points) ** 2

@@ -95,6 +95,8 @@ def main(config_path: Path):
     logger.info(f"Loading light sheet template from: {config.ls_template_path}")
     ls_template = ants.image_read(filename=str(config.ls_template_path))
     ls_template_parameters = AntsImageParameters.from_ants_image(image=ls_template)
+    ls_template_ml_dim = ls_template.shape[0]
+    del ls_template
 
     # Load dataset metadata
     logger.info(f"Loading dataset metadata from: {config.dataset_meta_path}")
@@ -154,7 +156,7 @@ def main(config_path: Path):
         ccf_annotations_path=ccf_annotations_path,
         return_tissue_mask=config.predict_tissue_mask,
         tissue_bboxes=tissue_bboxes,
-        template_ml_dim_size=ls_template.shape[0]
+        template_ml_dim_size=ls_template_ml_dim,
     )
 
     val_dataset = SliceDataset(
@@ -183,7 +185,7 @@ def main(config_path: Path):
         ccf_annotations_path=ccf_annotations_path,
         return_tissue_mask=config.predict_tissue_mask,
         tissue_bboxes=tissue_bboxes,
-        template_ml_dim_size=ls_template.shape[0]
+        template_ml_dim_size=ls_template_ml_dim,
     )
 
     if config.debug:
@@ -299,7 +301,7 @@ def main(config_path: Path):
             autocast_context=autocast_context,
             device=device,
             ccf_annotations=ccf_annotations,
-            ls_template=ls_template,
+            ls_template_ml_dim=ls_template_ml_dim,
             ls_template_parameters=ls_template_parameters,
             exclude_background_pixels=config.exclude_background_pixels,
         )

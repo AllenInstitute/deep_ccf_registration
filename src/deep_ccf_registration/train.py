@@ -128,7 +128,7 @@ def train(
         n_epochs: int,
         model_weights_out_dir: Path,
         ccf_annotations: np.ndarray,
-        ls_template: np.ndarray,
+        ls_template_ml_dim: int,
         ls_template_parameters: AntsImageParameters,
         learning_rate: float = 0.001,
         decay_learning_rate: bool = True,
@@ -163,7 +163,7 @@ def train(
     autocast_context: Context manager for mixed precision training
     device: Device to train on
     ccf_annotations: 25 micron resolution CCF annotation volume
-    ls_template: light sheet template volume
+    ls_template_ml_dim: light sheet template ML shape in index space
     ls_template_parameters: ls template AntsImageParameters
     exclude_background_pixels: whether to use a tissue mask to exclude background pixels in loss/evaluation.
         Otherwise, just excludes pad pixels
@@ -265,7 +265,7 @@ def train(
                         val_dataset=train_eval_dataset,
                         model=model,
                         ccf_annotations=ccf_annotations,
-                        ls_template=ls_template,
+                        ls_template_ml_dim=ls_template_ml_dim,
                         ls_template_parameters=ls_template_parameters,
                         device=device,
                         iteration=global_step,
@@ -279,7 +279,7 @@ def train(
                         val_dataset=val_dataset,
                         model=model,
                         ccf_annotations=ccf_annotations,
-                        ls_template=ls_template,
+                        ls_template_ml_dim=ls_template_ml_dim,
                         ls_template_parameters=ls_template_parameters,
                         device=device,
                         iteration=global_step,
