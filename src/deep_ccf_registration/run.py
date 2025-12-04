@@ -311,6 +311,7 @@ def main(config_path: Path):
             ls_template_ml_dim=ls_template_ml_dim,
             ls_template_parameters=ls_template_parameters,
             exclude_background_pixels=config.exclude_background_pixels,
+            predict_tissue_mask=config.predict_tissue_mask,
         )
 
     logger.info("=" * 60)

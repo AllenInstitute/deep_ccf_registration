@@ -505,11 +505,12 @@ def evaluate_batch(
             target=target_template_points,
             mask=pad_masks,
         )
-        rmse_tissue_only.update(
-            preds=pred_coords,
-            target=target_template_points,
-            mask=tissue_masks,
-        )
+        if predict_tissue_mask:
+            rmse_tissue_only.update(
+                preds=pred_coords,
+                target=target_template_points,
+                mask=tissue_masks,
+            )
         if predict_tissue_mask:
             pred_tissue_masks = (F.sigmoid(segmentation_logits) > 0.5).to(torch.uint8)
             tissue_mask_dice.update(preds=pred_tissue_masks, target=tissue_masks)
@@ -543,7 +544,11 @@ def evaluate_batch(
 
     # *1000 to convert to micron
     rmse = rmse.compute().item() * 1000
-    rmse_tissue_only = rmse_tissue_only.compute().item() * 1000
+
+    if predict_tissue_mask:
+        rmse_tissue_only = rmse_tissue_only.compute().item() * 1000
+    else:
+        rmse_tissue_only = None
 
     if predict_tissue_mask:
         tissue_mask_dice = tissue_mask_dice.compute().item()

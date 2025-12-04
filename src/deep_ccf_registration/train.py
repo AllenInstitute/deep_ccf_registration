@@ -273,6 +273,7 @@ def train(
                         autocast_context=autocast_context,
                         viz_indices=train_viz_indices,
                         exclude_background_pixels=exclude_background_pixels,
+                        predict_tissue_mask=predict_tissue_mask,
                     )
                     val_rmse, val_rmse_tissue_only, val_tissue_mask_dice = evaluate_batch(
                         train_dataloader=train_dataloader,
@@ -287,30 +288,36 @@ def train(
                         autocast_context=autocast_context,
                         viz_indices=val_viz_indices,
                         exclude_background_pixels=exclude_background_pixels,
+                        predict_tissue_mask=predict_tissue_mask,
                     )
 
                 current_lr = optimizer.param_groups[0]['lr']
 
                 mlflow.log_metrics(metrics={
                     "eval/train_rmse": train_rmse,
-                    "eval/train_rmse_tissue_only": train_rmse_tissue_only,
                     "eval/val_rmse": val_rmse,
-                    "eval/val_rmse_tissue_only": val_rmse_tissue_only,
-                    "eval/train_tissue_mask_dice": train_tissue_mask_dice,
-                    "eval/val_tissue_mask_dice": val_tissue_mask_dice
+
                 },
                     step=global_step
                 )
 
                 if predict_tissue_mask:
+                    mlflow.log_metrics(metrics={
+                        "eval/val_rmse_tissue_only": val_rmse_tissue_only,
+                        "eval/train_tissue_mask_dice": train_tissue_mask_dice,
+                        "eval/val_tissue_mask_dice": val_tissue_mask_dice,
+                        "eval/train_rmse_tissue_only": train_rmse_tissue_only,
+                    }, step=global_step)
+
+                if predict_tissue_mask:
                     mask_log = f"Train mask dice: {train_tissue_mask_dice} | "
                     f"Val mask dice: {val_tissue_mask_dice} | "
+                    f"Train RMSE tissue only: {train_rmse_tissue_only:.6f} microns | Val RMSE tissue only: {val_rmse_tissue_only:.6f} microns | "
                 else:
                     mask_log = ""
                 logger.info(
                     f"Epoch {epoch} | Step {global_step} | "
                     f"Train RMSE: {train_rmse:.6f} microns | Val RMSE: {val_rmse:.6f} microns | "
-                    f"Train RMSE tissue only: {train_rmse_tissue_only:.6f} microns | Val RMSE tissue only: {val_rmse_tissue_only:.6f} microns | "
                     f"{mask_log} | "
                     f"LR: {current_lr:.6e}"
                 )
