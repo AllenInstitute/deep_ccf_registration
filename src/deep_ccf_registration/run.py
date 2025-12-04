@@ -190,8 +190,8 @@ def main(config_path: Path):
     )
 
     if config.debug:
-        train_dataset = Subset(train_dataset, indices=[300])
-        val_dataset = Subset(val_dataset, indices=[300])
+        train_dataset = Subset(train_dataset, indices=[1000])
+        val_dataset = Subset(val_dataset, indices=[1000])
 
     # setting to TEST mode so that same patches are evaluated each time
     train_eval_dataset = copy.deepcopy(train_dataset)
