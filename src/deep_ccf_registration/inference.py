@@ -13,13 +13,13 @@ from matplotlib import pyplot as plt
 from pydantic import BaseModel, Field
 from monai.networks.nets import UNet
 from torch.utils.data import DataLoader, Subset
-from torchmetrics import MeanSquaredError
 from torchmetrics.segmentation import DiceScore
 from tqdm import tqdm
 import  torch.nn.functional as F
 
 from deep_ccf_registration.datasets.slice_dataset import SliceDataset
 from deep_ccf_registration.metadata import SliceOrientation
+from deep_ccf_registration.metrics.point_wise_rmse import PointwiseRMSE
 from deep_ccf_registration.utils.transforms import convert_from_ants_space_tensor, mirror_points
 from deep_ccf_registration.utils.utils import get_ccf_annotations
 from deep_ccf_registration.utils.visualization import create_diagnostic_image
@@ -474,8 +474,8 @@ def evaluate_batch(
 
     model.eval()
 
-    rmse = MeanSquaredError(squared=False).to(device)
-    rmse_tissue_only = MeanSquaredError(squared=False).to(device)
+    rmse = PointwiseRMSE().to(device)
+    rmse_tissue_only = PointwiseRMSE().to(device)
     tissue_mask_dice = DiceScore(
         num_classes=1,
         include_background=False,
@@ -500,28 +500,15 @@ def evaluate_batch(
 
         error = (pred_coords - target_template_points) ** 2
 
-        # flip pred along AP axis if closer to GT for sagittal slices only
-        pred_flipped = mirror_points(
-            points=pred_coords,
-            ml_dim_size=ls_template_ml_dim,
-            template_parameters=ls_template_parameters
-        )
-        flipped_error = (pred_flipped - target_template_points) ** 2
-
-        sagittal_mask = torch.tensor(
-            [o == SliceOrientation.SAGITTAL.value for o in orientations],
-            device=device, dtype=torch.bool
-        )
-        use_flipped = (flipped_error < error) & sagittal_mask.view(-1, 1, 1, 1)
-        pred_coords = torch.where(use_flipped, pred_flipped, pred_coords)
-
         rmse.update(
-            preds=pred_coords[torch.stack([pad_masks]*3, dim=1)],
-            target=target_template_points[torch.stack([pad_masks]*3, dim=1)]
+            preds=pred_coords,
+            target=target_template_points,
+            mask=pad_masks,
         )
         rmse_tissue_only.update(
-            preds=pred_coords[torch.stack([tissue_masks]*3, dim=1)],
-            target=target_template_points[torch.stack([tissue_masks]*3, dim=1)]
+            preds=pred_coords,
+            target=target_template_points,
+            mask=tissue_masks,
         )
         if predict_tissue_mask:
             pred_tissue_masks = (F.sigmoid(segmentation_logits) > 0.5).to(torch.uint8)
