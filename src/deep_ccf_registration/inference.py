@@ -500,21 +500,6 @@ def evaluate_batch(
 
         error = (pred_coords - target_template_points) ** 2
 
-        # flip pred along AP axis if closer to GT for sagittal slices only
-        pred_flipped = mirror_points(
-            points=pred_coords,
-            ml_dim_size=ls_template_ml_dim,
-            template_parameters=ls_template_parameters
-        )
-        flipped_error = (pred_flipped - target_template_points) ** 2
-
-        sagittal_mask = torch.tensor(
-            [o == SliceOrientation.SAGITTAL.value for o in orientations],
-            device=device, dtype=torch.bool
-        )
-        use_flipped = (flipped_error < error) & sagittal_mask.view(-1, 1, 1, 1)
-        pred_coords = torch.where(use_flipped, pred_flipped, pred_coords)
-
         rmse.update(
             preds=pred_coords,
             target=target_template_points,
