@@ -81,3 +81,6 @@ class TrainConfig(BaseModel):
 
     # sample this many subjects to load into memory at a time
     num_samples_per_rotation: int = 15
+
+    # max number of train iterations per subject batch
+    max_num_subject_batch_iterations: int = 200

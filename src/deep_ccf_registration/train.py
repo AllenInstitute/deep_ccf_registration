@@ -133,7 +133,7 @@ def train(
         ls_template_parameters: AntsImageParameters,
         learning_rate: float = 0.001,
         train_dataloader_prefetch_factor: Optional[int] = None,
-        num_subject_batch_iterations: int = 10000,
+        max_num_subject_batch_iterations: int = 200,
         decay_learning_rate: bool = True,
         warmup_iters: int = 1000,
         eval_interval: int = 500,
@@ -170,6 +170,7 @@ def train(
     exclude_background_pixels: whether to use a tissue mask to exclude background pixels in loss/evaluation.
         Otherwise, just excludes pad pixels
     n_subjects_per_rotation: how many subjects to iterate over at a time.
+    max_num_subject_batch_iterations: max number of iterations per subject batch
 
     Returns
     -------
@@ -235,7 +236,7 @@ def train(
             train_mask_losses = []
 
             for batch_idx, batch in enumerate(train_dataloader):
-                if batch_idx == num_subject_batch_iterations:
+                if batch_idx == max_num_subject_batch_iterations:
                     break
                 input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks, pad_masks, subject_ids = batch
                 input_images, target_template_points, tissue_masks, pad_masks = input_images.to(device), target_template_points.to(device), tissue_masks.to(device), pad_masks.to(device)
