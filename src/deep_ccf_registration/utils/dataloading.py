@@ -3,6 +3,7 @@ import threading
 from typing import Iterator, Tuple, Optional, Any
 
 import numpy as np
+from loguru import logger
 
 from deep_ccf_registration.datasets.slice_dataset import SliceDataset
 
@@ -38,7 +39,9 @@ class BatchPrefetcher:
         """Producer function that loads batches in the background."""
         try:
             for subject_idx_batch in self.subject_idx_batches:
+                logger.debug(f'Loading subjects {subject_idx_batch}')
                 batch_volumes, batch_warps = self.dataset.get_arrays(idxs=subject_idx_batch)
+                logger.debug(f'Adding subjects {subject_idx_batch} to queue')
                 self.queue.put((subject_idx_batch, batch_volumes, batch_warps))
             # Put sentinel value to signal completion
             self.queue.put(None)

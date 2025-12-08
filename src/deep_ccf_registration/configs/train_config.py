@@ -19,6 +19,8 @@ class ModelConfig(BaseModel):
     unet_pos_encoding_channels: int = 16
 
 class TrainConfig(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
     dataset_meta_path: Path
     train_val_split: float = Field(0.8, ge=0.0, le=1.0)
     ls_template_path: Path

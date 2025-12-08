@@ -793,13 +793,17 @@ class SliceDataset(Dataset):
         warp_arrs = []
         for idx in idxs:
             if self._volume_arrays[idx] is None:
+                logger.debug(f'Loading volume {idx}')
                 volume = self._volumes[idx][:].read().result()
             else:
+                logger.debug(f'Loading volume {idx} from memory')
                 volume = self._volume_arrays[idx]
 
             if self._warp_arrays[idx] is None:
+                logger.debug(f'Loading warp {idx}')
                 warp = self._warps[idx][:].read().result()
             else:
+                logger.debug(f'Loading warp {idx} from memory')
                 warp = self._warp_arrays[idx]
             volume_arrs.append(volume)
             warp_arrs.append(warp)
