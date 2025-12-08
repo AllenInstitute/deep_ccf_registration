@@ -23,6 +23,7 @@ from deep_ccf_registration.metrics.point_wise_rmse import PointwiseRMSE
 from deep_ccf_registration.utils.transforms import convert_from_ants_space_tensor, mirror_points
 from deep_ccf_registration.utils.utils import get_ccf_annotations
 from deep_ccf_registration.utils.visualization import create_diagnostic_image
+from deep_ccf_registration.utils.dataloading import BatchPrefetcher
 
 
 class RegionAcronymCCFIdsMap(BaseModel):
@@ -482,9 +483,10 @@ def evaluate_batch(
     sample_count = 0
     cur_iteration = 0
 
-    for subject_idx_batch in tqdm(subject_idx_batches, desc='Evaluation'):
-        batch_volumes, batch_warps = val_dataset.get_arrays(idxs=subject_idx_batch)
+    prefetcher = BatchPrefetcher(dataset=val_dataset, subject_idx_batches=subject_idx_batches)
+    prefetcher.start()
 
+    for subject_idx_batch, batch_volumes, batch_warps in tqdm(prefetcher, desc='Evaluation', total=len(subject_idx_batches)):
         val_dataset.reset_data(
             subject_idxs=subject_idx_batch,
             volumes=batch_volumes,

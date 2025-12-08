@@ -3,7 +3,6 @@ from typing import ContextManager, Any, Optional
 from contextlib import nullcontext
 import os
 import math
-import random
 
 import mlflow
 import numpy as np
@@ -17,11 +16,10 @@ from loguru import logger
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from deep_ccf_registration.configs.train_config import TrainConfig
 from deep_ccf_registration.datasets.slice_dataset import SliceDataset
 from deep_ccf_registration.inference import evaluate_batch
-from deep_ccf_registration.metadata import SubjectMetadata
 from deep_ccf_registration.utils.logging_utils import timed
+from deep_ccf_registration.utils.dataloading import BatchPrefetcher
 
 
 # https://github.com/karpathy/nanoGPT/blob/master/train.py
@@ -145,7 +143,7 @@ def train(
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         exclude_background_pixels: bool = True,
         predict_tissue_mask: bool = True,
-        n_subjects_per_batch: int = 15,
+        n_subjects_per_rotation: int = 15,
         is_debug: bool = False
 ):
     """
@@ -153,8 +151,8 @@ def train(
 
     Parameters
     ----------
-    train_dataloader: DataLoader for training data
-    val_dataset: DataLoader for validation data
+    train_dataset: training data
+    val_dataset: validation data
     model: Neural network model to train
     optimizer: Optimizer for training
     n_epochs: Number of epochs to train
@@ -171,7 +169,7 @@ def train(
     ls_template_parameters: ls template AntsImageParameters
     exclude_background_pixels: whether to use a tissue mask to exclude background pixels in loss/evaluation.
         Otherwise, just excludes pad pixels
-    n_eval_visualize: how many samples to visualize during evaluation
+    n_subjects_per_rotation: how many subjects to iterate over at a time.
 
     Returns
     -------
@@ -199,12 +197,13 @@ def train(
 
     pbar = tqdm(total=total_iterations, desc="Training", smoothing=0)
 
-    subject_idx_batches = train_dataset.get_subject_batches(n_subjects_per_batch=n_subjects_per_batch)
+    subject_idx_batches = train_dataset.get_subject_batches(n_subjects_per_batch=n_subjects_per_rotation)
 
     for epoch in range(1, n_epochs + 1):
-        for subject_idx_batch in subject_idx_batches:
-            batch_volumes, batch_warps = train_dataset.get_arrays(idxs=subject_idx_batch)
+        prefetcher = BatchPrefetcher(dataset=train_dataset, subject_idx_batches=subject_idx_batches)
+        prefetcher.start()
 
+        for subject_idx_batch, batch_volumes, batch_warps in prefetcher:
             train_dataset.reset_data(
                 subject_idxs=subject_idx_batch,
                 volumes=batch_volumes,
@@ -300,7 +299,7 @@ def train(
                             autocast_context=autocast_context,
                             exclude_background_pixels=exclude_background_pixels,
                             predict_tissue_mask=predict_tissue_mask,
-                            n_subjects_per_batch=n_subjects_per_batch,
+                            n_subjects_per_batch=n_subjects_per_rotation,
                             is_debug=is_debug,
                         )
                         val_rmse, val_rmse_tissue_only, val_tissue_mask_dice = evaluate_batch(
@@ -315,7 +314,7 @@ def train(
                             autocast_context=autocast_context,
                             exclude_background_pixels=exclude_background_pixels,
                             predict_tissue_mask=predict_tissue_mask,
-                            n_subjects_per_batch=n_subjects_per_batch,
+                            n_subjects_per_batch=n_subjects_per_rotation,
                             is_debug=is_debug,
                         )
 

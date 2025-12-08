@@ -79,4 +79,5 @@ class TrainConfig(BaseModel):
 
     model: ModelConfig
 
-    num_samples_per_epoch: int = 30
+    # sample this many subjects to load into memory at a time
+    num_samples_per_rotation: int = 15
