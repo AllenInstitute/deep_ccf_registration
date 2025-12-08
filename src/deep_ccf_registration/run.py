@@ -284,6 +284,8 @@ def main(config_path: Path):
             num_train_dataloader_workers=config.num_workers,
             train_dataloader_prefetch_factor=config.dataloader_prefetch_factor,
             is_debug=config.debug,
+            max_num_subject_batch_iterations=config.max_num_subject_batch_iterations,
+            n_subjects_per_rotation=config.num_subjects_per_rotation,
         )
 
     logger.info("=" * 60)
