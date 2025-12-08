@@ -100,8 +100,6 @@ def apply_transforms_to_points(
     affine_path: Path,
     warp: tensorstore.TensorStore | np.ndarray,
     template_parameters: AntsImageParameters,
-    warp_interpolation_padding: int = 5,
-    crop_warp_to_bounding_box: bool = True
 ) -> np.ndarray:
     """
     Apply affine and non-linear transformations to points in input space.
@@ -119,10 +117,6 @@ def apply_transforms_to_points(
         Displacement field for non-linear transformation.
     template_parameters : AntsImageParameters
         Template image parameters.
-    warp_interpolation_padding : int, default=5
-        Padding for warp interpolation.
-    crop_warp_to_bounding_box : bool, default=True
-        Whether to crop warp to bounding box of transformed points.
 
     Returns
     -------
@@ -144,17 +138,6 @@ def apply_transforms_to_points(
         physical_pts=affine_transformed_points
     )
 
-    with timed():
-        if crop_warp_to_bounding_box:
-            warp = get_cropped_region_from_array(
-                array=warp,
-                points=affine_transformed_voxels,
-                padding=warp_interpolation_padding
-            )
-        else:
-            if isinstance(warp, TensorStore):
-                warp = _read_tensorstore_region(warp, slice(None), slice(None), slice(None))
-
     displacements = interpolate(
         array=warp,
         grid=affine_transformed_voxels,
@@ -169,73 +152,6 @@ def apply_transforms_to_points(
 
     return transformed_points
 
-
-def get_cropped_region_from_array(
-    array: tensorstore.TensorStore | np.ndarray,
-    points: np.ndarray,
-    padding: int = 5
-) -> np.ndarray:
-    """
-    Crop array to region bounded by min/max coordinates in points. This avoids loading the entire
-    array.
-
-    It also modifies points in-place to set offset
-    to 0 so that it can index into the cropped array.
-
-    Parameters
-    ----------
-    array : tensorstore.TensorStore or np.ndarray
-        Full displacement field.
-    points : np.ndarray
-        Voxels after applying inverse affine to input points. Modified in-place.
-    padding : int, default=5
-        Padding around the min/max coords to crop for interpolation.
-
-    Returns
-    -------
-    np.ndarray
-        Cropped displacement field.
-
-    Raises
-    ------
-    ValueError
-        If points are completely outside array bounds.
-    """
-    array_shape = np.array(array.shape[:-1])
-
-    min_coords = np.floor(points.min(axis=0)).astype(
-        int) - padding
-    max_coords = np.ceil(points.max(axis=0)).astype(
-        int) + padding
-
-    orig_min, orig_max = min_coords.copy(), max_coords.copy()
-
-    # Clamp to warp dimensions
-    min_coords = np.maximum(min_coords, 0)
-    max_coords = np.minimum(max_coords, array_shape)
-
-    if np.any(max_coords <= min_coords):
-        raise ValueError(
-            f"Points are completely outside array.\n"
-            f"Original bbox: {orig_min} to {orig_max}\n"
-            f"After clamping: {min_coords} to {max_coords}\n"
-            f"Array shape: {array_shape}\n"
-        )
-
-    # Crop the array
-    if isinstance(array, tensorstore.TensorStore):
-        cropped_array = _read_tensorstore_region(array, min_coords, max_coords)
-    else:
-        cropped_array = array[
-                       min_coords[0]:max_coords[0],
-                       min_coords[1]:max_coords[1],
-                       min_coords[2]:max_coords[2]
-                       ]
-
-    # Adjust voxel coordinates relative to cropped region
-    points -= min_coords
-
-    return cropped_array
 
 def convert_from_ants_space_tensor(template_parameters: AntsImageParameters, physical_pts: torch.Tensor):
     """

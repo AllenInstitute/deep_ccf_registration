@@ -15,19 +15,17 @@ from aind_smartspim_transform_utils.utils.utils import AcquisitionDirection, \
     convert_from_ants_space
 from loguru import logger
 from pydantic import BaseModel
-from retry import retry
 from skimage.exposure import rescale_intensity
 from torch.utils.data import Dataset
 
 from deep_ccf_registration.metadata import AcquisitionAxis, SubjectMetadata, SliceOrientation
-from deep_ccf_registration.utils.logging_utils import timed, timed_func
+from deep_ccf_registration.utils.logging_utils import timed_func
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 from deep_ccf_registration.utils.transforms import transform_points_to_template_ants_space, \
     apply_transforms_to_points, map_points_to_left_hemisphere
 from deep_ccf_registration.utils.utils import get_ccf_annotations
 
 
-@retry(tries=3, delay=1, backoff=2)
 def _read_slice_patch(slice_2d_bbox: tensorstore.TensorStore, patch_y: int, ph: int, patch_x: int, pw: int) -> np.ndarray:
     """Read a slice patch from tensorstore with retry logic for transient failures."""
     return slice_2d_bbox[patch_y:patch_y + ph, patch_x:patch_x + pw].read().result()
@@ -204,6 +202,8 @@ class SliceDataset(Dataset):
         self._registration_downsample_factor = registration_downsample_factor
         self._warps = self._load_warps(tensorstore_aws_credentials_method=tensorstore_aws_credentials_method)
         self._volumes = self._load_volumes(tensorstore_aws_credentials_method=tensorstore_aws_credentials_method)
+        self._volume_arrays: list[Optional[np.ndarray]] = [None] * len(self._volumes)
+        self._warp_arrays: list[Optional[np.ndarray]] = [None] * len(self._warps)
         self._crop_warp_to_bounding_box = crop_warp_to_bounding_box
         self._patch_size = patch_size
         self._mode = mode
@@ -234,6 +234,10 @@ class SliceDataset(Dataset):
         if self._ccf_annotations is None:
             self._ccf_annotations = np.load(self._ccf_annotations_path, mmap_mode='r')
         return self._ccf_annotations
+
+    @property
+    def subject_metadata(self) -> list[SubjectMetadata]:
+        return self._dataset_meta
 
     def set_mode(self, mode: TrainMode):
         self._mode = mode
@@ -498,18 +502,17 @@ class SliceDataset(Dataset):
         slice_axis = experiment_meta.get_slice_axis(orientation=orientation)
 
         # Get cached volume
-        volume = self._volumes[dataset_idx]
+        volume = self._volume_arrays[dataset_idx]
 
         volume_slice = [0, 0, slice(None), slice(None), slice(None)]
         volume_slice[slice_axis.dimension + 2] = slice_idx  # + 2 since first 2 dims unused
 
-        with timed():
-                input_image, patch_y, patch_x, patch_height, patch_width = self._extract_slice_image(
-                    slice_2d=volume[tuple(volume_slice)],
-                    patch_x=patch_x,
-                    patch_y=patch_y,
-                    tissue_bbox=self._tissue_bboxes[experiment_meta.subject_id][slice_idx]
-                )
+        input_image, patch_y, patch_x, patch_height, patch_width = self._extract_slice_image(
+            slice_2d=volume[tuple(volume_slice)],
+            patch_x=patch_x,
+            patch_y=patch_y,
+            tissue_bbox=self._tissue_bboxes[experiment_meta.subject_id][slice_idx]
+        )
 
         height, width = patch_height, patch_width
 
@@ -535,8 +538,7 @@ class SliceDataset(Dataset):
             points=points,
             template_parameters=self._ls_template_parameters,
             affine_path=experiment_meta.ls_to_template_affine_matrix_path,
-            warp=self._warps[dataset_idx],
-            crop_warp_to_bounding_box=self._crop_warp_to_bounding_box
+            warp=self._warp_arrays[dataset_idx],
         )
 
         output_points = ls_template_points.reshape((height, width, 3))
@@ -637,7 +639,7 @@ class SliceDataset(Dataset):
 
     def _extract_slice_image(
             self,
-            slice_2d: tensorstore.TensorStore,
+            slice_2d: np.ndarray,
             tissue_bbox: TissueBoundingBox,
             patch_x: Optional[int] = None,
             patch_y: Optional[int] = None,
@@ -650,7 +652,7 @@ class SliceDataset(Dataset):
 
         Parameters
         ----------
-        slice_2d : tensorstore.TensorStore
+        slice_2d : np.ndarray
             2D slice to extract patch from.
         tissue_bbox : TissueBoundingBox
             Bounding box defining the region to extract from.
@@ -663,12 +665,6 @@ class SliceDataset(Dataset):
         -------
         tuple of patch, start_y, start_x
         """
-        # Create view restricted to bounding box (coordinates still absolute)
-        slice_2d_bbox = slice_2d[
-                        tissue_bbox.y:tissue_bbox.y + tissue_bbox.height,
-                        tissue_bbox.x:tissue_bbox.x + tissue_bbox.width
-                        ]
-
         h, w = tissue_bbox.height, tissue_bbox.width
 
         if self._patch_size is None:
@@ -687,7 +683,7 @@ class SliceDataset(Dataset):
                 patch_y = random.randint(tissue_bbox.y, max(tissue_bbox.y, tissue_bbox.y + h - ph))
                 patch_x = random.randint(tissue_bbox.x, max(tissue_bbox.x, tissue_bbox.x + w - pw))
 
-        patch = _read_slice_patch(slice_2d_bbox=slice_2d_bbox, patch_y=patch_y, ph=ph, patch_x=patch_x, pw=pw)
+        patch = slice_2d[patch_y:patch_y + ph, patch_x:patch_x + pw]
 
         return patch, patch_y, patch_x, ph, pw
 
@@ -761,6 +757,74 @@ class SliceDataset(Dataset):
 
         tissue_mask = (ccf_annotations != 0).astype('uint8')
         return tissue_mask
+
+    def get_subject_sample_idxs(self, subject_idxs: list[int]) -> list[int]:
+        """
+        Get all sample indices belonging to a list of subjects.
+
+        Parameters
+        ----------
+        subject_idxs : list[int]
+            List of subject indexes to get sample for.
+
+        Returns
+        -------
+        list[int]
+            List of global dataset indices belonging to the specified subjects.
+        """
+        all_indices = []
+        current_global_idx = 0
+
+        for orientation in self._orientation:
+            # Get number of slices per subject for this orientation
+            num_slices_per_subject = self._get_num_slices_in_axis_per_subject(orientation=orientation)
+
+            for subject_idx in range(len(self._dataset_meta)):
+                num_slices = num_slices_per_subject[subject_idx]
+                if subject_idx in subject_idxs:
+                    # Add all indices for this subject in this orientation
+                    all_indices.extend(range(current_global_idx, current_global_idx + num_slices))
+                current_global_idx += num_slices
+
+        return all_indices
+
+    def get_arrays(self, idxs: list[int]) -> tuple[list[np.ndarray], list[np.ndarray]]:
+        volume_arrs = []
+        warp_arrs = []
+        for idx in idxs:
+            if self._volume_arrays[idx] is None:
+                volume = self._volumes[idx][:].read().result()
+            else:
+                volume = self._volume_arrays[idx]
+
+            if self._warp_arrays[idx] is None:
+                warp = self._warps[idx][:].read().result()
+            else:
+                warp = self._warp_arrays[idx]
+            volume_arrs.append(volume)
+            warp_arrs.append(warp)
+        return volume_arrs, warp_arrs
+
+    def reset_data(self, subject_idxs: list[int], volumes: list[np.ndarray], warps: list[np.ndarray]):
+        for i in range(len(self._volume_arrays)):
+            if self._volume_arrays[i] is not None:
+                self._volume_arrays[i] = None
+        for i in range(len(self._warp_arrays)):
+            if self._warp_arrays[i] is not None:
+                self._warp_arrays[i] = None
+
+        for i, idx in enumerate(subject_idxs):
+            self._volume_arrays[idx] = volumes[i]
+            self._warp_arrays[idx] = warps[i]
+
+    def get_subject_batches(self, n_subjects_per_batch: int) -> list[list[int]]:
+        subjects = self.subject_metadata
+        subject_idxs = np.arange(len(subjects))
+        np.random.shuffle(subject_idxs)
+        subject_idxs = subject_idxs.tolist()
+        subject_idx_batches = [subject_idxs[i:i + n_subjects_per_batch] for i in
+                               range(0, len(subject_idxs), n_subjects_per_batch)]
+        return subject_idx_batches
 
 def _calculate_non_pad_mask(shape: tuple[int, int], pad_transform: dict[str, Any]):
     mask = np.zeros(shape, dtype="uint8")

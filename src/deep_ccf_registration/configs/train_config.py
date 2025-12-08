@@ -78,3 +78,5 @@ class TrainConfig(BaseModel):
     use_mlflow: bool = True
 
     model: ModelConfig
+
+    num_samples_per_epoch: int = 30

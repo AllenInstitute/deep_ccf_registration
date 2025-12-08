@@ -11,13 +11,16 @@ import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from monai.networks.nets import UNet
 from torch.nn import MSELoss
-from torch.utils.data import Subset
+from torch.utils.data import Subset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from loguru import logger
 import torch.nn.functional as F
 from tqdm import tqdm
 
+from deep_ccf_registration.configs.train_config import TrainConfig
+from deep_ccf_registration.datasets.slice_dataset import SliceDataset
 from deep_ccf_registration.inference import evaluate_batch
+from deep_ccf_registration.metadata import SubjectMetadata
 from deep_ccf_registration.utils.logging_utils import timed
 
 
@@ -120,17 +123,19 @@ def _evaluate_loss(
     return coordinate_loss, tissue_loss, loss
 
 def train(
-        train_dataloader,
-        val_dataset: Subset,
-        train_eval_dataset: Subset,
+        train_dataset: SliceDataset,
+        val_dataset: SliceDataset,
         model: UNet,
         optimizer,
         n_epochs: int,
+        batch_size: int,
+        num_train_dataloader_workers: int,
         model_weights_out_dir: Path,
         ccf_annotations: np.ndarray,
-        ls_template_ml_dim: int,
         ls_template_parameters: AntsImageParameters,
         learning_rate: float = 0.001,
+        train_dataloader_prefetch_factor: Optional[int] = None,
+        num_subject_batch_iterations: int = 10000,
         decay_learning_rate: bool = True,
         warmup_iters: int = 1000,
         eval_interval: int = 500,
@@ -139,8 +144,9 @@ def train(
         autocast_context: ContextManager = nullcontext(),
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         exclude_background_pixels: bool = True,
-        n_eval_visualize: int = 10,
-        predict_tissue_mask: bool = True
+        predict_tissue_mask: bool = True,
+        n_subjects_per_batch: int = 15,
+        is_debug: bool = False
 ):
     """
     Train slice registration model
@@ -149,7 +155,6 @@ def train(
     ----------
     train_dataloader: DataLoader for training data
     val_dataset: DataLoader for validation data
-    train_eval_dataloader: DataLoader for evaluating test set
     model: Neural network model to train
     optimizer: Optimizer for training
     n_epochs: Number of epochs to train
@@ -163,7 +168,6 @@ def train(
     autocast_context: Context manager for mixed precision training
     device: Device to train on
     ccf_annotations: 25 micron resolution CCF annotation volume
-    ls_template_ml_dim: light sheet template ML shape in index space
     ls_template_parameters: ls template AntsImageParameters
     exclude_background_pixels: whether to use a tissue mask to exclude background pixels in loss/evaluation.
         Otherwise, just excludes pad pixels
@@ -179,198 +183,222 @@ def train(
     best_val_coord_loss = float("inf")
     patience_counter = 0
     global_step = 0
-    lr_decay_iters = len(train_dataloader) * n_epochs
+    if is_debug:
+        total_iterations = n_epochs
+    else:
+        total_iterations = int(len(train_dataset) / batch_size  * n_epochs)
+    lr_decay_iters = total_iterations
     min_lr = learning_rate / 10 # should be ~= learning_rate/10 per Chinchilla
-
-    train_viz_indices = random.sample(range(len(train_eval_dataset)), k=min(n_eval_visualize, len(train_eval_dataset)))
-    val_viz_indices = random.sample(range(len(val_dataset)), k=min(n_eval_visualize, len(val_dataset)))
-
-    logger.info(f"Fixed train visualization indices: {train_viz_indices}")
-    logger.info(f"Fixed val visualization indices: {val_viz_indices}")
 
     model.to(device)
 
     logger.info(f"Starting training for {n_epochs} epochs")
-    logger.info(f"Training samples: {len(train_dataloader.dataset)}")
+    logger.info(f"Training samples: {len(train_dataset)}")
     logger.info(f"Validation samples: {len(val_dataset)}")
-    logger.info(f"Training eval samples: {len(train_eval_dataset)}")
     logger.info(f"Device: {device}")
 
-    total_iterations = len(train_dataloader) * n_epochs
     pbar = tqdm(total=total_iterations, desc="Training", smoothing=0)
 
+    subject_idx_batches = train_dataset.get_subject_batches(n_subjects_per_batch=n_subjects_per_batch)
+
     for epoch in range(1, n_epochs + 1):
-        # Set epoch for distributed training
-        if isinstance(train_dataloader.sampler, DistributedSampler):
-            train_dataloader.sampler.set_epoch(epoch=epoch)
+        for subject_idx_batch in subject_idx_batches:
+            batch_volumes, batch_warps = train_dataset.get_arrays(idxs=subject_idx_batch)
 
-        model.train()
-        train_losses = []
-        train_coord_losses = []
-        train_mask_losses = []
+            train_dataset.reset_data(
+                subject_idxs=subject_idx_batch,
+                volumes=batch_volumes,
+                warps=batch_warps
+            )
+            batch_sample_idxs = train_dataset.get_subject_sample_idxs(subject_idxs=subject_idx_batch)
 
-        for batch_idx, batch in enumerate(train_dataloader):
-            input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks, pad_masks, subject_ids = batch
-            input_images, target_template_points, tissue_masks, pad_masks = input_images.to(device), target_template_points.to(device), tissue_masks.to(device), pad_masks.to(device)
+            if is_debug:
+                batch_dataset = Subset(train_dataset, indices=[1000])
+            else:
+                batch_dataset = Subset(train_dataset, indices=batch_sample_idxs)
 
-            if decay_learning_rate:
-                lr = _get_lr(
-                    iteration=global_step,
-                    warmup_iters=warmup_iters,
-                    learning_rate=learning_rate,
-                    lr_decay_iters=lr_decay_iters,
-                    min_lr=min_lr,
-                )
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = lr
+            train_dataloader = DataLoader(
+                dataset=batch_dataset,
+                batch_size=batch_size,
+                shuffle=True,
+                num_workers=num_train_dataloader_workers,
+                pin_memory=(device == "cuda"),
+                prefetch_factor=train_dataloader_prefetch_factor,
+            )
 
-            optimizer.zero_grad()
-            with autocast_context:
-                with timed():
-                    model_out = model(input_images)
-                coordinate_loss, tissue_loss, loss = _evaluate_loss(
-                    model_out=model_out,
-                    exclude_background_pixels=exclude_background_pixels,
-                    coord_loss=coord_loss,
-                    target_template_points=target_template_points,
-                    tissue_masks=tissue_masks.bool(),
-                    pad_masks=pad_masks.bool(),
-                    input_image_transforms=input_image_transforms,
-                    predict_tissue_mask=predict_tissue_mask,
-                )
+            # Set epoch for distributed training
+            if isinstance(train_dataloader.sampler, DistributedSampler):
+                train_dataloader.sampler.set_epoch(epoch=epoch)
 
-            loss.backward()
-            optimizer.step()
+            model.train()
+            train_losses = []
+            train_coord_losses = []
+            train_mask_losses = []
 
-            train_losses.append(loss.item())
-            train_coord_losses.append(coordinate_loss.item())
-            if tissue_loss is not None:
-                train_mask_losses.append(tissue_loss.item())
+            for batch_idx, batch in enumerate(train_dataloader):
+                if batch_idx == num_subject_batch_iterations:
+                    break
+                input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks, pad_masks, subject_ids = batch
+                input_images, target_template_points, tissue_masks, pad_masks = input_images.to(device), target_template_points.to(device), tissue_masks.to(device), pad_masks.to(device)
 
-            global_step += 1
-
-            mlflow.log_metrics({
-                "train/coord_loss": coordinate_loss.item(),
-                "train/learning_rate": optimizer.param_groups[0]['lr'],
-            }, step=global_step)
-
-            pbar.set_postfix({"loss": f"{loss.item():.6f}", "coord_loss": f"{coordinate_loss.item():.6f}"})
-            pbar.update(1)
-
-            # Periodic evaluation
-            if global_step % eval_interval == 0:
-                with torch.no_grad():
-                    train_rmse, train_rmse_tissue_only, train_tissue_mask_dice = evaluate_batch(
-                        train_dataloader=train_dataloader,
-                        val_dataset=train_eval_dataset,
-                        model=model,
-                        ccf_annotations=ccf_annotations,
-                        ls_template_ml_dim=ls_template_ml_dim,
-                        ls_template_parameters=ls_template_parameters,
-                        device=device,
+                if decay_learning_rate:
+                    lr = _get_lr(
                         iteration=global_step,
-                        is_train=True,
-                        autocast_context=autocast_context,
-                        viz_indices=train_viz_indices,
-                        exclude_background_pixels=exclude_background_pixels,
-                        predict_tissue_mask=predict_tissue_mask,
+                        warmup_iters=warmup_iters,
+                        learning_rate=learning_rate,
+                        lr_decay_iters=lr_decay_iters,
+                        min_lr=min_lr,
                     )
-                    val_rmse, val_rmse_tissue_only, val_tissue_mask_dice = evaluate_batch(
-                        train_dataloader=train_dataloader,
-                        val_dataset=val_dataset,
-                        model=model,
-                        ccf_annotations=ccf_annotations,
-                        ls_template_ml_dim=ls_template_ml_dim,
-                        ls_template_parameters=ls_template_parameters,
-                        device=device,
-                        iteration=global_step,
-                        is_train=False,
-                        autocast_context=autocast_context,
-                        viz_indices=val_viz_indices,
+                    for param_group in optimizer.param_groups:
+                        param_group['lr'] = lr
+
+                optimizer.zero_grad()
+                with autocast_context:
+                    with timed():
+                        model_out = model(input_images)
+                    coordinate_loss, tissue_loss, loss = _evaluate_loss(
+                        model_out=model_out,
                         exclude_background_pixels=exclude_background_pixels,
+                        coord_loss=coord_loss,
+                        target_template_points=target_template_points,
+                        tissue_masks=tissue_masks.bool(),
+                        pad_masks=pad_masks.bool(),
+                        input_image_transforms=input_image_transforms,
                         predict_tissue_mask=predict_tissue_mask,
                     )
 
-                current_lr = optimizer.param_groups[0]['lr']
+                loss.backward()
+                optimizer.step()
 
-                mlflow.log_metrics(metrics={
-                    "eval/train_rmse": train_rmse,
-                    "eval/val_rmse": val_rmse,
+                train_losses.append(loss.item())
+                train_coord_losses.append(coordinate_loss.item())
+                if tissue_loss is not None:
+                    train_mask_losses.append(tissue_loss.item())
 
-                },
-                    step=global_step
-                )
+                global_step += 1
 
-                if predict_tissue_mask:
+                mlflow.log_metrics({
+                    "train/coord_loss": coordinate_loss.item(),
+                    "train/learning_rate": optimizer.param_groups[0]['lr'],
+                }, step=global_step)
+
+                pbar.set_postfix({"loss": f"{loss.item():.6f}", "coord_loss": f"{coordinate_loss.item():.6f}"})
+                pbar.update(1)
+
+                # Periodic evaluation
+                if global_step % eval_interval == 0:
+                    with torch.no_grad():
+                        train_rmse, train_rmse_tissue_only, train_tissue_mask_dice = evaluate_batch(
+                            train_dataloader=train_dataloader,
+                            val_dataset=val_dataset,
+                            model=model,
+                            ccf_annotations=ccf_annotations,
+                            ls_template_parameters=ls_template_parameters,
+                            device=device,
+                            iteration=global_step,
+                            is_train=True,
+                            autocast_context=autocast_context,
+                            exclude_background_pixels=exclude_background_pixels,
+                            predict_tissue_mask=predict_tissue_mask,
+                            n_subjects_per_batch=n_subjects_per_batch,
+                            is_debug=is_debug,
+                        )
+                        val_rmse, val_rmse_tissue_only, val_tissue_mask_dice = evaluate_batch(
+                            train_dataloader=train_dataloader,
+                            val_dataset=val_dataset,
+                            model=model,
+                            ccf_annotations=ccf_annotations,
+                            ls_template_parameters=ls_template_parameters,
+                            device=device,
+                            iteration=global_step,
+                            is_train=False,
+                            autocast_context=autocast_context,
+                            exclude_background_pixels=exclude_background_pixels,
+                            predict_tissue_mask=predict_tissue_mask,
+                            n_subjects_per_batch=n_subjects_per_batch,
+                            is_debug=is_debug,
+                        )
+
+                    current_lr = optimizer.param_groups[0]['lr']
+
                     mlflow.log_metrics(metrics={
-                        "eval/val_rmse_tissue_only": val_rmse_tissue_only,
-                        "eval/train_tissue_mask_dice": train_tissue_mask_dice,
-                        "eval/val_tissue_mask_dice": val_tissue_mask_dice,
-                        "eval/train_rmse_tissue_only": train_rmse_tissue_only,
-                    }, step=global_step)
+                        "eval/train_rmse": train_rmse,
+                        "eval/val_rmse": val_rmse,
 
-                if predict_tissue_mask:
-                    mask_log = f"Train mask dice: {train_tissue_mask_dice} | "
-                    f"Val mask dice: {val_tissue_mask_dice} | "
-                    f"Train RMSE tissue only: {train_rmse_tissue_only:.6f} microns | Val RMSE tissue only: {val_rmse_tissue_only:.6f} microns | "
-                else:
-                    mask_log = ""
-                logger.info(
-                    f"Epoch {epoch} | Step {global_step} | "
-                    f"Train RMSE: {train_rmse:.6f} microns | Val RMSE: {val_rmse:.6f} microns | "
-                    f"{mask_log} | "
-                    f"LR: {current_lr:.6e}"
-                )
-
-                checkpoint_path = Path(model_weights_out_dir) / f"{global_step}.pt"
-                torch.save(
-                    obj={
-                        'epoch': epoch,
-                        'global_step': global_step,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'val_rmse': val_rmse,
                     },
-                    f=checkpoint_path,
-                )
+                        step=global_step
+                    )
 
-                # Check for improvement
-                if val_rmse < best_val_coord_loss - min_delta:
-                    best_val_coord_loss = val_rmse
-                    patience_counter = 0
+                    if predict_tissue_mask:
+                        mlflow.log_metrics(metrics={
+                            "eval/val_rmse_tissue_only": val_rmse_tissue_only,
+                            "eval/train_tissue_mask_dice": train_tissue_mask_dice,
+                            "eval/val_tissue_mask_dice": val_tissue_mask_dice,
+                            "eval/train_rmse_tissue_only": train_rmse_tissue_only,
+                        }, step=global_step)
 
-                    mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
-                    mlflow.log_metric("best_val_rmse", best_val_coord_loss, step=global_step)
+                    if predict_tissue_mask:
+                        mask_log = f"Train mask dice: {train_tissue_mask_dice} | "
+                        f"Val mask dice: {val_tissue_mask_dice} | "
+                        f"Train RMSE tissue only: {train_rmse_tissue_only:.6f} microns | Val RMSE tissue only: {val_rmse_tissue_only:.6f} microns | "
+                    else:
+                        mask_log = ""
+                    logger.info(
+                        f"Epoch {epoch} | Step {global_step} | "
+                        f"Train RMSE: {train_rmse:.6f} microns | Val RMSE: {val_rmse:.6f} microns | "
+                        f"{mask_log} | "
+                        f"LR: {current_lr:.6e}"
+                    )
 
-                    logger.info(f"New best model saved! Val RMSE: {val_rmse:.6f}")
-                else:
-                    patience_counter += 1
-                    logger.info(f"No improvement. Patience: {patience_counter}/{patience}")
+                    checkpoint_path = Path(model_weights_out_dir) / f"{global_step}.pt"
+                    torch.save(
+                        obj={
+                            'epoch': epoch,
+                            'global_step': global_step,
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'val_rmse': val_rmse,
+                        },
+                        f=checkpoint_path,
+                    )
 
-                # Early stopping
-                if patience_counter >= patience:
-                    logger.info(f"\nEarly stopping triggered after {global_step} steps")
-                    logger.info(f"Best validation MAE: {best_val_coord_loss:.6f}")
-                    mlflow.log_metric("final_best_val_rmse", best_val_coord_loss)
+                    # Check for improvement
+                    if val_rmse < best_val_coord_loss - min_delta:
+                        best_val_coord_loss = val_rmse
+                        patience_counter = 0
 
-                    return best_val_coord_loss
+                        mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
+                        mlflow.log_metric("best_val_rmse", best_val_coord_loss, step=global_step)
 
-                model.train()
+                        logger.info(f"New best model saved! Val RMSE: {val_rmse:.6f}")
+                    else:
+                        patience_counter += 1
+                        logger.info(f"No improvement. Patience: {patience_counter}/{patience}")
 
-        # End of epoch summary
-        avg_train_loss = sum(train_losses) / len(train_losses)
-        avg_coord_loss = sum(train_coord_losses) / len(train_coord_losses)
-        if predict_tissue_mask:
-            avg_mask_loss = sum(train_mask_losses) / len(train_mask_losses)
+                    # Early stopping
+                    if patience_counter >= patience:
+                        logger.info(f"\nEarly stopping triggered after {global_step} steps")
+                        logger.info(f"Best validation MAE: {best_val_coord_loss:.6f}")
+                        mlflow.log_metric("final_best_val_rmse", best_val_coord_loss)
 
-        mlflow.log_metrics(metrics={
-                "epoch/train_coord_loss": avg_coord_loss,
-            }, step=global_step)
+                        return best_val_coord_loss
 
-        logger.info(f"\n{'=' * 60}")
-        mask_loss_log = f"| Avg mask loss {avg_mask_loss:.6f}" if predict_tissue_mask else ""
-        logger.info(f"Epoch {epoch}/{n_epochs} completed | Avg Train Loss: {avg_train_loss:.6f} | Avg coord loss {avg_coord_loss:.6f} {mask_loss_log}")
-        logger.info(f"{'=' * 60}\n")
+                    model.train()
+
+            # End of epoch summary
+            avg_train_loss = sum(train_losses) / len(train_losses)
+            avg_coord_loss = sum(train_coord_losses) / len(train_coord_losses)
+            if predict_tissue_mask:
+                avg_mask_loss = sum(train_mask_losses) / len(train_mask_losses)
+
+            mlflow.log_metrics(metrics={
+                    "epoch/train_coord_loss": avg_coord_loss,
+                }, step=global_step)
+
+            logger.info(f"\n{'=' * 60}")
+            mask_loss_log = f"| Avg mask loss {avg_mask_loss:.6f}" if predict_tissue_mask else ""
+            logger.info(f"Epoch {epoch}/{n_epochs} completed | Avg Train Loss: {avg_train_loss:.6f} | Avg coord loss {avg_coord_loss:.6f} {mask_loss_log}")
+            logger.info(f"{'=' * 60}\n")
 
 
     logger.info(f"\nTraining completed! Best validation loss: {best_val_coord_loss:.6f}")

@@ -137,7 +137,7 @@ def main(config_path: Path):
         orientation=config.orientation,
         registration_downsample_factor=config.registration_downsample_factor,
         tensorstore_aws_credentials_method=config.tensorstore_aws_credentials_method,
-        crop_warp_to_bounding_box=config.crop_warp_to_bounding_box,
+        crop_warp_to_bounding_box=False,
         patch_size=config.patch_size,
         mode=TrainMode.TEST if config.debug else TrainMode.TRAIN,   # deterministic if debug
         normalize_orientation_map=config.normalize_orientation_map,
@@ -166,7 +166,7 @@ def main(config_path: Path):
         orientation=config.orientation,
         registration_downsample_factor=config.registration_downsample_factor,
         tensorstore_aws_credentials_method=config.tensorstore_aws_credentials_method,
-        crop_warp_to_bounding_box=config.crop_warp_to_bounding_box,
+        crop_warp_to_bounding_box=False,
         patch_size=config.patch_size,
         mode=TrainMode.TEST,
         normalize_orientation_map=config.normalize_orientation_map,
@@ -189,38 +189,8 @@ def main(config_path: Path):
         template_ml_dim_size=ls_template_ml_dim,
     )
 
-    if config.debug:
-        train_dataset = Subset(train_dataset, indices=[1000])
-        val_dataset = Subset(val_dataset, indices=[1000])
-
-    # setting to TEST mode so that same patches are evaluated each time
-    train_eval_dataset = copy.deepcopy(train_dataset)
-    if isinstance(train_eval_dataset, Subset):
-        train_eval_dataset.dataset.set_mode(mode=TrainMode.TEST)
-    else:
-        train_eval_dataset.set_mode(mode=TrainMode.TEST)
-
-    train_eval_subset = Subset(
-        train_eval_dataset,
-        indices=random.sample(range(len(train_dataset)), k=min(len(train_dataset), config.batch_size * config.num_eval_iters))
-    )
-    val_dataset = Subset(
-        val_dataset,
-        indices=random.sample(range(len(val_dataset)), k=min(len(val_dataset), config.batch_size * config.num_eval_iters))
-    )
-
-    train_dataloader = DataLoader(
-        dataset=train_dataset,
-        batch_size=config.batch_size,
-        shuffle=True,
-        num_workers=config.num_workers,
-        pin_memory=(device == "cuda"),
-        prefetch_factor=config.dataloader_prefetch_factor,
-    )
-
     logger.info(f"Num train samples: {len(train_dataset)}")
     logger.info(f"Num val samples: {len(val_dataset)}")
-    logger.info(f"Num train eval samples: {len(train_eval_subset)}")
 
     model = UNetWithRegressionHeads(
         spatial_dims=2,
@@ -292,8 +262,7 @@ def main(config_path: Path):
         random.setstate(state)
 
         best_val_rmse = train(
-            train_dataloader=train_dataloader,
-            train_eval_dataset=train_eval_subset,
+            train_dataset=train_dataset,
             val_dataset=val_dataset,
             model=model,
             optimizer=opt,
@@ -308,10 +277,13 @@ def main(config_path: Path):
             autocast_context=autocast_context,
             device=device,
             ccf_annotations=ccf_annotations,
-            ls_template_ml_dim=ls_template_ml_dim,
             ls_template_parameters=ls_template_parameters,
             exclude_background_pixels=config.exclude_background_pixels,
             predict_tissue_mask=config.predict_tissue_mask,
+            batch_size=config.batch_size,
+            num_train_dataloader_workers=config.num_workers,
+            train_dataloader_prefetch_factor=config.dataloader_prefetch_factor,
+            is_debug=config.debug,
         )
 
     logger.info("=" * 60)
