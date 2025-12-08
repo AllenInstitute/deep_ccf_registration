@@ -483,92 +483,90 @@ def evaluate_batch(
     sample_count = 0
     cur_iteration = 0
 
-    prefetcher = BatchPrefetcher(dataset=val_dataset, subject_idx_batches=subject_idx_batches)
-    prefetcher.start()
-
-    for subject_idx_batch, batch_volumes, batch_warps in tqdm(prefetcher, desc='Evaluation', total=len(subject_idx_batches)):
-        val_dataset.reset_data(
-            subject_idxs=subject_idx_batch,
-            volumes=batch_volumes,
-            warps=batch_warps
-        )
-        batch_sample_idxs = val_dataset.get_subject_sample_idxs(subject_idxs=subject_idx_batch)
-
-        if is_debug:
-            batch_dataset = Subset(val_dataset, indices=[1000])
-        else:
-            batch_dataset = Subset(val_dataset, indices=batch_sample_idxs)
-
-        val_loader = DataLoader(
-            dataset=batch_dataset,
-            batch_size=train_dataloader.batch_size,
-            shuffle=True,
-            num_workers=train_dataloader.num_workers,
-            pin_memory=train_dataloader.pin_memory,
-            prefetch_factor=train_dataloader.prefetch_factor,
-        )
-
-        for batch_idx, batch in enumerate(val_loader):
-            cur_iteration += 1
-            if cur_iteration == num_iterations:
-                break
-            input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks, pad_masks, subject_ids = batch
-            input_images, target_template_points, pad_masks, tissue_masks = input_images.to(device), target_template_points.to(device), pad_masks.to(device), tissue_masks.to(device)
-
-            pad_masks = pad_masks.bool()
-            tissue_masks = tissue_masks.bool()
-
-            with autocast_context:
-                model_out = model(input_images)
-
-            if predict_tissue_mask:
-                pred_coords, segmentation_logits = model_out[:, :-1], model_out[:, -1]
-            else:
-                pred_coords, segmentation_logits = model_out, None
-
-            error = (pred_coords - target_template_points) ** 2
-
-            rmse.update(
-                preds=pred_coords,
-                target=target_template_points,
-                mask=pad_masks,
+    with BatchPrefetcher(dataset=val_dataset, subject_idx_batches=subject_idx_batches) as prefetcher:
+        for subject_idx_batch, batch_volumes, batch_warps in tqdm(prefetcher, desc='Evaluation', total=len(subject_idx_batches)):
+            val_dataset.reset_data(
+                subject_idxs=subject_idx_batch,
+                volumes=batch_volumes,
+                warps=batch_warps
             )
-            if predict_tissue_mask:
-                rmse_tissue_only.update(
+            batch_sample_idxs = val_dataset.get_subject_sample_idxs(subject_idxs=subject_idx_batch)
+
+            if is_debug:
+                batch_dataset = Subset(val_dataset, indices=[1000])
+            else:
+                batch_dataset = Subset(val_dataset, indices=batch_sample_idxs)
+
+            val_loader = DataLoader(
+                dataset=batch_dataset,
+                batch_size=train_dataloader.batch_size,
+                shuffle=True,
+                num_workers=train_dataloader.num_workers,
+                pin_memory=train_dataloader.pin_memory,
+                prefetch_factor=train_dataloader.prefetch_factor,
+            )
+
+            for batch_idx, batch in enumerate(val_loader):
+                cur_iteration += 1
+                if cur_iteration == num_iterations:
+                    break
+                input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks, pad_masks, subject_ids = batch
+                input_images, target_template_points, pad_masks, tissue_masks = input_images.to(device), target_template_points.to(device), pad_masks.to(device), tissue_masks.to(device)
+
+                pad_masks = pad_masks.bool()
+                tissue_masks = tissue_masks.bool()
+
+                with autocast_context:
+                    model_out = model(input_images)
+
+                if predict_tissue_mask:
+                    pred_coords, segmentation_logits = model_out[:, :-1], model_out[:, -1]
+                else:
+                    pred_coords, segmentation_logits = model_out, None
+
+                error = (pred_coords - target_template_points) ** 2
+
+                rmse.update(
                     preds=pred_coords,
                     target=target_template_points,
-                    mask=tissue_masks,
+                    mask=pad_masks,
                 )
-            if predict_tissue_mask:
-                pred_tissue_masks = (F.sigmoid(segmentation_logits) > 0.5).to(torch.uint8)
-                tissue_mask_dice.update(preds=pred_tissue_masks, target=tissue_masks)
-            else:
-                pred_tissue_masks = None
+                if predict_tissue_mask:
+                    rmse_tissue_only.update(
+                        preds=pred_coords,
+                        target=target_template_points,
+                        mask=tissue_masks,
+                    )
+                if predict_tissue_mask:
+                    pred_tissue_masks = (F.sigmoid(segmentation_logits) > 0.5).to(torch.uint8)
+                    tissue_mask_dice.update(preds=pred_tissue_masks, target=tissue_masks)
+                else:
+                    pred_tissue_masks = None
 
-            B = input_images.shape[0]
-            for sample_idx in range(B):
-                for viz_index in viz_indices:
-                    if sample_count == viz_index:
-                        fig = viz_sample(
-                            input_image=input_images[sample_idx].cpu().squeeze(0),
-                            slice_idx=slice_indices[sample_idx],
-                            errors=error[sample_idx].cpu().numpy(),
-                            iteration=iteration,
-                            pred_coords=pred_coords[sample_idx].cpu(),
-                            gt_coords=target_template_points[sample_idx].cpu(),
-                            pad_mask=pad_masks[sample_idx],
-                            pred_tissue_mask=pred_tissue_masks[sample_idx] if pred_tissue_masks is not None else None,
-                            ls_template_parameters=ls_template_parameters,
-                            ccf_annotations=ccf_annotations,
-                            exclude_background=exclude_background_pixels,
-                            tissue_mask=tissue_masks[sample_idx]
-                        )
-                        subject_id = subject_ids[sample_idx]
-                        fig_filename = f"subject_{subject_id}_slice_{slice_indices[sample_idx]}_y_{patch_ys[sample_idx]}_x_{patch_xs[sample_idx]}_step_{iteration}.png"
-                        mlflow.log_figure(fig,
-                                          f"inference/{"train" if is_train else "val"}/iteration/{iteration}/{fig_filename}")
-                        plt.close(fig)
-                sample_count += 1
+                B = input_images.shape[0]
+                for sample_idx in range(B):
+                    for viz_index in viz_indices:
+                        if sample_count == viz_index:
+                            fig = viz_sample(
+                                input_image=input_images[sample_idx].cpu().squeeze(0),
+                                slice_idx=slice_indices[sample_idx],
+                                errors=error[sample_idx].cpu().numpy(),
+                                iteration=iteration,
+                                pred_coords=pred_coords[sample_idx].cpu(),
+                                gt_coords=target_template_points[sample_idx].cpu(),
+                                pad_mask=pad_masks[sample_idx],
+                                pred_tissue_mask=pred_tissue_masks[sample_idx] if pred_tissue_masks is not None else None,
+                                ls_template_parameters=ls_template_parameters,
+                                ccf_annotations=ccf_annotations,
+                                exclude_background=exclude_background_pixels,
+                                tissue_mask=tissue_masks[sample_idx]
+                            )
+                            subject_id = subject_ids[sample_idx]
+                            fig_filename = f"subject_{subject_id}_slice_{slice_indices[sample_idx]}_y_{patch_ys[sample_idx]}_x_{patch_xs[sample_idx]}_step_{iteration}.png"
+                            mlflow.log_figure(fig,
+                                              f"inference/{"train" if is_train else "val"}/iteration/{iteration}/{fig_filename}")
+                            plt.close(fig)
+                    sample_count += 1
 
     # *1000 to convert to micron
     rmse = rmse.compute().item() * 1000

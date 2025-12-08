@@ -71,6 +71,8 @@ class BatchPrefetcher:
                 if self.exception:
                     raise self.exception
                 break
+            else:
+                logger.debug(f'Loaded {item[0]} from queue')
             yield item
 
     def __enter__(self):
