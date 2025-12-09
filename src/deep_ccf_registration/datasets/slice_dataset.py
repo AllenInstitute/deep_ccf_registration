@@ -576,8 +576,8 @@ class SliceDataset(Dataset):
         ).astype(np.float32)
 
         # prevent negative strides error when arrays are collated
-        input_image = np.ascontiguousarray(input_image)
-        output_points = np.ascontiguousarray(output_points)
+        input_image = np.ascontiguousarray(input_image).copy()
+        output_points = np.ascontiguousarray(output_points).copy()
 
         # add channel dim
         input_image = np.expand_dims(input_image, axis=-1)
