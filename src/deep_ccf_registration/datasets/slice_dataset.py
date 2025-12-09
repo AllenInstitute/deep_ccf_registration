@@ -205,8 +205,6 @@ class SliceDataset(Dataset):
         self._registration_downsample_factor = registration_downsample_factor
         self._warps = self._load_warps(tensorstore_aws_credentials_method=tensorstore_aws_credentials_method)
         self._volumes = self._load_volumes(tensorstore_aws_credentials_method=tensorstore_aws_credentials_method)
-        self._volume_arrays: list[Optional[np.ndarray]] = [None] * len(self._volumes)
-        self._warp_arrays: list[Optional[np.ndarray]] = [None] * len(self._warps)
         self._memmap_cache = memmap_cache
         self._crop_warp_to_bounding_box = crop_warp_to_bounding_box
         self._patch_size = patch_size
@@ -236,14 +234,6 @@ class SliceDataset(Dataset):
     @property
     def warps(self) -> list:
         return self._warps
-
-    @property
-    def volume_arrays(self) -> list[Optional[np.ndarray]]:
-        return self._volume_arrays
-
-    @property
-    def warp_arrays(self) -> list[Optional[np.ndarray]]:
-        return self._warp_arrays
 
     @property
     def patch_size(self) -> Optional[tuple[int, int]]:
