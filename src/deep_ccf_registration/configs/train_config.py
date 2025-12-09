@@ -88,6 +88,6 @@ class TrainConfig(BaseModel):
     # max number of train iterations per subject batch
     max_num_subject_batch_iterations: int = 200
 
-    memmap_cache_path: Path = '/results'
+    memmap_cache_path: Path = Path('/results')
 
     memmap_cleanup_interval: int = 5000
