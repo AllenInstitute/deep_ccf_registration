@@ -26,8 +26,7 @@ from deep_ccf_registration.utils.dataloading import BatchPrefetcher
 def _get_lr(
         iteration: int, warmup_iters: int, learning_rate: float, lr_decay_iters: int, min_lr
 ):
-    """
-    Calculate learning rate with linear warmup and cosine decay.
+    """Calculate learning rate with linear warmup and cosine decay.
 
     Parameters
     ----------
@@ -201,9 +200,7 @@ def train(
 
     pbar = tqdm(total=total_iterations, desc="Training", smoothing=0)
 
-    with train_memmap_prefetcher as train_prefetcher, \
-         train_eval_memmap_prefetcher as train_eval_prefetcher, \
-         val_memmap_prefetcher as val_prefetcher:
+    with train_memmap_prefetcher as train_prefetcher:
         for epoch in range(1, n_epochs + 1):
             for subject_idx_batch in train_prefetcher:
                 logger.debug(f'Training on subjects {subject_idx_batch}')
@@ -302,7 +299,7 @@ def train(
                                 autocast_context=autocast_context,
                                 exclude_background_pixels=exclude_background_pixels,
                                 predict_tissue_mask=predict_tissue_mask,
-                                memmap_prefetcher=train_eval_prefetcher,
+                                memmap_prefetcher=train_eval_memmap_prefetcher,
                                 is_debug=is_debug,
                             )
                             val_rmse, val_rmse_tissue_only, val_tissue_mask_dice = evaluate_batch(
@@ -317,7 +314,7 @@ def train(
                                 autocast_context=autocast_context,
                                 exclude_background_pixels=exclude_background_pixels,
                                 predict_tissue_mask=predict_tissue_mask,
-                                memmap_prefetcher=val_prefetcher,
+                                memmap_prefetcher=val_memmap_prefetcher,
                                 is_debug=is_debug,
                             )
 
@@ -332,6 +329,10 @@ def train(
                             )
 
                             if predict_tissue_mask:
+                                assert train_rmse_tissue_only is not None
+                                assert val_rmse_tissue_only is not None
+                                assert train_tissue_mask_dice is not None
+                                assert val_tissue_mask_dice is not None
                                 mlflow.log_metrics(metrics={
                                     "eval/val_rmse_tissue_only": val_rmse_tissue_only,
                                     "eval/train_tissue_mask_dice": train_tissue_mask_dice,
@@ -401,7 +402,6 @@ def train(
             mask_loss_log = f"| Avg mask loss {avg_mask_loss:.6f}" if predict_tissue_mask else ""
             logger.info(f"Epoch {epoch}/{n_epochs} completed | Avg Train Loss: {avg_train_loss:.6f} | Avg coord loss {avg_coord_loss:.6f} {mask_loss_log}")
             logger.info(f"{'=' * 60}\n")
-
 
     logger.info(f"\nTraining completed! Best validation loss: {best_val_coord_loss:.6f}")
 
