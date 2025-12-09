@@ -131,7 +131,7 @@ class BatchPrefetcher:
         atexit.register(self.cleanup)
 
     def cleanup(self):
-        logger.info('Cleaning up')
+        logger.info(f'Cleaning up {self._memmap_dir}')
         shutil.rmtree(self._memmap_dir)
         os.makedirs(self._memmap_dir, exist_ok=True)
         self.memmap_cache.clear()
