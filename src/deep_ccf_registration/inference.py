@@ -481,6 +481,8 @@ def evaluate_batch(
     sample_count = 0
     cur_iteration = 0
 
+    pbar = tqdm(total=max(num_iterations, int(len(val_dataset) / train_dataloader.batch_size)), desc="Evaluation", smoothing=0)
+
     with memmap_prefetcher as prefetcher:
         for subject_idx_batch in prefetcher:
             batch_sample_idxs = val_dataset.get_subject_sample_idxs(subject_idxs=subject_idx_batch)
@@ -560,7 +562,8 @@ def evaluate_batch(
                                               f"inference/{"train" if is_train else "val"}/iteration/{iteration}/{fig_filename}")
                             plt.close(fig)
                     sample_count += 1
-
+                pbar.update(1)
+                
     # *1000 to convert to micron
     rmse = rmse.compute().item() * 1000
 
