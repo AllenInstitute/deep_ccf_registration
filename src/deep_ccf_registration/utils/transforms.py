@@ -7,24 +7,10 @@ import pandas as pd
 import tensorstore
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
-from aind_smartspim_transform_utils.utils.utils import convert_from_ants_space, \
-    AcquisitionDirection
-from retry import retry
-from tensorstore import TensorStore
-
-from deep_ccf_registration.metadata import AcquisitionAxis, SubjectMetadata, SliceOrientation
+from aind_smartspim_transform_utils.utils.utils import convert_from_ants_space
+from deep_ccf_registration.metadata import AcquisitionAxis
 from deep_ccf_registration.utils.interpolation import interpolate
-from deep_ccf_registration.utils.logging_utils import timed_func, timed
-
-
-@retry(tries=3, delay=1, backoff=2)
-def _read_tensorstore_region(array, min_coords, max_coords):
-    """Read a cropped region from tensorstore with retry logic for transient failures."""
-    return array[
-        min_coords[0]:max_coords[0],
-        min_coords[1]:max_coords[1],
-        min_coords[2]:max_coords[2]
-    ].read().result()
+from deep_ccf_registration.utils.logging_utils import timed_func
 
 
 @timed_func

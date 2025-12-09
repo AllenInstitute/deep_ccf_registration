@@ -514,14 +514,13 @@ class SliceDataset(Dataset):
         # Get cached volume
         volume, warp = self._get_arrays(dataset_idx)
 
-        volume_slice = [0, 0, slice(None), slice(None), slice(None)]
-        volume_slice[slice_axis.dimension + 2] = slice_idx  # + 2 since first 2 dims unused
-
         input_image, patch_y, patch_x, patch_height, patch_width = self._extract_slice_image(
-            slice_2d=volume[tuple(volume_slice)],
+            volume=volume,
+            slice_axis=slice_axis,
             patch_x=patch_x,
             patch_y=patch_y,
-            tissue_bbox=self._tissue_bboxes[experiment_meta.subject_id][slice_idx]
+            tissue_bbox=self._tissue_bboxes[experiment_meta.subject_id][slice_idx],
+            slice_idx=slice_idx,
         )
 
         height, width = patch_height, patch_width
@@ -649,8 +648,10 @@ class SliceDataset(Dataset):
 
     def _extract_slice_image(
             self,
-            slice_2d: np.ndarray,
+            volume: np.ndarray,
+            slice_axis: AcquisitionAxis,
             tissue_bbox: TissueBoundingBox,
+            slice_idx: int,
             patch_x: Optional[int] = None,
             patch_y: Optional[int] = None,
     ) -> tuple[np.ndarray, int, int, int, int]:
@@ -662,8 +663,9 @@ class SliceDataset(Dataset):
 
         Parameters
         ----------
-        slice_2d : np.ndarray
-            2D slice to extract patch from.
+        volume: np array
+        slice_axis: AcquisitionAxis
+        slice_idx: slice idx
         tissue_bbox : TissueBoundingBox
             Bounding box defining the region to extract from.
         patch_x : int, optional
@@ -693,7 +695,15 @@ class SliceDataset(Dataset):
                 patch_y = random.randint(tissue_bbox.y, max(tissue_bbox.y, tissue_bbox.y + h - ph))
                 patch_x = random.randint(tissue_bbox.x, max(tissue_bbox.x, tissue_bbox.x + w - pw))
 
-        patch = slice_2d[patch_y:patch_y + ph, patch_x:patch_x + pw]
+
+        volume_slice = [0, 0, None, None, None]
+        volume_slice[slice_axis.dimension + 2] = slice_idx  # + 2 since first 2 dims unused
+        y_axis = [i for i in range(len(volume_slice)) if volume_slice[i] is None][0]
+        x_axis = [i for i in range(len(volume_slice)) if volume_slice[i] is None][1]
+        volume_slice[y_axis] = slice(patch_y, patch_y + ph)
+        volume_slice[x_axis] = slice(patch_x, patch_x + pw)
+
+        patch = volume[tuple(volume_slice)]
 
         return patch, patch_y, patch_x, ph, pw
 
