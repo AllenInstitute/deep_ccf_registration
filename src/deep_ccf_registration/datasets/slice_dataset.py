@@ -20,7 +20,7 @@ from torch.utils.data import Dataset
 
 from deep_ccf_registration.metadata import AcquisitionAxis, SubjectMetadata, SliceOrientation
 from deep_ccf_registration.utils.dataloading import MemmapCache
-from deep_ccf_registration.utils.logging_utils import timed_func
+from deep_ccf_registration.utils.logging_utils import timed_func, timed
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 from deep_ccf_registration.utils.transforms import transform_points_to_template_ants_space, \
     apply_transforms_to_points, map_points_to_left_hemisphere
@@ -548,6 +548,7 @@ class SliceDataset(Dataset):
             template_parameters=self._ls_template_parameters,
             affine_path=experiment_meta.ls_to_template_affine_matrix_path,
             warp=warp,
+            crop_warp_to_bounding_box=self._crop_warp_to_bounding_box
         )
 
         output_points = ls_template_points.reshape((height, width, 3))
@@ -703,7 +704,8 @@ class SliceDataset(Dataset):
         volume_slice[y_axis] = slice(patch_y, patch_y + ph)
         volume_slice[x_axis] = slice(patch_x, patch_x + pw)
 
-        patch = volume[tuple(volume_slice)]
+        with timed():
+            patch = volume[tuple(volume_slice)]
 
         return patch, patch_y, patch_x, ph, pw
 
