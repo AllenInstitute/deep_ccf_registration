@@ -29,6 +29,7 @@ from deep_ccf_registration.datasets.slice_dataset import (
 from deep_ccf_registration.metadata import SubjectMetadata
 from deep_ccf_registration.train import train
 from deep_ccf_registration.models import UNetWithRegressionHeads
+from deep_ccf_registration.utils.dataloading import BatchPrefetcher, MemmapCache
 
 logger.remove()
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -131,6 +132,7 @@ def main(config_path: Path):
         tissue_bboxes = json.load(f)
     tissue_bboxes = TissueBoundingBoxes(bounding_boxes=tissue_bboxes)
 
+    train_memmap_cache = MemmapCache()
     train_dataset = SliceDataset(
         dataset_meta=train_metadata,
         ls_template_parameters=ls_template_parameters,
@@ -158,8 +160,28 @@ def main(config_path: Path):
         return_tissue_mask=config.predict_tissue_mask,
         tissue_bboxes=tissue_bboxes,
         template_ml_dim_size=ls_template_ml_dim,
+        memmap_cache=train_memmap_cache,
+    )
+    train_prefetcher = BatchPrefetcher(
+        volumes=train_dataset.volumes,
+        warps=train_dataset.warps,
+        subject_metadata=train_dataset.subject_metadata,
+        memmap_cache=train_memmap_cache,
+        n_subjects_per_batch=config.num_subjects_per_rotation,
+        memmap_dir=config.memmap_cache_path / 'train',
     )
 
+    train_eval_prefetcher = BatchPrefetcher(
+        volumes=train_dataset.volumes,
+        warps=train_dataset.warps,
+        subject_metadata=train_dataset.subject_metadata,
+        memmap_cache=train_memmap_cache,
+        n_subjects_per_batch=config.num_subjects_per_rotation,
+        memmap_dir=config.memmap_cache_path / 'train',
+        clean_on_exit=False,
+    )
+
+    val_memmap_cache = MemmapCache()
     val_dataset = SliceDataset(
         dataset_meta=val_metadata,
         ls_template_parameters=ls_template_parameters,
@@ -187,6 +209,16 @@ def main(config_path: Path):
         return_tissue_mask=config.predict_tissue_mask,
         tissue_bboxes=tissue_bboxes,
         template_ml_dim_size=ls_template_ml_dim,
+        memmap_cache=val_memmap_cache,
+    )
+    val_prefetcher = BatchPrefetcher(
+        volumes=val_dataset.volumes,
+        warps=val_dataset.warps,
+        subject_metadata=val_dataset.subject_metadata,
+        memmap_cache=val_memmap_cache,
+        n_subjects_per_batch=config.num_subjects_per_rotation,
+        memmap_dir=config.memmap_cache_path / 'val',
+        clean_on_exit=False,
     )
 
     logger.info(f"Num train samples: {len(train_dataset)}")
@@ -264,6 +296,9 @@ def main(config_path: Path):
         best_val_rmse = train(
             train_dataset=train_dataset,
             val_dataset=val_dataset,
+            train_memmap_prefetcher=train_prefetcher,
+            train_eval_memmap_prefetcher=train_eval_prefetcher,
+            val_memmap_prefetcher=val_prefetcher,
             model=model,
             optimizer=opt,
             n_epochs=config.n_epochs,
@@ -285,7 +320,7 @@ def main(config_path: Path):
             train_dataloader_prefetch_factor=config.dataloader_prefetch_factor,
             is_debug=config.debug,
             max_num_subject_batch_iterations=config.max_num_subject_batch_iterations,
-            n_subjects_per_rotation=config.num_subjects_per_rotation,
+            memmap_cleanup_interval=config.memmap_cleanup_interval,
         )
 
     logger.info("=" * 60)
@@ -345,7 +380,6 @@ def split_train_val_test(
         raise ValueError("Test set is empty!")
 
     return train_metadata, val_metadata, test_metadata
-
 
 if __name__ == "__main__":
     multiprocessing.set_start_method('spawn', force=True)   # tensorstore complains "fork" not allowed

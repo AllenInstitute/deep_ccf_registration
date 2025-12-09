@@ -81,8 +81,13 @@ class TrainConfig(BaseModel):
 
     model: ModelConfig
 
-    # sample this many subjects to load into memory at a time
+    # block until this many subjects have been written to disk
+    # and train/validate this many subjects per rotation
     num_subjects_per_rotation: int = 15
 
     # max number of train iterations per subject batch
     max_num_subject_batch_iterations: int = 200
+
+    memmap_cache_path: Path = '/results'
+
+    memmap_cleanup_interval: int = 5000

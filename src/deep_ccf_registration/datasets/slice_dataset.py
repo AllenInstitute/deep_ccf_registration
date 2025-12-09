@@ -19,6 +19,7 @@ from skimage.exposure import rescale_intensity
 from torch.utils.data import Dataset
 
 from deep_ccf_registration.metadata import AcquisitionAxis, SubjectMetadata, SliceOrientation
+from deep_ccf_registration.utils.dataloading import MemmapCache
 from deep_ccf_registration.utils.logging_utils import timed_func
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 from deep_ccf_registration.utils.transforms import transform_points_to_template_ants_space, \
@@ -134,6 +135,7 @@ class SliceDataset(Dataset):
                  ls_template_parameters: AntsImageParameters,
                  tissue_bboxes: TissueBoundingBoxes,
                  template_ml_dim_size: int,
+                 memmap_cache: MemmapCache,
                  ccf_annotations_path: Optional[Path] = None,
                  orientation: Optional[SliceOrientation] = None,
                  registration_downsample_factor: int = 3,
@@ -147,7 +149,7 @@ class SliceDataset(Dataset):
                  input_image_transforms: Optional[list[albumentations.BasicTransform]] = None,
                  output_points_transforms: Optional[list[albumentations.BasicTransform]] = None,
                  mask_transforms: Optional[list[albumentations.BasicTransform]] = None,
-                 return_tissue_mask: bool = False
+                 return_tissue_mask: bool = False,
                  ):
         """
         Initialize SliceDataset.
@@ -188,6 +190,7 @@ class SliceDataset(Dataset):
         tissue_bboxes: tissue bounding boxes, obtained via `get_tissue_bounding_box.py`.
             Each subject id maps to a list of bounding boxes ordered by slice index, or null if no tissue is present in slices
         template_ml_dim_size: template ML shape in index space
+        memmap_cache : MemmapCache
         """
         super().__init__()
         self._dataset_meta = dataset_meta
@@ -204,6 +207,7 @@ class SliceDataset(Dataset):
         self._volumes = self._load_volumes(tensorstore_aws_credentials_method=tensorstore_aws_credentials_method)
         self._volume_arrays: list[Optional[np.ndarray]] = [None] * len(self._volumes)
         self._warp_arrays: list[Optional[np.ndarray]] = [None] * len(self._warps)
+        self._memmap_cache = memmap_cache
         self._crop_warp_to_bounding_box = crop_warp_to_bounding_box
         self._patch_size = patch_size
         self._mode = mode
@@ -224,6 +228,22 @@ class SliceDataset(Dataset):
         self._ccf_annotations_path = ccf_annotations_path
         self._ccf_annotations = None
         self._return_tissue_mask = return_tissue_mask
+
+    @property
+    def volumes(self) -> list:
+        return self._volumes
+
+    @property
+    def warps(self) -> list:
+        return self._warps
+
+    @property
+    def volume_arrays(self) -> list[Optional[np.ndarray]]:
+        return self._volume_arrays
+
+    @property
+    def warp_arrays(self) -> list[Optional[np.ndarray]]:
+        return self._warp_arrays
 
     @property
     def patch_size(self) -> Optional[tuple[int, int]]:
@@ -502,7 +522,7 @@ class SliceDataset(Dataset):
         slice_axis = experiment_meta.get_slice_axis(orientation=orientation)
 
         # Get cached volume
-        volume = self._volume_arrays[dataset_idx]
+        volume, warp = self._get_arrays(dataset_idx)
 
         volume_slice = [0, 0, slice(None), slice(None), slice(None)]
         volume_slice[slice_axis.dimension + 2] = slice_idx  # + 2 since first 2 dims unused
@@ -538,7 +558,7 @@ class SliceDataset(Dataset):
             points=points,
             template_parameters=self._ls_template_parameters,
             affine_path=experiment_meta.ls_to_template_affine_matrix_path,
-            warp=self._warp_arrays[dataset_idx],
+            warp=warp,
         )
 
         output_points = ls_template_points.reshape((height, width, 3))
@@ -788,48 +808,16 @@ class SliceDataset(Dataset):
 
         return all_indices
 
-    def get_arrays(self, idxs: list[int]) -> tuple[list[np.ndarray], list[np.ndarray]]:
-        volume_arrs = []
-        warp_arrs = []
-        for idx in idxs:
-            if self._volume_arrays[idx] is None:
-                logger.debug(f'Loading volume {idx}')
-                volume = self._volumes[idx][:].read().result()
-            else:
-                logger.debug(f'Loading volume {idx} from memory')
-                volume = self._volume_arrays[idx]
+    def _get_arrays(self, idx: int) -> tuple[np.ndarray, np.ndarray]:
+        paths = self._memmap_cache.get(idx)
 
-            if self._warp_arrays[idx] is None:
-                logger.debug(f'Loading warp {idx}')
-                warp = self._warps[idx][:].read().result()
-            else:
-                logger.debug(f'Loading warp {idx} from memory')
-                warp = self._warp_arrays[idx]
-            volume_arrs.append(volume)
-            warp_arrs.append(warp)
-        return volume_arrs, warp_arrs
-
-    def reset_data(self, subject_idxs: list[int], volumes: list[np.ndarray], warps: list[np.ndarray]):
-        for i in range(len(self._volume_arrays)):
-            if self._volume_arrays[i] is not None:
-                self._volume_arrays[i] = None
-        for i in range(len(self._warp_arrays)):
-            if self._warp_arrays[i] is not None:
-                self._warp_arrays[i] = None
-
-        for i, idx in enumerate(subject_idxs):
-            self._volume_arrays[idx] = volumes[i]
-            self._warp_arrays[idx] = warps[i]
-
-    def get_subject_batches(self, n_subjects_per_batch: int) -> list[list[int]]:
-        subjects = self.subject_metadata
-        subject_idxs = np.arange(len(subjects))
-        np.random.shuffle(subject_idxs)
-        subject_idxs = subject_idxs.tolist()
-        subject_idx_batches = [subject_idxs[i:i + n_subjects_per_batch] for i in
-                               range(0, len(subject_idxs), n_subjects_per_batch)]
-        return subject_idx_batches
-
+        vol_path, warp_path = paths
+        volume_meta = self._volumes[idx]
+        warp_meta = self._warps[idx]
+        volume = np.memmap(vol_path, dtype=volume_meta.dtype.numpy_dtype, mode='r', shape=volume_meta.shape)
+        warp = np.memmap(warp_path, dtype=warp_meta.dtype.numpy_dtype, mode='r', shape=warp_meta.shape)
+        return volume, warp
+    
 def _calculate_non_pad_mask(shape: tuple[int, int], pad_transform: dict[str, Any]):
     mask = np.zeros(shape, dtype="uint8")
     if pad_transform:

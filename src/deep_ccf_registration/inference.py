@@ -458,7 +458,7 @@ def evaluate_batch(
     ls_template_parameters: AntsImageParameters,
     iteration: int,
     is_train: bool,
-    n_subjects_per_batch: int,
+    memmap_prefetcher: BatchPrefetcher,
     autocast_context: ContextManager = nullcontext(),
     predict_tissue_mask: bool = True,
     exclude_background_pixels: bool = False,
@@ -468,8 +468,6 @@ def evaluate_batch(
     viz_indices = np.arange(min(len(val_dataset), 200 * train_dataloader.batch_size))
     np.random.shuffle(viz_indices)
     viz_indices = viz_indices[:10]
-
-    subject_idx_batches = val_dataset.get_subject_batches(n_subjects_per_batch=n_subjects_per_batch)
 
     model.eval()
 
@@ -483,13 +481,8 @@ def evaluate_batch(
     sample_count = 0
     cur_iteration = 0
 
-    with BatchPrefetcher(dataset=val_dataset, subject_idx_batches=subject_idx_batches) as prefetcher:
-        for subject_idx_batch, batch_volumes, batch_warps in tqdm(prefetcher, desc='Evaluation', total=len(subject_idx_batches)):
-            val_dataset.reset_data(
-                subject_idxs=subject_idx_batch,
-                volumes=batch_volumes,
-                warps=batch_warps
-            )
+    with memmap_prefetcher as prefetcher:
+        for subject_idx_batch in prefetcher:
             batch_sample_idxs = val_dataset.get_subject_sample_idxs(subject_idxs=subject_idx_batch)
 
             if is_debug:

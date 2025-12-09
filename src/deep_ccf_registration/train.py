@@ -123,6 +123,9 @@ def _evaluate_loss(
 def train(
         train_dataset: SliceDataset,
         val_dataset: SliceDataset,
+        train_memmap_prefetcher: BatchPrefetcher,
+        train_eval_memmap_prefetcher: BatchPrefetcher,
+        val_memmap_prefetcher: BatchPrefetcher,
         model: UNet,
         optimizer,
         n_epochs: int,
@@ -143,8 +146,8 @@ def train(
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         exclude_background_pixels: bool = True,
         predict_tissue_mask: bool = True,
-        n_subjects_per_rotation: int = 15,
-        is_debug: bool = False
+        is_debug: bool = False,
+        memmap_cleanup_interval: int = 5000
 ):
     """
     Train slice registration model
@@ -198,17 +201,12 @@ def train(
 
     pbar = tqdm(total=total_iterations, desc="Training", smoothing=0)
 
-    subject_idx_batches = train_dataset.get_subject_batches(n_subjects_per_batch=n_subjects_per_rotation)
-
-    for epoch in range(1, n_epochs + 1):
-        with BatchPrefetcher(dataset=train_dataset, subject_idx_batches=subject_idx_batches) as prefetcher:
-            for subject_idx_batch, batch_volumes, batch_warps in prefetcher:
-                logger.debug(f'Resetting train_dataset with {subject_idx_batch}')
-                train_dataset.reset_data(
-                    subject_idxs=subject_idx_batch,
-                    volumes=batch_volumes,
-                    warps=batch_warps
-                )
+    with train_memmap_prefetcher as train_prefetcher, \
+         train_eval_memmap_prefetcher as train_eval_prefetcher, \
+         val_memmap_prefetcher as val_prefetcher:
+        for epoch in range(1, n_epochs + 1):
+            for subject_idx_batch in train_prefetcher:
+                logger.debug(f'Training on subjects {subject_idx_batch}')
                 batch_sample_idxs = train_dataset.get_subject_sample_idxs(subject_idxs=subject_idx_batch)
 
                 if is_debug:
@@ -286,12 +284,15 @@ def train(
                     pbar.set_postfix({"loss": f"{loss.item():.6f}", "coord_loss": f"{coordinate_loss.item():.6f}"})
                     pbar.update(1)
 
+                    if global_step % memmap_cleanup_interval == 0:
+                        train_prefetcher.cleanup()
+
                     # Periodic evaluation
                     if global_step % eval_interval == 0:
                         with torch.no_grad():
                             train_rmse, train_rmse_tissue_only, train_tissue_mask_dice = evaluate_batch(
                                 train_dataloader=train_dataloader,
-                                val_dataset=val_dataset,
+                                val_dataset=train_dataset,
                                 model=model,
                                 ccf_annotations=ccf_annotations,
                                 ls_template_parameters=ls_template_parameters,
@@ -301,7 +302,7 @@ def train(
                                 autocast_context=autocast_context,
                                 exclude_background_pixels=exclude_background_pixels,
                                 predict_tissue_mask=predict_tissue_mask,
-                                n_subjects_per_batch=n_subjects_per_rotation,
+                                memmap_prefetcher=train_eval_prefetcher,
                                 is_debug=is_debug,
                             )
                             val_rmse, val_rmse_tissue_only, val_tissue_mask_dice = evaluate_batch(
@@ -316,7 +317,7 @@ def train(
                                 autocast_context=autocast_context,
                                 exclude_background_pixels=exclude_background_pixels,
                                 predict_tissue_mask=predict_tissue_mask,
-                                n_subjects_per_batch=n_subjects_per_rotation,
+                                memmap_prefetcher=val_prefetcher,
                                 is_debug=is_debug,
                             )
 
@@ -386,20 +387,20 @@ def train(
 
                             model.train()
 
-        # End of epoch summary
-        avg_train_loss = sum(train_losses) / len(train_losses)
-        avg_coord_loss = sum(train_coord_losses) / len(train_coord_losses)
-        if predict_tissue_mask:
-            avg_mask_loss = sum(train_mask_losses) / len(train_mask_losses)
+            # End of epoch summary
+            avg_train_loss = sum(train_losses) / len(train_losses)
+            avg_coord_loss = sum(train_coord_losses) / len(train_coord_losses)
+            if predict_tissue_mask:
+                avg_mask_loss = sum(train_mask_losses) / len(train_mask_losses)
 
-        mlflow.log_metrics(metrics={
-                "epoch/train_coord_loss": avg_coord_loss,
-            }, step=global_step)
+            mlflow.log_metrics(metrics={
+                    "epoch/train_coord_loss": avg_coord_loss,
+                }, step=global_step)
 
-        logger.info(f"\n{'=' * 60}")
-        mask_loss_log = f"| Avg mask loss {avg_mask_loss:.6f}" if predict_tissue_mask else ""
-        logger.info(f"Epoch {epoch}/{n_epochs} completed | Avg Train Loss: {avg_train_loss:.6f} | Avg coord loss {avg_coord_loss:.6f} {mask_loss_log}")
-        logger.info(f"{'=' * 60}\n")
+            logger.info(f"\n{'=' * 60}")
+            mask_loss_log = f"| Avg mask loss {avg_mask_loss:.6f}" if predict_tissue_mask else ""
+            logger.info(f"Epoch {epoch}/{n_epochs} completed | Avg Train Loss: {avg_train_loss:.6f} | Avg coord loss {avg_coord_loss:.6f} {mask_loss_log}")
+            logger.info(f"{'=' * 60}\n")
 
 
     logger.info(f"\nTraining completed! Best validation loss: {best_val_coord_loss:.6f}")
