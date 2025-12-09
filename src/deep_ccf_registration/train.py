@@ -233,7 +233,7 @@ def train(
                 train_mask_losses = []
 
                 for batch_idx, batch in enumerate(train_dataloader):
-                    logger.debug(f'processing {batch_idx}/{len(train_dataloader)}')
+                    logger.info(f'Subject group {batch_idx}/{len(train_dataloader)}')
                     if batch_idx == max_num_subject_batch_iterations:
                         logger.debug(f'max_num_subject_batch_iterations {max_num_subject_batch_iterations} reached')
                         break
