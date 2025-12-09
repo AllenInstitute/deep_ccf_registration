@@ -139,7 +139,7 @@ def main(config_path: Path):
         orientation=config.orientation,
         registration_downsample_factor=config.registration_downsample_factor,
         tensorstore_aws_credentials_method=config.tensorstore_aws_credentials_method,
-        crop_warp_to_bounding_box=False,
+        crop_warp_to_bounding_box=config.crop_warp_to_bounding_box,
         patch_size=config.patch_size,
         mode=TrainMode.TEST if config.debug else TrainMode.TRAIN,   # deterministic if debug
         normalize_orientation_map=config.normalize_orientation_map,
@@ -188,7 +188,7 @@ def main(config_path: Path):
         orientation=config.orientation,
         registration_downsample_factor=config.registration_downsample_factor,
         tensorstore_aws_credentials_method=config.tensorstore_aws_credentials_method,
-        crop_warp_to_bounding_box=False,
+        crop_warp_to_bounding_box=config.crop_warp_to_bounding_box,
         patch_size=config.patch_size,
         mode=TrainMode.TEST,
         normalize_orientation_map=config.normalize_orientation_map,

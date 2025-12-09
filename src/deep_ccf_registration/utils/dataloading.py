@@ -112,12 +112,14 @@ class BatchPrefetcher:
         """Write a single volume and warp array to memmap files (if not already on disk)."""
         vol_path = self._memmap_dir / f'vol_{idx}.dat'
         if not vol_path.exists():
+            logger.debug(f'writing volume memmap to {vol_path}')
             vol_mmap = np.memmap(vol_path, dtype=volume.dtype, mode='w+', shape=volume.shape)
             vol_mmap[:] = volume
             vol_mmap.flush()
 
         warp_path = self._memmap_dir / f'warp_{idx}.dat'
         if not warp_path.exists():
+            logger.debug(f'writing warp memmap to {vol_path}')
             warp_mmap = np.memmap(warp_path, dtype=warp.dtype, mode='w+', shape=warp.shape)
             warp_mmap[:] = warp
             warp_mmap.flush()
@@ -138,7 +140,7 @@ class BatchPrefetcher:
         """Producer function that loads batches and writes memmaps in the background."""
         try:
             for subject_idx_batch in self.subject_idx_batches:
-                logger.debug(f'Preparing subjects {subject_idx_batch}')
+                logger.info(f'Loading subject data {subject_idx_batch}')
                 for idx in subject_idx_batch:
                     if self.memmap_cache.get(idx) is None:
                         volume, warp = self._load_arrays(idx)
