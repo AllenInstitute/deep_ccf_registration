@@ -44,14 +44,13 @@ class TrainConfig(BaseModel):
 
     load_checkpoint: Optional[Path] = None
 
-    n_epochs: int = Field(100, gt=0)
+    max_iters: int
     learning_rate: float = Field(0.001, gt=0.0)
     weight_decay: float = Field(0.0, ge=0.0)
     decay_learning_rate: bool = True
     warmup_iters: int = Field(1000, ge=0)
 
     eval_interval: int = Field(500, gt=0)
-    eval_iters: int = Field(100, gt=0)
     patience: int = Field(10, gt=0)
     min_delta: float = Field(1e-4, ge=0.0)
     region_ccf_ids_map_path: Path
@@ -63,9 +62,6 @@ class TrainConfig(BaseModel):
     mixed_precision: bool = False
     seed: int = 1234
     debug: bool = False
-
-    # how many batches to use for validation
-    num_eval_iters: int = 200
 
     # path to bounding boxes conforming to schema: dict[str, Optional[TissueBoundingBox]]
     # mapping subject id to list of optional bounding boxes. bbox may be null if no tissue in slice

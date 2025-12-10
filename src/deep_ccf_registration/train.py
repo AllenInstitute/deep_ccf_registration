@@ -126,7 +126,7 @@ def train(
         val_dataloader: DataLoader,
         model: UNet,
         optimizer,
-        n_epochs: int,
+        max_iters: int,
         batch_size: int,
         num_train_dataloader_workers: int,
         model_weights_out_dir: Path,
@@ -182,23 +182,19 @@ def train(
     best_val_coord_loss = float("inf")
     patience_counter = 0
     global_step = 0
-    if is_debug:
-        total_iterations = n_epochs
-    else:
-        total_iterations = int(len(train_dataset) / batch_size  * n_epochs)
-    lr_decay_iters = total_iterations
+    lr_decay_iters = max_iters
     min_lr = learning_rate / 10 # should be ~= learning_rate/10 per Chinchilla
 
     model.to(device)
 
-    logger.info(f"Starting training for {n_epochs} epochs")
+    logger.info(f"Starting training for {max_iters} iters")
     logger.info(f"Training samples: {len(train_dataset)}")
     logger.info(f"Validation samples: {len(val_dataloader.dataset)}")
     logger.info(f"Device: {device}")
 
-    pbar = tqdm(total=total_iterations, desc="Training", smoothing=0)
+    pbar = tqdm(total=max_iters, desc="Training", smoothing=0)
 
-    for epoch in range(1, n_epochs + 1):
+    while True:
         for subject_idx_batch in train_prefetcher:
             logger.debug(f'Training on subjects {subject_idx_batch}')
             batch_sample_idxs = train_dataset.get_subject_sample_idxs(subject_idxs=subject_idx_batch)
@@ -216,10 +212,6 @@ def train(
                 pin_memory=(device == "cuda"),
                 prefetch_factor=train_dataloader_prefetch_factor,
             )
-
-            # Set epoch for distributed training
-            if isinstance(train_dataloader.sampler, DistributedSampler):
-                train_dataloader.sampler.set_epoch(epoch=epoch)
 
             model.train()
             train_losses = []
@@ -336,7 +328,7 @@ def train(
                         else:
                             mask_log = ""
                         logger.info(
-                            f"Epoch {epoch} | Step {global_step} | "
+                            f"Step {global_step} | "
                             f"Train RMSE: {train_rmse:.6f} microns | Val RMSE: {val_rmse:.6f} microns | "
                             f"{mask_log} | "
                             f"LR: {current_lr:.6e}"
@@ -345,7 +337,6 @@ def train(
                         checkpoint_path = Path(model_weights_out_dir) / f"{global_step}.pt"
                         torch.save(
                             obj={
-                                'epoch': epoch,
                                 'global_step': global_step,
                                 'model_state_dict': model.state_dict(),
                                 'optimizer_state_dict': optimizer.state_dict(),
@@ -377,23 +368,9 @@ def train(
 
                         model.train()
 
-        # End of epoch summary
-        avg_train_loss = sum(train_losses) / len(train_losses)
-        avg_coord_loss = sum(train_coord_losses) / len(train_coord_losses)
-        if predict_tissue_mask:
-            avg_mask_loss = sum(train_mask_losses) / len(train_mask_losses)
+                if global_step > max_iters:
+                    logger.info(
+                        f"\nTraining completed! Best validation loss: {best_val_coord_loss:.6f}")
 
-        mlflow.log_metrics(metrics={
-                "epoch/train_coord_loss": avg_coord_loss,
-            }, step=global_step)
-
-        logger.info(f"\n{'=' * 60}")
-        mask_loss_log = f"| Avg mask loss {avg_mask_loss:.6f}" if predict_tissue_mask else ""
-        logger.info(f"Epoch {epoch}/{n_epochs} completed | Avg Train Loss: {avg_train_loss:.6f} | Avg coord loss {avg_coord_loss:.6f} {mask_loss_log}")
-        logger.info(f"{'=' * 60}\n")
-
-    logger.info(f"\nTraining completed! Best validation loss: {best_val_coord_loss:.6f}")
-
-    mlflow.log_metric("final_best_val_coord_loss", best_val_coord_loss)
-
-    return best_val_coord_loss
+                    mlflow.log_metric("final_best_val_coord_loss", best_val_coord_loss)
+                    return best_val_coord_loss

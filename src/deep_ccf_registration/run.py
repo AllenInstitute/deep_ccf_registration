@@ -357,7 +357,7 @@ def main(config_path: Path):
             train_prefetcher=train_prefetcher,
             model=model,
             optimizer=opt,
-            n_epochs=config.n_epochs,
+            max_iters=config.max_iters,
             model_weights_out_dir=config.model_weights_out_dir,
             learning_rate=config.learning_rate,
             decay_learning_rate=config.decay_learning_rate,
