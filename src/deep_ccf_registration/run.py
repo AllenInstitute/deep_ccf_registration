@@ -209,9 +209,9 @@ def main(config_path: Path):
 
     logger.info('Caching train eval dataset')
     train_eval_prefetcher = BatchPrefetcher(
-        volumes=[train_dataset.volumes[i] for i in train_eval_subject_idxs],
-        warps=[train_dataset.warps[i] for i in train_eval_subject_idxs],
-        subject_metadata=[train_metadata[i] for i in train_eval_subject_idxs],
+        volumes=train_dataset.volumes,
+        warps=train_dataset.warps,
+        subject_metadata=train_metadata,
         n_subjects_per_batch=len(train_eval_subject_idxs),
         memmap_dir=config.memmap_cache_path / 'train_eval',
     )
@@ -385,8 +385,6 @@ def main(config_path: Path):
     os.remove(ccf_annotations_path)
 
     train_prefetcher.stop()
-    train_eval_prefetcher.stop()
-    val_prefetcher.stop()
 
 
 def split_train_val_test(

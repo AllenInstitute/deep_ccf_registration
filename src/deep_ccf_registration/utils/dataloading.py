@@ -111,9 +111,9 @@ class BatchPrefetcher:
 
     def _producer(self):
         """Producer function that loads batches and writes memmaps in the background."""
-        for subject_idx_batch in self.subject_idx_batches:
+        for i, subject_idx_batch in enumerate(self.subject_idx_batches):
             self.cache_data(subject_idx_batch=subject_idx_batch)
-            logger.debug(f'Enqueuing subjects {subject_idx_batch}')
+            logger.info(f'Batch {i} has been cached')
             self.queue.put(subject_idx_batch)
 
     def cache_data(self, subject_idx_batch: list[int]):
@@ -122,11 +122,11 @@ class BatchPrefetcher:
             vol_path = self._memmap_dir / f'vol_{idx}.dat'
             warp_path = self._memmap_dir / f'warp_{idx}.dat'
             if not (vol_path.exists() and warp_path.exists()):
-                logger.info(f'Loading {subject_idx_batch} {i}/{len(subject_idx_batch)}')
+                logger.info(f'Caching {i}/{len(subject_idx_batch)}')
                 volume, warp = self._load_arrays(idx)
                 self._write_single_memmap(idx=idx, volume=volume, warp=warp)
             else:
-                logger.debug(f'Memmap already exists for subject {idx}')
+                logger.debug(f'{idx} already cached')
 
     def start(self):
         if self.thread and self.thread.is_alive():
