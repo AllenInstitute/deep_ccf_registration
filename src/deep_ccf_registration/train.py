@@ -219,8 +219,8 @@ def train(
             train_mask_losses = []
 
             for batch_idx, batch in enumerate(train_dataloader):
-                logger.info(f'Subject group {batch_idx}/{len(train_dataloader)}')
-                if batch_idx == max_num_subject_batch_iterations:
+                logger.info(f'Subject group {batch_idx}/{max(len(train_dataloader), max_num_subject_batch_iterations)}')
+                if batch_idx > max_num_subject_batch_iterations:
                     logger.debug(f'max_num_subject_batch_iterations {max_num_subject_batch_iterations} reached')
                     break
                 input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks, pad_masks, subject_ids = batch
