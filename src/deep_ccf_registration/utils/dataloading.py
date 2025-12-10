@@ -9,6 +9,9 @@ import numpy as np
 import tensorstore
 from loguru import logger
 
+from deep_ccf_registration.utils.logging_utils import timed
+
+
 class BatchPrefetcher:
     """
     Prefetches subject batches in a background thread to avoid blocking the main training loop.
@@ -82,8 +85,11 @@ class BatchPrefetcher:
     def _load_arrays(self, idx: int) -> tuple[np.ndarray, np.ndarray]:
         """Load volume/warp into RAM (only once) before writing memmaps."""
         logger.debug(f'Loading tensors for subject {idx}')
-        volume = self.volumes[idx][:].read().result()
-        warp = self.warps[idx][:].read().result()
+
+        with timed():
+            volume = self.volumes[idx][:].read().result()
+        with timed():
+            warp = self.warps[idx][:].read().result()
         return volume, warp
 
     def _write_single_memmap(self, idx: int, volume: np.ndarray, warp: np.ndarray) -> tuple[Path, Path]:
@@ -92,14 +98,16 @@ class BatchPrefetcher:
         if not vol_path.exists():
             logger.debug(f'writing volume memmap to {vol_path}')
             vol_mmap = np.memmap(vol_path, dtype=volume.dtype, mode='w+', shape=volume.shape)
-            vol_mmap[:] = volume
+            with timed():
+                vol_mmap[:] = volume
             vol_mmap.flush()
 
         warp_path = self._memmap_dir / f'warp_{idx}.dat'
         if not warp_path.exists():
             logger.debug(f'writing warp memmap to {vol_path}')
             warp_mmap = np.memmap(warp_path, dtype=warp.dtype, mode='w+', shape=warp.shape)
-            warp_mmap[:] = warp
+            with timed():
+                warp_mmap[:] = warp
             warp_mmap.flush()
 
         return vol_path, warp_path
