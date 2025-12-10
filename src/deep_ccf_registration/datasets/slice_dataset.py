@@ -201,8 +201,13 @@ class SliceDataset(Dataset):
         self._orientation = orientation
         self._slice_ranges = {orientation: [self._get_slice_range(subject=subject, orientation=orientation) for subject in self._dataset_meta] for orientation in orientation}
         self._registration_downsample_factor = registration_downsample_factor
-        self._warps = self._load_warps(tensorstore_aws_credentials_method=tensorstore_aws_credentials_method)
-        self._volumes = self._load_volumes(tensorstore_aws_credentials_method=tensorstore_aws_credentials_method)
+
+        warps = load_warps(dataset_meta=dataset_meta, tensorstore_aws_credentials_method=tensorstore_aws_credentials_method)
+        volumes = load_volumes(dataset_meta=dataset_meta)
+
+        self._volume_metadata = [(v.dtype.numpy_dtype, tuple(v.shape)) for v in volumes]
+        self._warp_metadata = [(w.dtype.numpy_dtype, tuple(w.shape)) for w in warps]
+
         self._crop_warp_to_bounding_box = crop_warp_to_bounding_box
         self._patch_size = patch_size
         self._mode = mode
@@ -224,14 +229,6 @@ class SliceDataset(Dataset):
         self._ccf_annotations = None
         self._return_tissue_mask = return_tissue_mask
         self._data_cache_dir = data_cache_dir
-
-    @property
-    def volumes(self) -> list:
-        return self._volumes
-
-    @property
-    def warps(self) -> list:
-        return self._warps
 
     @property
     def patch_size(self) -> Optional[tuple[int, int]]:
@@ -295,69 +292,6 @@ class SliceDataset(Dataset):
                     positions.append((y_start, x_start))
 
         return positions
-
-    def _load_warps(self, tensorstore_aws_credentials_method: str = "default") -> list[tensorstore.TensorStore]:
-        """
-        Load displacement fields for all subjects in the dataset.
-
-        Parameters
-        ----------
-        tensorstore_aws_credentials_method : str, default="default"
-            Credentials lookup method for tensorstore.
-
-        Returns
-        -------
-        list[tensorstore.TensorStore]
-            List of displacement field arrays/tensorstores for each subject.
-        """
-        warps = []
-        for experiment_meta in self._dataset_meta:
-            if (isinstance(experiment_meta.ls_to_template_inverse_warp_path, Path) and
-                    experiment_meta.ls_to_template_inverse_warp_path.name.endswith('.nii.gz')):
-                logger.info('Loading .nii.gz (slow!)')
-                warp = ants.image_read(str(experiment_meta.ls_to_template_inverse_warp_path)).numpy()
-            else:
-                warp = tensorstore.open(
-                    spec={
-                        'driver': 'zarr3',
-                        'kvstore': create_kvstore(
-                            path=str(experiment_meta.ls_to_template_inverse_warp_path),
-                            aws_credentials_method=tensorstore_aws_credentials_method
-                        )
-                    },
-                    read=True
-                ).result()
-            warps.append(warp)
-        return warps
-
-    def _load_volumes(self, tensorstore_aws_credentials_method: str = "default") -> list[tensorstore.TensorStore]:
-        """
-        Load stitched volumes for all subjects in the dataset.
-
-        Parameters
-        ----------
-        tensorstore_aws_credentials_method : str, default="default"
-            Credentials lookup method for tensorstore.
-
-        Returns
-        -------
-        list[tensorstore.TensorStore]
-            List of volume tensorstores for each subject.
-        """
-        volumes = []
-        for experiment_meta in self._dataset_meta:
-            volume = tensorstore.open(
-                spec={
-                    'driver': 'auto',
-                    'kvstore': create_kvstore(
-                        path=str(experiment_meta.stitched_volume_path) + f'/{self._registration_downsample_factor}',
-                        aws_credentials_method="anonymous"
-                    )
-                },
-                read=True
-            ).result()
-            volumes.append(volume)
-        return volumes
 
     def _get_slice_from_idx(self, idx: int, orientation: SliceOrientation) -> tuple[int, int]:
         """
@@ -812,10 +746,10 @@ class SliceDataset(Dataset):
         vol_path = self._data_cache_dir / f'vol_{idx}.dat'
         warp_path = self._data_cache_dir / f'warp_{idx}.dat'
 
-        volume_meta = self._volumes[idx]
-        warp_meta = self._warps[idx]
-        volume = np.memmap(vol_path, dtype=volume_meta.dtype.numpy_dtype, mode='r', shape=volume_meta.shape)
-        warp = np.memmap(warp_path, dtype=warp_meta.dtype.numpy_dtype, mode='r', shape=warp_meta.shape)
+        volume_dtype, volume_shape = self._volume_metadata[idx]
+        warp_dtype, warp_shape = self._warp_metadata[idx]
+        volume = np.memmap(vol_path, dtype=volume_dtype, mode='r', shape=volume_shape)
+        warp = np.memmap(warp_path, dtype=warp_dtype, mode='r', shape=warp_shape)
         return volume, warp
     
 def _calculate_non_pad_mask(shape: tuple[int, int], pad_transform: dict[str, Any]):
@@ -828,3 +762,61 @@ def _calculate_non_pad_mask(shape: tuple[int, int], pad_transform: dict[str, Any
     else:
         mask[:] = 1
     return mask
+
+def load_warps(dataset_meta: list[SubjectMetadata], tensorstore_aws_credentials_method: str = "default") -> list[tensorstore.TensorStore]:
+    """
+    Load displacement fields for all subjects in the dataset.
+
+    Parameters
+    ----------
+    tensorstore_aws_credentials_method : str, default="default"
+        Credentials lookup method for tensorstore.
+
+    Returns
+    -------
+    list[tensorstore.TensorStore]
+        List of displacement field arrays/tensorstores for each subject.
+    """
+    warps = []
+    for experiment_meta in dataset_meta:
+        if (isinstance(experiment_meta.ls_to_template_inverse_warp_path, Path) and
+                experiment_meta.ls_to_template_inverse_warp_path.name.endswith('.nii.gz')):
+            logger.info('Loading .nii.gz (slow!)')
+            warp = ants.image_read(str(experiment_meta.ls_to_template_inverse_warp_path)).numpy()
+        else:
+            warp = tensorstore.open(
+                spec={
+                    'driver': 'zarr3',
+                    'kvstore': create_kvstore(
+                        path=str(experiment_meta.ls_to_template_inverse_warp_path),
+                        aws_credentials_method=tensorstore_aws_credentials_method
+                    )
+                },
+                read=True
+            ).result()
+        warps.append(warp)
+    return warps
+
+def load_volumes(dataset_meta: list[SubjectMetadata], registration_downsample_factor: int = 3) -> list[tensorstore.TensorStore]:
+    """
+    Load stitched volumes for all subjects in the dataset.
+
+    Returns
+    -------
+    list[tensorstore.TensorStore]
+        List of volume tensorstores for each subject.
+    """
+    volumes = []
+    for experiment_meta in dataset_meta:
+        volume = tensorstore.open(
+            spec={
+                'driver': 'auto',
+                'kvstore': create_kvstore(
+                    path=str(experiment_meta.stitched_volume_path) + f'/{registration_downsample_factor}',
+                    aws_credentials_method="anonymous"
+                )
+            },
+            read=True
+        ).result()
+        volumes.append(volume)
+    return volumes

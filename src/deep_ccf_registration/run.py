@@ -23,7 +23,7 @@ from deep_ccf_registration.configs.train_config import TrainConfig
 from deep_ccf_registration.inference import RegionAcronymCCFIdsMap
 from deep_ccf_registration.datasets.slice_dataset import (
     SliceDataset,
-    TrainMode, TissueBoundingBoxes,
+    TrainMode, TissueBoundingBoxes, load_volumes, load_warps,
 )
 from deep_ccf_registration.metadata import SubjectMetadata
 from deep_ccf_registration.train import train
@@ -207,10 +207,13 @@ def main(config_path: Path):
         prefetch_factor=config.dataloader_prefetch_factor,
     )
 
+    train_volumes = load_volumes(dataset_meta=train_metadata)
+    train_warps = load_warps(dataset_meta=train_metadata, tensorstore_aws_credentials_method=config.tensorstore_aws_credentials_method)
+
     logger.info('Caching train eval dataset')
     train_eval_prefetcher = BatchPrefetcher(
-        volumes=train_dataset.volumes,
-        warps=train_dataset.warps,
+        volumes=train_volumes,
+        warps=train_warps,
         subject_metadata=train_metadata,
         n_subjects_per_batch=len(train_eval_subject_idxs),
         memmap_dir=config.memmap_cache_path / 'train_eval',
@@ -218,8 +221,8 @@ def main(config_path: Path):
     train_eval_prefetcher.cache_data(subject_idx_batch=train_eval_subject_idxs.tolist())
 
     train_prefetcher = BatchPrefetcher(
-        volumes=train_dataset.volumes,
-        warps=train_dataset.warps,
+        volumes=train_volumes,
+        warps=train_warps,
         subject_metadata=train_dataset.subject_metadata,
         n_subjects_per_batch=config.num_subjects_per_rotation,
         memmap_dir=config.memmap_cache_path / 'train',
@@ -256,10 +259,13 @@ def main(config_path: Path):
         data_cache_dir=config.memmap_cache_path / 'val',
     )
 
+    val_volumes = load_volumes(dataset_meta=val_metadata)
+    val_warps = load_warps(dataset_meta=val_metadata, tensorstore_aws_credentials_method=config.tensorstore_aws_credentials_method)
+
     logger.info('Caching val dataset')
     val_prefetcher = BatchPrefetcher(
-        volumes=val_dataset.volumes,
-        warps=val_dataset.warps,
+        volumes=val_volumes,
+        warps=val_warps,
         subject_metadata=val_metadata,
         n_subjects_per_batch=len(val_metadata),
         memmap_dir=config.memmap_cache_path / 'val',
