@@ -10,7 +10,7 @@ import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from monai.networks.nets import UNet
 from torch.nn import MSELoss
-from torch.utils.data import Subset, DataLoader
+from torch.utils.data import Subset, DataLoader, SubsetRandomSampler
 from torch.utils.data.distributed import DistributedSampler
 from loguru import logger
 import torch.nn.functional as F
@@ -120,20 +120,17 @@ def _evaluate_loss(
     return coordinate_loss, tissue_loss, loss
 
 def train(
-        train_dataset: SliceDataset,
+        train_dataloader: DataLoader,
         train_prefetcher: BatchPrefetcher,
         train_eval_dataloader: DataLoader,
         val_dataloader: DataLoader,
         model: UNet,
         optimizer,
         max_iters: int,
-        batch_size: int,
-        num_train_dataloader_workers: int,
         model_weights_out_dir: Path,
         ccf_annotations: np.ndarray,
         ls_template_parameters: AntsImageParameters,
         learning_rate: float = 0.001,
-        train_dataloader_prefetch_factor: Optional[int] = None,
         max_num_subject_batch_iterations: int = 200,
         decay_learning_rate: bool = True,
         warmup_iters: int = 1000,
@@ -144,7 +141,7 @@ def train(
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         exclude_background_pixels: bool = True,
         predict_tissue_mask: bool = True,
-        is_debug: bool = False,
+        is_debug: bool = False
 ):
     """
     Train slice registration model
@@ -188,7 +185,7 @@ def train(
     model.to(device)
 
     logger.info(f"Starting training for {max_iters} iters")
-    logger.info(f"Training samples: {len(train_dataset)}")
+    logger.info(f"Training samples: {len(train_dataloader.dataset)}")
     logger.info(f"Validation samples: {len(val_dataloader.dataset)}")
     logger.info(f"Device: {device}")
 
@@ -197,21 +194,13 @@ def train(
     while True:
         for subject_idx_batch in train_prefetcher:
             logger.debug(f'Training on subjects {subject_idx_batch}')
-            batch_sample_idxs = train_dataset.get_subject_sample_idxs(subject_idxs=subject_idx_batch)
 
             if is_debug:
-                batch_dataset = Subset(train_dataset, indices=[1000])
+                batch_sample_idxs = [1000]
             else:
-                batch_dataset = Subset(train_dataset, indices=batch_sample_idxs)
+                batch_sample_idxs = train_dataloader.dataset.get_subject_sample_idxs(subject_idxs=subject_idx_batch)
 
-            train_dataloader = DataLoader(
-                dataset=batch_dataset,
-                batch_size=batch_size,
-                shuffle=True,
-                num_workers=num_train_dataloader_workers,
-                pin_memory=(device == "cuda"),
-                prefetch_factor=train_dataloader_prefetch_factor,
-            )
+            train_dataloader.sampler.set_indices(indices=batch_sample_idxs)
 
             model.train()
             train_losses = []

@@ -29,6 +29,7 @@ from deep_ccf_registration.metadata import SubjectMetadata
 from deep_ccf_registration.train import train
 from deep_ccf_registration.models import UNetWithRegressionHeads
 from deep_ccf_registration.utils.dataloading import BatchPrefetcher
+from deep_ccf_registration.utils.sampler import SliceSampler
 
 logger.remove()
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -205,6 +206,7 @@ def main(config_path: Path):
         num_workers=config.num_workers,
         pin_memory=(device == "cuda"),
         prefetch_factor=config.dataloader_prefetch_factor,
+        persistent_workers=config.num_workers > 0
     )
 
     train_volumes = load_volumes(dataset_meta=train_metadata)
@@ -275,6 +277,14 @@ def main(config_path: Path):
     if config.debug:
         val_dataset = Subset(val_dataset, indices=[1000])
 
+    train_dataloader = DataLoader(
+        dataset=train_dataset,
+        batch_size=config.batch_size,
+        sampler=SliceSampler(indices=list(range(len(train_dataset)))), # initializing, will get reset
+        num_workers=config.num_workers,
+        persistent_workers=config.num_workers > 0,
+    )
+
     val_dataloader = DataLoader(
         dataset=val_dataset,
         batch_size=config.batch_size,
@@ -282,6 +292,7 @@ def main(config_path: Path):
         num_workers=config.num_workers,
         pin_memory=(device == "cuda"),
         prefetch_factor=config.dataloader_prefetch_factor,
+        persistent_workers=config.num_workers > 0
     )
 
     logger.info(f"Num train samples: {len(train_dataset)}")
@@ -357,7 +368,7 @@ def main(config_path: Path):
         random.setstate(state)
 
         best_val_rmse = train(
-            train_dataset=train_dataset,
+            train_dataloader=train_dataloader,
             train_eval_dataloader=train_eval_dataloader,
             val_dataloader=val_dataloader,
             train_prefetcher=train_prefetcher,
@@ -377,11 +388,8 @@ def main(config_path: Path):
             ls_template_parameters=ls_template_parameters,
             exclude_background_pixels=config.exclude_background_pixels,
             predict_tissue_mask=config.predict_tissue_mask,
-            batch_size=config.batch_size,
-            num_train_dataloader_workers=config.num_workers,
-            train_dataloader_prefetch_factor=config.dataloader_prefetch_factor,
-            is_debug=config.debug,
             max_num_subject_batch_iterations=config.max_num_subject_batch_iterations,
+            is_debug=config.debug,
         )
 
     logger.info("=" * 60)
@@ -391,6 +399,8 @@ def main(config_path: Path):
     os.remove(ccf_annotations_path)
 
     train_prefetcher.stop()
+    train_eval_prefetcher.cleanup()
+    val_prefetcher.cleanup()
 
 
 def split_train_val_test(
