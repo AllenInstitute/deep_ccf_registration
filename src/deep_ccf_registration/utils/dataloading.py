@@ -1,4 +1,3 @@
-import atexit
 import os
 import queue
 import shutil
@@ -9,21 +8,6 @@ from typing import Iterator, Optional
 import numpy as np
 import tensorstore
 from loguru import logger
-
-
-class MemmapCache:
-    def __init__(self):
-        self._paths: dict[int, tuple[Path, Path]] = {}
-
-    def set(self, idx: int, vol_path: Path, warp_path: Path):
-        self._paths[idx] = (vol_path, warp_path)
-
-    def get(self, idx: int) -> Optional[tuple[Path, Path]]:
-        return self._paths.get(idx)
-
-    def clear(self):
-        self._paths.clear()
-
 
 class BatchPrefetcher:
     """
@@ -54,11 +38,9 @@ class BatchPrefetcher:
         volumes: list[tensorstore.TensorStore],
         warps: list[tensorstore.TensorStore],
         subject_metadata: list,
-        memmap_cache: MemmapCache,
         n_subjects_per_batch: int,
         maxsize: int = 1,
         memmap_dir: Path = Path('/results'),
-        clean_on_exit: bool = True
     ):
         self._maxsize = maxsize
         self.queue: queue.Queue = queue.Queue(maxsize=maxsize)
@@ -67,13 +49,9 @@ class BatchPrefetcher:
         self.n_subjects_per_batch = n_subjects_per_batch
         self.subject_idx_batches = self._get_subject_batches(subject_metadata, n_subjects_per_batch)
         self.thread: Optional[threading.Thread] = None
-        self.exception: Optional[Exception] = None
         os.makedirs(memmap_dir, exist_ok=True)
         self._memmap_dir = memmap_dir
-        self.memmap_cache = memmap_cache
         self._subject_metadata = subject_metadata
-        self._register_cleanup()
-        self._clean_on_exit = clean_on_exit
 
     @staticmethod
     def _get_subject_batches(subject_metadata: list, n_subjects_per_batch: int) -> list[list[int]]:
@@ -124,74 +102,52 @@ class BatchPrefetcher:
             warp_mmap[:] = warp
             warp_mmap.flush()
 
-        self.memmap_cache.set(idx, vol_path, warp_path)
         return vol_path, warp_path
-
-    def _register_cleanup(self):
-        atexit.register(self.cleanup)
 
     def cleanup(self):
         logger.info(f'Cleaning up {self._memmap_dir}')
         shutil.rmtree(self._memmap_dir)
         os.makedirs(self._memmap_dir, exist_ok=True)
-        self.memmap_cache.clear()
 
     def _producer(self):
         """Producer function that loads batches and writes memmaps in the background."""
-        try:
-            for subject_idx_batch in self.subject_idx_batches:
-                logger.info(f'Loading subject data {subject_idx_batch}')
-                for idx in subject_idx_batch:
-                    if self.memmap_cache.get(idx) is None:
-                        volume, warp = self._load_arrays(idx)
-                        self._write_single_memmap(idx=idx, volume=volume, warp=warp)
-                    else:
-                        logger.debug(f'Memmap already exists for subject {idx}')
-                logger.debug(f'Enqueuing subjects {subject_idx_batch}')
-                self.queue.put(subject_idx_batch)
-            self.queue.put(None)
-        except Exception as e:
-            self.exception = e
-            self.queue.put(None)
+        for subject_idx_batch in self.subject_idx_batches:
+            self.cache_data(subject_idx_batch=subject_idx_batch)
+            logger.debug(f'Enqueuing subjects {subject_idx_batch}')
+            self.queue.put(subject_idx_batch)
 
-    def _reset_iteration_state(self):
+    def cache_data(self, subject_idx_batch: list[int]):
+        logger.debug(f'caching {subject_idx_batch}')
+        for idx in subject_idx_batch:
+            vol_path = self._memmap_dir / f'vol_{idx}.dat'
+            warp_path = self._memmap_dir / f'warp_{idx}.dat'
+            if not (vol_path.exists() and warp_path.exists()):
+                volume, warp = self._load_arrays(idx)
+                self._write_single_memmap(idx=idx, volume=volume, warp=warp)
+            else:
+                logger.debug(f'Memmap already exists for subject {idx}')
+
+    def start(self):
         if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=5.0)
-        self.queue = queue.Queue(maxsize=self._maxsize)
-        self.subject_idx_batches = self._get_subject_batches(self._subject_metadata, self.n_subjects_per_batch)
-        self.exception = None
-
-    def _start_producer(self):
+            return
         self.thread = threading.Thread(target=self._producer, daemon=True)
         self.thread.start()
 
-    def iter_batches(self) -> Iterator[list[int]]:
-        self._reset_iteration_state()
-        self._start_producer()
-        while True:
-            item = self.queue.get()
-            if item is None:
-                if self.exception:
-                    raise self.exception
-                break
-            logger.debug(f'Loaded {item} from queue')
-            yield item
+    def stop(self):
+        self.cleanup()
+        if self.thread:
+            self.thread.join(timeout=5.0)
+
+    def reset(self):
+        """Reset the queue/thread so the same subject batches can be iterated again."""
         if self.thread and self.thread.is_alive():
             self.thread.join(timeout=5.0)
+        self.queue = queue.Queue(maxsize=self._maxsize)
+        self.thread = None
+        self.start()
 
     def __iter__(self) -> Iterator[list[int]]:
-        return self.iter_batches()
-
-    def start(self):
-        self._reset_iteration_state()
-        self._start_producer()
-        return self
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=5.0)
-        if self._clean_on_exit:
-            self.cleanup()
+        if not self.thread or not self.thread.is_alive():
+            self.start()
+        for _ in range(len(self.subject_idx_batches)):
+            yield self.queue.get()

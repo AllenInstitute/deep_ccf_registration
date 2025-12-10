@@ -19,7 +19,6 @@ from skimage.exposure import rescale_intensity
 from torch.utils.data import Dataset
 
 from deep_ccf_registration.metadata import AcquisitionAxis, SubjectMetadata, SliceOrientation
-from deep_ccf_registration.utils.dataloading import MemmapCache
 from deep_ccf_registration.utils.logging_utils import timed_func, timed
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 from deep_ccf_registration.utils.transforms import transform_points_to_template_ants_space, \
@@ -135,7 +134,7 @@ class SliceDataset(Dataset):
                  ls_template_parameters: AntsImageParameters,
                  tissue_bboxes: TissueBoundingBoxes,
                  template_ml_dim_size: int,
-                 memmap_cache: MemmapCache,
+                 data_cache_dir: Path,
                  ccf_annotations_path: Optional[Path] = None,
                  orientation: Optional[SliceOrientation] = None,
                  registration_downsample_factor: int = 3,
@@ -190,7 +189,6 @@ class SliceDataset(Dataset):
         tissue_bboxes: tissue bounding boxes, obtained via `get_tissue_bounding_box.py`.
             Each subject id maps to a list of bounding boxes ordered by slice index, or null if no tissue is present in slices
         template_ml_dim_size: template ML shape in index space
-        memmap_cache : MemmapCache
         """
         super().__init__()
         self._dataset_meta = dataset_meta
@@ -205,7 +203,6 @@ class SliceDataset(Dataset):
         self._registration_downsample_factor = registration_downsample_factor
         self._warps = self._load_warps(tensorstore_aws_credentials_method=tensorstore_aws_credentials_method)
         self._volumes = self._load_volumes(tensorstore_aws_credentials_method=tensorstore_aws_credentials_method)
-        self._memmap_cache = memmap_cache
         self._crop_warp_to_bounding_box = crop_warp_to_bounding_box
         self._patch_size = patch_size
         self._mode = mode
@@ -226,6 +223,7 @@ class SliceDataset(Dataset):
         self._ccf_annotations_path = ccf_annotations_path
         self._ccf_annotations = None
         self._return_tissue_mask = return_tissue_mask
+        self._data_cache_dir = data_cache_dir
 
     @property
     def volumes(self) -> list:
@@ -811,9 +809,9 @@ class SliceDataset(Dataset):
         return all_indices
 
     def _get_arrays(self, idx: int) -> tuple[np.ndarray, np.ndarray]:
-        paths = self._memmap_cache.get(idx)
+        vol_path = self._data_cache_dir / f'vol_{idx}.dat'
+        warp_path = self._data_cache_dir / f'warp_{idx}.dat'
 
-        vol_path, warp_path = paths
         volume_meta = self._volumes[idx]
         warp_meta = self._warps[idx]
         volume = np.memmap(vol_path, dtype=volume_meta.dtype.numpy_dtype, mode='r', shape=volume_meta.shape)
