@@ -190,176 +190,168 @@ def train(
     logger.info(f"Device: {device}")
 
     pbar = tqdm(total=max_iters, desc="Training", smoothing=0)
+    pbar_postfix_entries: dict[str, Any] = {}
 
     while True:
-        for subject_idx_batch in train_prefetcher:
-            logger.debug(f'Training on subjects {subject_idx_batch}')
+        model.train()
+        train_losses = []
+        train_coord_losses = []
+        train_mask_losses = []
 
-            if is_debug:
-                batch_sample_idxs = [1000]
-            else:
-                batch_sample_idxs = train_dataloader.dataset.get_subject_sample_idxs(subject_idxs=subject_idx_batch)
+        for batch in train_dataloader:
+            sampler = train_dataloader.sampler
+            pbar_postfix_entries['subject_group'] = sampler.current_subject_batch_idx
+            pbar.set_postfix(pbar_postfix_entries)
+            input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks, pad_masks, subject_ids = batch
+            input_images, target_template_points, tissue_masks, pad_masks = input_images.to(device), target_template_points.to(device), tissue_masks.to(device), pad_masks.to(device)
 
-            train_dataloader.sampler.set_indices(indices=batch_sample_idxs)
+            if decay_learning_rate:
+                lr = _get_lr(
+                    iteration=global_step,
+                    warmup_iters=warmup_iters,
+                    learning_rate=learning_rate,
+                    lr_decay_iters=lr_decay_iters,
+                    min_lr=min_lr,
+                )
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = lr
 
-            model.train()
-            train_losses = []
-            train_coord_losses = []
-            train_mask_losses = []
+            optimizer.zero_grad()
+            with autocast_context:
+                with timed():
+                    model_out = model(input_images)
+                coordinate_loss, tissue_loss, loss = _evaluate_loss(
+                    model_out=model_out,
+                    exclude_background_pixels=exclude_background_pixels,
+                    coord_loss=coord_loss,
+                    target_template_points=target_template_points,
+                    tissue_masks=tissue_masks.bool(),
+                    pad_masks=pad_masks.bool(),
+                    input_image_transforms=input_image_transforms,
+                    predict_tissue_mask=predict_tissue_mask,
+                )
 
-            for batch_idx, batch in enumerate(train_dataloader):
-                logger.info(f'Subject group {batch_idx}/{max(len(train_dataloader), max_num_subject_batch_iterations)}')
-                if batch_idx > max_num_subject_batch_iterations:
-                    logger.debug(f'max_num_subject_batch_iterations {max_num_subject_batch_iterations} reached')
-                    break
-                input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks, pad_masks, subject_ids = batch
-                input_images, target_template_points, tissue_masks, pad_masks = input_images.to(device), target_template_points.to(device), tissue_masks.to(device), pad_masks.to(device)
+            loss.backward()
+            optimizer.step()
 
-                if decay_learning_rate:
-                    lr = _get_lr(
+            train_losses.append(loss.item())
+            train_coord_losses.append(coordinate_loss.item())
+            if tissue_loss is not None:
+                train_mask_losses.append(tissue_loss.item())
+
+            global_step += 1
+
+            mlflow.log_metrics({
+                "train/coord_loss": coordinate_loss.item(),
+                "train/learning_rate": optimizer.param_groups[0]['lr'],
+            }, step=global_step)
+
+            pbar_postfix_entries['loss'] = f"{loss.item():.6f}"
+            pbar_postfix_entries['coord_loss'] = f"{coordinate_loss.item():.6f}"
+            pbar.set_postfix(pbar_postfix_entries)
+            pbar.update(1)
+
+
+            # Periodic evaluation
+            if global_step % eval_interval == 0:
+                with torch.no_grad():
+                    train_rmse, train_rmse_tissue_only, train_tissue_mask_dice = evaluate_batch(
+                        dataloader=train_eval_dataloader,
+                        model=model,
+                        ccf_annotations=ccf_annotations,
+                        ls_template_parameters=ls_template_parameters,
+                        device=device,
                         iteration=global_step,
-                        warmup_iters=warmup_iters,
-                        learning_rate=learning_rate,
-                        lr_decay_iters=lr_decay_iters,
-                        min_lr=min_lr,
-                    )
-                    for param_group in optimizer.param_groups:
-                        param_group['lr'] = lr
-
-                optimizer.zero_grad()
-                with autocast_context:
-                    with timed():
-                        model_out = model(input_images)
-                    coordinate_loss, tissue_loss, loss = _evaluate_loss(
-                        model_out=model_out,
+                        is_train=True,
+                        autocast_context=autocast_context,
                         exclude_background_pixels=exclude_background_pixels,
-                        coord_loss=coord_loss,
-                        target_template_points=target_template_points,
-                        tissue_masks=tissue_masks.bool(),
-                        pad_masks=pad_masks.bool(),
-                        input_image_transforms=input_image_transforms,
+                        predict_tissue_mask=predict_tissue_mask,
+                    )
+                    val_rmse, val_rmse_tissue_only, val_tissue_mask_dice = evaluate_batch(
+                        dataloader=val_dataloader,
+                        model=model,
+                        ccf_annotations=ccf_annotations,
+                        ls_template_parameters=ls_template_parameters,
+                        device=device,
+                        iteration=global_step,
+                        is_train=False,
+                        autocast_context=autocast_context,
+                        exclude_background_pixels=exclude_background_pixels,
                         predict_tissue_mask=predict_tissue_mask,
                     )
 
-                loss.backward()
-                optimizer.step()
+                    current_lr = optimizer.param_groups[0]['lr']
 
-                train_losses.append(loss.item())
-                train_coord_losses.append(coordinate_loss.item())
-                if tissue_loss is not None:
-                    train_mask_losses.append(tissue_loss.item())
+                    mlflow.log_metrics(
+                        metrics={
+                            "eval/train_rmse": train_rmse,
+                            "eval/val_rmse": val_rmse,
+                    },
+                        step=global_step
+                    )
 
-                global_step += 1
+                    if predict_tissue_mask:
+                        assert train_rmse_tissue_only is not None
+                        assert val_rmse_tissue_only is not None
+                        assert train_tissue_mask_dice is not None
+                        assert val_tissue_mask_dice is not None
+                        mlflow.log_metrics(metrics={
+                            "eval/val_rmse_tissue_only": val_rmse_tissue_only,
+                            "eval/train_tissue_mask_dice": train_tissue_mask_dice,
+                            "eval/val_tissue_mask_dice": val_tissue_mask_dice,
+                            "eval/train_rmse_tissue_only": train_rmse_tissue_only,
+                        }, step=global_step)
 
-                mlflow.log_metrics({
-                    "train/coord_loss": coordinate_loss.item(),
-                    "train/learning_rate": optimizer.param_groups[0]['lr'],
-                }, step=global_step)
-
-                pbar.set_postfix({"loss": f"{loss.item():.6f}", "coord_loss": f"{coordinate_loss.item():.6f}"})
-                pbar.update(1)
-
-
-                # Periodic evaluation
-                if global_step % eval_interval == 0:
-                    with torch.no_grad():
-                        train_rmse, train_rmse_tissue_only, train_tissue_mask_dice = evaluate_batch(
-                            dataloader=train_eval_dataloader,
-                            model=model,
-                            ccf_annotations=ccf_annotations,
-                            ls_template_parameters=ls_template_parameters,
-                            device=device,
-                            iteration=global_step,
-                            is_train=True,
-                            autocast_context=autocast_context,
-                            exclude_background_pixels=exclude_background_pixels,
-                            predict_tissue_mask=predict_tissue_mask,
-                        )
-                        val_rmse, val_rmse_tissue_only, val_tissue_mask_dice = evaluate_batch(
-                            dataloader=val_dataloader,
-                            model=model,
-                            ccf_annotations=ccf_annotations,
-                            ls_template_parameters=ls_template_parameters,
-                            device=device,
-                            iteration=global_step,
-                            is_train=False,
-                            autocast_context=autocast_context,
-                            exclude_background_pixels=exclude_background_pixels,
-                            predict_tissue_mask=predict_tissue_mask,
-                        )
-
-                        current_lr = optimizer.param_groups[0]['lr']
-
-                        mlflow.log_metrics(
-                            metrics={
-                                "eval/train_rmse": train_rmse,
-                                "eval/val_rmse": val_rmse,
-                        },
-                            step=global_step
-                        )
-
-                        if predict_tissue_mask:
-                            assert train_rmse_tissue_only is not None
-                            assert val_rmse_tissue_only is not None
-                            assert train_tissue_mask_dice is not None
-                            assert val_tissue_mask_dice is not None
-                            mlflow.log_metrics(metrics={
-                                "eval/val_rmse_tissue_only": val_rmse_tissue_only,
-                                "eval/train_tissue_mask_dice": train_tissue_mask_dice,
-                                "eval/val_tissue_mask_dice": val_tissue_mask_dice,
-                                "eval/train_rmse_tissue_only": train_rmse_tissue_only,
-                            }, step=global_step)
-
-                        if predict_tissue_mask:
-                            mask_log = f"Train mask dice: {train_tissue_mask_dice} | "
-                            f"Val mask dice: {val_tissue_mask_dice} | "
-                            f"Train RMSE tissue only: {train_rmse_tissue_only:.6f} microns | Val RMSE tissue only: {val_rmse_tissue_only:.6f} microns | "
-                        else:
-                            mask_log = ""
-                        logger.info(
-                            f"Step {global_step} | "
-                            f"Train RMSE: {train_rmse:.6f} microns | Val RMSE: {val_rmse:.6f} microns | "
-                            f"{mask_log} | "
-                            f"LR: {current_lr:.6e}"
-                        )
-
-                        checkpoint_path = Path(model_weights_out_dir) / f"{global_step}.pt"
-                        torch.save(
-                            obj={
-                                'global_step': global_step,
-                                'model_state_dict': model.state_dict(),
-                                'optimizer_state_dict': optimizer.state_dict(),
-                                'val_rmse': val_rmse,
-                            },
-                            f=checkpoint_path,
-                        )
-
-                        # Check for improvement
-                        if val_rmse < best_val_coord_loss - min_delta:
-                            best_val_coord_loss = val_rmse
-                            patience_counter = 0
-
-                            mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
-                            mlflow.log_metric("best_val_rmse", best_val_coord_loss, step=global_step)
-
-                            logger.info(f"New best model saved! Val RMSE: {val_rmse:.6f}")
-                        else:
-                            patience_counter += 1
-                            logger.info(f"No improvement. Patience: {patience_counter}/{patience}")
-
-                        # Early stopping
-                        if patience_counter >= patience:
-                            logger.info(f"\nEarly stopping triggered after {global_step} steps")
-                            logger.info(f"Best validation MAE: {best_val_coord_loss:.6f}")
-                            mlflow.log_metric("final_best_val_rmse", best_val_coord_loss)
-
-                            return best_val_coord_loss
-
-                        model.train()
-
-                if global_step > max_iters:
+                    if predict_tissue_mask:
+                        mask_log = f"Train mask dice: {train_tissue_mask_dice} | "
+                        f"Val mask dice: {val_tissue_mask_dice} | "
+                        f"Train RMSE tissue only: {train_rmse_tissue_only:.6f} microns | Val RMSE tissue only: {val_rmse_tissue_only:.6f} microns | "
+                    else:
+                        mask_log = ""
                     logger.info(
-                        f"\nTraining completed! Best validation loss: {best_val_coord_loss:.6f}")
+                        f"Step {global_step} | "
+                        f"Train RMSE: {train_rmse:.6f} microns | Val RMSE: {val_rmse:.6f} microns | "
+                        f"{mask_log} | "
+                        f"LR: {current_lr:.6e}"
+                    )
 
-                    mlflow.log_metric("final_best_val_coord_loss", best_val_coord_loss)
-                    return best_val_coord_loss
+                    checkpoint_path = Path(model_weights_out_dir) / f"{global_step}.pt"
+                    torch.save(
+                        obj={
+                            'global_step': global_step,
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'val_rmse': val_rmse,
+                        },
+                        f=checkpoint_path,
+                    )
+
+                    # Check for improvement
+                    if val_rmse < best_val_coord_loss - min_delta:
+                        best_val_coord_loss = val_rmse
+                        patience_counter = 0
+
+                        mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
+                        mlflow.log_metric("best_val_rmse", best_val_coord_loss, step=global_step)
+
+                        logger.info(f"New best model saved! Val RMSE: {val_rmse:.6f}")
+                    else:
+                        patience_counter += 1
+                        logger.info(f"No improvement. Patience: {patience_counter}/{patience}")
+
+                    # Early stopping
+                    if patience_counter >= patience:
+                        logger.info(f"\nEarly stopping triggered after {global_step} steps")
+                        logger.info(f"Best validation MAE: {best_val_coord_loss:.6f}")
+                        mlflow.log_metric("final_best_val_rmse", best_val_coord_loss)
+
+                        return best_val_coord_loss
+
+                    model.train()
+
+            if global_step > max_iters:
+                logger.info(
+                    f"\nTraining completed! Best validation loss: {best_val_coord_loss:.6f}")
+
+                mlflow.log_metric("final_best_val_coord_loss", best_val_coord_loss)
+                return best_val_coord_loss

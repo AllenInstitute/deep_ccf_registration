@@ -121,7 +121,7 @@ class BatchPrefetcher:
         """Producer function that loads batches and writes memmaps in the background."""
         for i, subject_idx_batch in enumerate(self.subject_idx_batches):
             self.cache_data(subject_idx_batch=subject_idx_batch)
-            logger.info(f'Batch {i} has been cached')
+            logger.debug(f'Batch {i} has been cached')
             self.queue.put(subject_idx_batch)
 
     def cache_data(self, subject_idx_batch: list[int]):

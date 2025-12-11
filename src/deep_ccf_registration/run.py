@@ -280,7 +280,11 @@ def main(config_path: Path):
     train_dataloader = DataLoader(
         dataset=train_dataset,
         batch_size=config.batch_size,
-        sampler=SliceSampler(indices=list(range(len(train_dataset)))), # initializing, will get reset
+        sampler=SliceSampler(
+            dataset=train_dataset,
+            subject_batch_iter=train_prefetcher,
+            max_iters_per_subject_batch=config.max_num_subject_batch_iterations,
+            batch_size=config.batch_size, is_debug=config.debug),
         num_workers=config.num_workers,
         persistent_workers=config.num_workers > 0,
     )
