@@ -220,7 +220,7 @@ def main(config_path: Path):
         n_subjects_per_batch=len(train_eval_subject_idxs),
         memmap_dir=config.memmap_cache_path / 'train_eval',
     )
-    train_eval_prefetcher.cache_data(subject_idx_batch=train_eval_subject_idxs.tolist())
+    train_eval_prefetcher.start()
 
     train_prefetcher = BatchPrefetcher(
         volumes=train_volumes,
@@ -272,7 +272,7 @@ def main(config_path: Path):
         n_subjects_per_batch=len(val_metadata),
         memmap_dir=config.memmap_cache_path / 'val',
     )
-    val_prefetcher.cache_data(subject_idx_batch=list(range(len(val_metadata))))
+    val_prefetcher.start()
 
     if config.debug:
         val_dataset = Subset(val_dataset, indices=[1000])
@@ -403,8 +403,8 @@ def main(config_path: Path):
     os.remove(ccf_annotations_path)
 
     train_prefetcher.stop()
-    train_eval_prefetcher.cleanup()
-    val_prefetcher.cleanup()
+    train_eval_prefetcher.stop()
+    val_prefetcher.stop()
 
 
 def split_train_val_test(
