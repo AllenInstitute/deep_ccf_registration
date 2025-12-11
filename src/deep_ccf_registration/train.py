@@ -189,7 +189,7 @@ def train(
     logger.info(f"Validation samples: {len(val_dataloader.dataset)}")
     logger.info(f"Device: {device}")
 
-    pbar = tqdm(total=max_iters, desc="Training", smoothing=0)
+    pbar = None
     pbar_postfix_entries: dict[str, Any] = {}
 
     while True:
@@ -199,6 +199,9 @@ def train(
         train_mask_losses = []
 
         for batch in train_dataloader:
+            if pbar is None:
+                # start timing once first batch has been loaded
+                pbar = tqdm(total=max_iters, desc="Training")
             sampler = train_dataloader.sampler
             pbar_postfix_entries['subject_group'] = sampler.current_subject_batch_idx
             pbar.set_postfix(pbar_postfix_entries)
