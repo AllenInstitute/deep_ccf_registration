@@ -130,7 +130,7 @@ class BatchPrefetcher:
             vol_path = self._memmap_dir / f'vol_{idx}.dat'
             warp_path = self._memmap_dir / f'warp_{idx}.dat'
             if not (vol_path.exists() and warp_path.exists()):
-                logger.info(f'Caching {i}/{len(subject_idx_batch)}')
+                logger.debug(f'Caching {i}/{len(subject_idx_batch)}')
                 volume, warp = self._load_arrays(idx)
                 self._write_single_memmap(idx=idx, volume=volume, warp=warp)
             else:

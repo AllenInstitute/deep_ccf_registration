@@ -375,14 +375,12 @@ def main(config_path: Path):
             train_dataloader=train_dataloader,
             train_eval_dataloader=train_eval_dataloader,
             val_dataloader=val_dataloader,
-            train_prefetcher=train_prefetcher,
             model=model,
             optimizer=opt,
             max_iters=config.max_iters,
             model_weights_out_dir=config.model_weights_out_dir,
             learning_rate=config.learning_rate,
             decay_learning_rate=config.decay_learning_rate,
-            warmup_iters=config.warmup_iters,
             eval_interval=config.eval_interval,
             patience=config.patience,
             min_delta=config.min_delta,
@@ -392,8 +390,6 @@ def main(config_path: Path):
             ls_template_parameters=ls_template_parameters,
             exclude_background_pixels=config.exclude_background_pixels,
             predict_tissue_mask=config.predict_tissue_mask,
-            max_num_subject_batch_iterations=config.max_num_subject_batch_iterations,
-            is_debug=config.debug,
         )
 
     logger.info("=" * 60)

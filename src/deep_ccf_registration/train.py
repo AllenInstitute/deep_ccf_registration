@@ -10,47 +10,14 @@ import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from monai.networks.nets import UNet
 from torch.nn import MSELoss
-from torch.utils.data import Subset, DataLoader, SubsetRandomSampler
-from torch.utils.data.distributed import DistributedSampler
+from torch.utils.data import DataLoader
 from loguru import logger
 import torch.nn.functional as F
 from tqdm import tqdm
 
-from deep_ccf_registration.datasets.slice_dataset import SliceDataset
 from deep_ccf_registration.inference import evaluate_batch
 from deep_ccf_registration.utils.logging_utils import timed
 from deep_ccf_registration.utils.dataloading import BatchPrefetcher
-
-
-# https://github.com/karpathy/nanoGPT/blob/master/train.py
-def _get_lr(
-        iteration: int, warmup_iters: int, learning_rate: float, lr_decay_iters: int, min_lr
-):
-    """Calculate learning rate with linear warmup and cosine decay.
-
-    Parameters
-    ----------
-    iteration: Current training iteration
-    warmup_iters: Number of warmup iterations
-    learning_rate: Maximum learning rate after warmup
-    lr_decay_iters: Total iterations for learning rate decay
-    min_lr: Minimum learning rate after decay
-
-    Returns
-    -------
-    Learning rate for current iteration
-    """
-    # 1) linear warmup for warmup_iters steps
-    if iteration < warmup_iters:
-        return learning_rate * iteration / warmup_iters
-    # 2) if it > lr_decay_iters, return min learning rate
-    if iteration > lr_decay_iters:
-        return min_lr
-    # 3) in between, use cosine decay down to min learning rate
-    decay_ratio = (iteration - warmup_iters) / (lr_decay_iters - warmup_iters)
-    assert 0 <= decay_ratio <= 1
-    coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))  # coeff ranges 0..1
-    return min_lr + coeff * (learning_rate - min_lr)
 
 def _mask_pad_pixels(tissue_loss_per_pixel: torch.Tensor, input_image_transforms: dict[str, Any]) -> torch.Tensor:
     """
@@ -121,7 +88,6 @@ def _evaluate_loss(
 
 def train(
         train_dataloader: DataLoader,
-        train_prefetcher: BatchPrefetcher,
         train_eval_dataloader: DataLoader,
         val_dataloader: DataLoader,
         model: UNet,
@@ -131,9 +97,7 @@ def train(
         ccf_annotations: np.ndarray,
         ls_template_parameters: AntsImageParameters,
         learning_rate: float = 0.001,
-        max_num_subject_batch_iterations: int = 200,
         decay_learning_rate: bool = True,
-        warmup_iters: int = 1000,
         eval_interval: int = 500,
         patience: int = 10,
         min_delta: float = 1e-4,
@@ -141,22 +105,17 @@ def train(
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         exclude_background_pixels: bool = True,
         predict_tissue_mask: bool = True,
-        is_debug: bool = False
 ):
     """
     Train slice registration model
 
     Parameters
     ----------
-    train_dataset: training data
-    val_dataset: validation data
     model: Neural network model to train
     optimizer: Optimizer for training
-    n_epochs: Number of epochs to train
     model_weights_out_dir: Directory to save model checkpoints
     learning_rate: Initial learning rate
     decay_learning_rate: Whether to decay learning rate during training
-    warmup_iters: Number of warmup iterations for learning rate
     eval_interval: Evaluate model every N iterations
     patience: Number of evaluations without improvement before stopping
     min_delta: Minimum change in validation loss to be considered improvement
@@ -166,8 +125,6 @@ def train(
     ls_template_parameters: ls template AntsImageParameters
     exclude_background_pixels: whether to use a tissue mask to exclude background pixels in loss/evaluation.
         Otherwise, just excludes pad pixels
-    n_subjects_per_rotation: how many subjects to iterate over at a time.
-    max_num_subject_batch_iterations: max number of iterations per subject batch
 
     Returns
     -------
@@ -179,7 +136,6 @@ def train(
     best_val_coord_loss = float("inf")
     patience_counter = 0
     global_step = 0
-    lr_decay_iters = max_iters
     min_lr = learning_rate / 10 # should be ~= learning_rate/10 per Chinchilla
 
     model.to(device)
@@ -192,6 +148,8 @@ def train(
     pbar = None
     pbar_postfix_entries: dict[str, Any] = {}
 
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=max_iters, eta_min=min_lr)
+
     while True:
         model.train()
         train_losses = []
@@ -201,23 +159,12 @@ def train(
         for batch in train_dataloader:
             if pbar is None:
                 # start timing once first batch has been loaded
-                pbar = tqdm(total=max_iters, desc="Training")
+                pbar = tqdm(total=max_iters, desc="Training", smoothing=0, miniters=20)
             sampler = train_dataloader.sampler
             pbar_postfix_entries['subject_group'] = sampler.current_subject_batch_idx
-            pbar.set_postfix(pbar_postfix_entries)
+            pbar.set_postfix(pbar_postfix_entries, refresh=False)
             input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks, pad_masks, subject_ids = batch
             input_images, target_template_points, tissue_masks, pad_masks = input_images.to(device), target_template_points.to(device), tissue_masks.to(device), pad_masks.to(device)
-
-            if decay_learning_rate:
-                lr = _get_lr(
-                    iteration=global_step,
-                    warmup_iters=warmup_iters,
-                    learning_rate=learning_rate,
-                    lr_decay_iters=lr_decay_iters,
-                    min_lr=min_lr,
-                )
-                for param_group in optimizer.param_groups:
-                    param_group['lr'] = lr
 
             optimizer.zero_grad()
             with autocast_context:
@@ -237,6 +184,9 @@ def train(
             loss.backward()
             optimizer.step()
 
+            if decay_learning_rate:
+                scheduler.step()
+
             train_losses.append(loss.item())
             train_coord_losses.append(coordinate_loss.item())
             if tissue_loss is not None:
@@ -251,7 +201,7 @@ def train(
 
             pbar_postfix_entries['loss'] = f"{loss.item():.6f}"
             pbar_postfix_entries['coord_loss'] = f"{coordinate_loss.item():.6f}"
-            pbar.set_postfix(pbar_postfix_entries)
+            pbar.set_postfix(pbar_postfix_entries, refresh=False)
             pbar.update(1)
 
 
@@ -325,6 +275,7 @@ def train(
                             'model_state_dict': model.state_dict(),
                             'optimizer_state_dict': optimizer.state_dict(),
                             'val_rmse': val_rmse,
+                            'lr': scheduler.get_lr()
                         },
                         f=checkpoint_path,
                     )

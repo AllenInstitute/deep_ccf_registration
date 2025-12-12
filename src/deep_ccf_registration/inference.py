@@ -476,7 +476,7 @@ def evaluate_batch(
 
     sample_count = 0
 
-    pbar = tqdm(total=len(dataloader), desc="Evaluation", smoothing=0)
+    pbar = tqdm(total=len(dataloader), desc="Evaluation", smoothing=0, miniters=20)
 
     for batch_idx, batch in enumerate(dataloader):
         input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks, pad_masks, subject_ids = batch
