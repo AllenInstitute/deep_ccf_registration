@@ -49,6 +49,7 @@ class TrainConfig(BaseModel):
     weight_decay: float = Field(0.0, ge=0.0)
     decay_learning_rate: bool = True
     warmup_iters: int = Field(1000, ge=0)
+    eval_iters: int = 50
 
     eval_interval: int = Field(500, gt=0)
     patience: int = Field(10, gt=0)

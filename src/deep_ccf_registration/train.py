@@ -97,6 +97,7 @@ def train(
         ccf_annotations: np.ndarray,
         ls_template_parameters: AntsImageParameters,
         learning_rate: float = 0.001,
+        eval_iters: int = 200,
         decay_learning_rate: bool = True,
         eval_interval: int = 500,
         patience: int = 10,
@@ -219,6 +220,7 @@ def train(
                         autocast_context=autocast_context,
                         exclude_background_pixels=exclude_background_pixels,
                         predict_tissue_mask=predict_tissue_mask,
+                        max_iters=eval_iters,
                     )
                     val_rmse, val_rmse_tissue_only, val_tissue_mask_dice = evaluate_batch(
                         dataloader=val_dataloader,
@@ -231,6 +233,7 @@ def train(
                         autocast_context=autocast_context,
                         exclude_background_pixels=exclude_background_pixels,
                         predict_tissue_mask=predict_tissue_mask,
+                        max_iters=eval_iters,
                     )
 
                     current_lr = optimizer.param_groups[0]['lr']

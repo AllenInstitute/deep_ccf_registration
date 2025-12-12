@@ -204,7 +204,7 @@ def main(config_path: Path):
         batch_size=config.batch_size,
         shuffle=False,
         num_workers=min(2, config.num_workers),
-        pin_memory=(device == "cuda"),
+        pin_memory=False,
         prefetch_factor=config.dataloader_prefetch_factor,
         persistent_workers=config.num_workers > 0
     )
@@ -285,7 +285,7 @@ def main(config_path: Path):
             subject_batch_iter=train_prefetcher,
             max_iters_per_subject_batch=config.max_num_subject_batch_iterations,
             batch_size=config.batch_size, is_debug=config.debug),
-        num_workers=min(2, config.num_workers),
+        num_workers=config.num_workers,
         persistent_workers=config.num_workers > 0,
     )
 
@@ -293,8 +293,8 @@ def main(config_path: Path):
         dataset=val_dataset,
         batch_size=config.batch_size,
         shuffle=False,
-        num_workers=config.num_workers,
-        pin_memory=(device == "cuda"),
+        num_workers=min(2, config.num_workers),
+        pin_memory=False,
         prefetch_factor=config.dataloader_prefetch_factor,
         persistent_workers=config.num_workers > 0
     )
@@ -390,6 +390,7 @@ def main(config_path: Path):
             ls_template_parameters=ls_template_parameters,
             exclude_background_pixels=config.exclude_background_pixels,
             predict_tissue_mask=config.predict_tissue_mask,
+            eval_iters=config.eval_iters,
         )
 
     logger.info("=" * 60)
