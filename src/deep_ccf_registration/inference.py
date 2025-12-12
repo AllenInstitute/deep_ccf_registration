@@ -481,9 +481,8 @@ def evaluate_batch(
 
     for batch_idx, batch in enumerate(dataloader):
         if pbar is None:
-            pbar = tqdm(total=min(len(dataloader), max_iters), desc="Evaluation", smoothing=0, miniters=20, mininterval=0)
-            pbar.dynamic_miniters = False
-            
+            pbar = tqdm(total=min(len(dataloader), max_iters), desc="Evaluation", smoothing=0)
+
         input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks, pad_masks, subject_ids = batch
         input_images, target_template_points, pad_masks, tissue_masks = input_images.to(device), target_template_points.to(device), pad_masks.to(device), tissue_masks.to(device)
 
@@ -543,7 +542,7 @@ def evaluate_batch(
             sample_count += 1
         pbar.update(1)
 
-        if batch_idx > max_iters:
+        if batch_idx == max_iters-1:
             break
     # *1000 to convert to micron
     rmse = rmse.compute().item() * 1000

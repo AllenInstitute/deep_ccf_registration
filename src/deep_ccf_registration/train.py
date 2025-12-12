@@ -161,8 +161,7 @@ def train(
         for batch in train_dataloader:
             if pbar is None:
                 # start timing once first batch has been loaded
-                pbar = tqdm(total=max_iters, desc="Training", smoothing=0, miniters=20, mininterval=0)
-                pbar.dynamic_miniters = False
+                pbar = tqdm(total=max_iters, desc="Training", smoothing=0)
 
             sampler = train_dataloader.sampler
             pbar_postfix_entries['subject_group'] = sampler.current_subject_batch_idx
@@ -309,7 +308,7 @@ def train(
 
                     model.train()
 
-            if global_step > max_iters:
+            if global_step == max_iters:
                 logger.info(
                     f"\nTraining completed! Best validation loss: {best_val_coord_loss:.6f}")
 
