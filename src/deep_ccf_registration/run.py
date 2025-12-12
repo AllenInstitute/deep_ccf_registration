@@ -196,23 +196,12 @@ def main(config_path: Path):
         data_cache_dir=config.memmap_cache_path / 'train_eval',
     )
 
-    if config.debug:
-        train_eval_dataset = Subset(train_eval_dataset, indices=[1000])
-
-    train_eval_dataloader = DataLoader(
-        dataset=train_eval_dataset,
-        batch_size=config.batch_size,
-        shuffle=False,
-        num_workers=0,
-        pin_memory=False,
-        prefetch_factor=None,
-        persistent_workers=False,
-    )
-
     train_volumes = load_volumes(dataset_meta=train_metadata)
     train_warps = load_warps(dataset_meta=train_metadata, tensorstore_aws_credentials_method=config.tensorstore_aws_credentials_method)
 
-    logger.info('Caching train eval dataset')
+    if config.debug:
+        train_eval_dataset = Subset(train_eval_dataset, indices=[1000])
+
     train_eval_prefetcher = BatchPrefetcher(
         volumes=train_volumes,
         warps=train_warps,
@@ -221,6 +210,22 @@ def main(config_path: Path):
         memmap_dir=config.memmap_cache_path / 'train_eval',
     )
     train_eval_prefetcher.start()
+
+    train_eval_dataloader = DataLoader(
+        dataset=train_eval_dataset,
+        batch_size=config.batch_size,
+        shuffle=False,
+        num_workers=config.num_workers,
+        pin_memory=(device == "cuda"),
+        prefetch_factor=config.dataloader_prefetch_factor,
+        persistent_workers=config.num_workers > 0,
+        sampler=SliceSampler(
+            dataset=train_eval_dataset,
+            subject_batch_iter=train_eval_prefetcher,
+            max_iters_per_subject_batch=config.max_num_subject_batch_iterations,
+            batch_size=config.batch_size,
+            is_debug=config.debug),
+    )
 
     train_prefetcher = BatchPrefetcher(
         volumes=train_volumes,
@@ -287,16 +292,23 @@ def main(config_path: Path):
             batch_size=config.batch_size, is_debug=config.debug),
         num_workers=config.num_workers,
         persistent_workers=config.num_workers > 0,
+        pin_memory=(device == "cuda"),
     )
 
     val_dataloader = DataLoader(
         dataset=val_dataset,
         batch_size=config.batch_size,
         shuffle=False,
-        num_workers=0,
-        pin_memory=False,
-        prefetch_factor=None,
-        persistent_workers=False,
+        num_workers=config.num_workers,
+        pin_memory=(device == "cuda"),
+        prefetch_factor=config.dataloader_prefetch_factor,
+        persistent_workers=config.num_workers > 0,
+        sampler=SliceSampler(
+            dataset=val_dataset,
+            subject_batch_iter=val_prefetcher,
+            max_iters_per_subject_batch=config.max_num_subject_batch_iterations,
+            batch_size=config.batch_size,
+            is_debug=config.debug),
     )
 
     logger.info(f"Num train samples: {len(train_dataset)}")
