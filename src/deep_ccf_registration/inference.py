@@ -460,7 +460,7 @@ def evaluate_batch(
     autocast_context: ContextManager = nullcontext(),
     predict_tissue_mask: bool = True,
     exclude_background_pixels: bool = False,
-    max_iters: int = 200
+    max_iters: int = 200,
 ):
     viz_indices = np.arange(len(dataloader.dataset))
     np.random.shuffle(viz_indices)
@@ -477,9 +477,11 @@ def evaluate_batch(
 
     sample_count = 0
 
-    pbar = tqdm(total=max_iters, desc="Evaluation", smoothing=0, miniters=20)
+    pbar = None
 
     for batch_idx, batch in enumerate(dataloader):
+        if pbar is None:
+            pbar = tqdm(total=min(len(dataloader), max_iters), desc="Evaluation", smoothing=0)
         input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks, pad_masks, subject_ids = batch
         input_images, target_template_points, pad_masks, tissue_masks = input_images.to(device), target_template_points.to(device), pad_masks.to(device), tissue_masks.to(device)
 

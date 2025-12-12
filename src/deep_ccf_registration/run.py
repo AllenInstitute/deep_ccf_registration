@@ -12,7 +12,7 @@ import numpy as np
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader
 from contextlib import nullcontext
 from loguru import logger
 import json
@@ -199,13 +199,14 @@ def main(config_path: Path):
     train_volumes = load_volumes(dataset_meta=train_metadata)
     train_warps = load_warps(dataset_meta=train_metadata, tensorstore_aws_credentials_method=config.tensorstore_aws_credentials_method)
 
-    if config.debug:
-        train_eval_dataset = Subset(train_eval_dataset, indices=[1000])
+    # Keep a subset of volumes/warps aligned with the train-eval dataset to avoid memmap index mismatches
+    train_eval_volumes = [train_volumes[i] for i in train_eval_subject_idxs]
+    train_eval_warps = [train_warps[i] for i in train_eval_subject_idxs]
 
     train_eval_prefetcher = BatchPrefetcher(
-        volumes=train_volumes,
-        warps=train_warps,
-        subject_metadata=train_metadata,
+        volumes=train_eval_volumes,
+        warps=train_eval_warps,
+        subject_metadata=train_eval_dataset.subject_metadata,
         n_subjects_per_batch=len(train_eval_subject_idxs),
         memmap_dir=config.memmap_cache_path / 'train_eval',
     )
@@ -278,9 +279,6 @@ def main(config_path: Path):
         memmap_dir=config.memmap_cache_path / 'val',
     )
     val_prefetcher.start()
-
-    if config.debug:
-        val_dataset = Subset(val_dataset, indices=[1000])
 
     train_dataloader = DataLoader(
         dataset=train_dataset,
@@ -403,6 +401,7 @@ def main(config_path: Path):
             exclude_background_pixels=config.exclude_background_pixels,
             predict_tissue_mask=config.predict_tissue_mask,
             eval_iters=config.eval_iters,
+            is_debug=config.debug,
         )
 
     logger.info("=" * 60)

@@ -106,6 +106,7 @@ def train(
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         exclude_background_pixels: bool = True,
         predict_tissue_mask: bool = True,
+        is_debug: bool = False,
 ):
     """
     Train slice registration model
@@ -160,7 +161,9 @@ def train(
         for batch in train_dataloader:
             if pbar is None:
                 # start timing once first batch has been loaded
-                pbar = tqdm(total=max_iters, desc="Training", smoothing=0, miniters=20)
+                pbar = tqdm(total=max_iters, desc="Training", smoothing=0, miniters=20, mininterval=0)
+                pbar.dynamic_miniters = False
+
             sampler = train_dataloader.sampler
             pbar_postfix_entries['subject_group'] = sampler.current_subject_batch_idx
             pbar.set_postfix(pbar_postfix_entries, refresh=False)
@@ -220,7 +223,7 @@ def train(
                         autocast_context=autocast_context,
                         exclude_background_pixels=exclude_background_pixels,
                         predict_tissue_mask=predict_tissue_mask,
-                        max_iters=eval_iters,
+                        max_iters=1 if is_debug else eval_iters,
                     )
                     val_rmse, val_rmse_tissue_only, val_tissue_mask_dice = evaluate_batch(
                         dataloader=val_dataloader,
@@ -233,7 +236,7 @@ def train(
                         autocast_context=autocast_context,
                         exclude_background_pixels=exclude_background_pixels,
                         predict_tissue_mask=predict_tissue_mask,
-                        max_iters=eval_iters,
+                        max_iters=1 if is_debug else eval_iters,
                     )
 
                     current_lr = optimizer.param_groups[0]['lr']
