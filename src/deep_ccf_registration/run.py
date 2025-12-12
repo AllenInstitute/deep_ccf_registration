@@ -203,10 +203,10 @@ def main(config_path: Path):
         dataset=train_eval_dataset,
         batch_size=config.batch_size,
         shuffle=False,
-        num_workers=min(2, config.num_workers),
+        num_workers=0,
         pin_memory=False,
-        prefetch_factor=config.dataloader_prefetch_factor,
-        persistent_workers=config.num_workers > 0
+        prefetch_factor=None,
+        persistent_workers=False,
     )
 
     train_volumes = load_volumes(dataset_meta=train_metadata)
@@ -293,10 +293,10 @@ def main(config_path: Path):
         dataset=val_dataset,
         batch_size=config.batch_size,
         shuffle=False,
-        num_workers=min(2, config.num_workers),
+        num_workers=0,
         pin_memory=False,
-        prefetch_factor=config.dataloader_prefetch_factor,
-        persistent_workers=config.num_workers > 0
+        prefetch_factor=None,
+        persistent_workers=False,
     )
 
     logger.info(f"Num train samples: {len(train_dataset)}")
