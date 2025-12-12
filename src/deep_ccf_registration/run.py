@@ -203,7 +203,7 @@ def main(config_path: Path):
         dataset=train_eval_dataset,
         batch_size=config.batch_size,
         shuffle=False,
-        num_workers=config.num_workers,
+        num_workers=min(2, config.num_workers),
         pin_memory=(device == "cuda"),
         prefetch_factor=config.dataloader_prefetch_factor,
         persistent_workers=config.num_workers > 0
@@ -285,7 +285,7 @@ def main(config_path: Path):
             subject_batch_iter=train_prefetcher,
             max_iters_per_subject_batch=config.max_num_subject_batch_iterations,
             batch_size=config.batch_size, is_debug=config.debug),
-        num_workers=config.num_workers,
+        num_workers=min(2, config.num_workers),
         persistent_workers=config.num_workers > 0,
     )
 
