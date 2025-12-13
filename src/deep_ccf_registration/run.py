@@ -230,7 +230,6 @@ def main(config_path: Path):
         n_subjects_per_batch=config.num_subjects_per_rotation,
         memmap_dir=config.memmap_cache_path / 'train',
     )
-    train_prefetcher.start()
 
     val_dataset = SliceDataset(
         dataset_meta=val_metadata,
@@ -297,6 +296,9 @@ def main(config_path: Path):
         prefetch_factor=config.dataloader_prefetch_factor,
         persistent_workers=config.num_workers > 0,
     )
+
+    logger.info('start train BatchPrefetcher')
+    train_prefetcher.start()
 
     logger.info(f"Num train samples: {len(train_dataset)}")
     logger.info(f"Num val samples: {len(val_dataset)}")
