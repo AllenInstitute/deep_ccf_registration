@@ -2,7 +2,6 @@ from pathlib import Path
 from typing import ContextManager, Any, Optional
 from contextlib import nullcontext
 import os
-import math
 
 import mlflow
 import numpy as np
@@ -17,7 +16,6 @@ from tqdm import tqdm
 
 from deep_ccf_registration.inference import evaluate_batch
 from deep_ccf_registration.utils.logging_utils import timed
-from deep_ccf_registration.utils.dataloading import BatchPrefetcher
 
 def _mask_pad_pixels(tissue_loss_per_pixel: torch.Tensor, input_image_transforms: dict[str, Any]) -> torch.Tensor:
     """

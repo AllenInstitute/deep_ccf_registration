@@ -1,6 +1,5 @@
-import gc
 from contextlib import nullcontext
-from pathlib import Path
+from itertools import islice
 from typing import ContextManager, Optional
 
 import albumentations
@@ -479,9 +478,12 @@ def evaluate_batch(
 
     pbar = None
 
-    for batch_idx, batch in enumerate(dataloader):
+    limited_batches = islice(dataloader, max_iters)
+    total_iters = min(len(dataloader), max_iters)
+
+    for batch_idx, batch in enumerate(limited_batches):
         if pbar is None:
-            pbar = tqdm(total=min(len(dataloader), max_iters), desc="Evaluation", smoothing=0)
+            pbar = tqdm(total=total_iters, desc="Evaluation")
 
         input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks, pad_masks, subject_ids = batch
         input_images, target_template_points, pad_masks, tissue_masks = input_images.to(device), target_template_points.to(device), pad_masks.to(device), tissue_masks.to(device)
@@ -541,9 +543,6 @@ def evaluate_batch(
                     plt.close(fig)
             sample_count += 1
         pbar.update(1)
-
-        if batch_idx == max_iters-1:
-            break
     # *1000 to convert to micron
     rmse = rmse.compute().item() * 1000
 
