@@ -278,7 +278,7 @@ def train(
                             'model_state_dict': model.state_dict(),
                             'optimizer_state_dict': optimizer.state_dict(),
                             'val_rmse': val_rmse,
-                            'lr': scheduler.get_lr()
+                            'lr': scheduler.get_last_lr()
                         },
                         f=checkpoint_path,
                     )
