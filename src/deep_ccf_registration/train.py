@@ -1,3 +1,4 @@
+import time
 from pathlib import Path
 from typing import ContextManager, Any, Optional
 from contextlib import nullcontext
@@ -12,10 +13,10 @@ from torch.nn import MSELoss
 from torch.utils.data import DataLoader
 from loguru import logger
 import torch.nn.functional as F
-from tqdm import tqdm
 
 from deep_ccf_registration.inference import evaluate_batch
-from deep_ccf_registration.utils.logging_utils import timed
+from deep_ccf_registration.utils.logging_utils import timed, ProgressLogger
+
 
 def _mask_pad_pixels(tissue_loss_per_pixel: torch.Tensor, input_image_transforms: dict[str, Any]) -> torch.Tensor:
     """
@@ -105,6 +106,7 @@ def train(
         exclude_background_pixels: bool = True,
         predict_tissue_mask: bool = True,
         is_debug: bool = False,
+        log_interval: int = 20
 ):
     """
     Train slice registration model
@@ -145,10 +147,9 @@ def train(
     logger.info(f"Validation samples: {len(val_dataloader.dataset)}")
     logger.info(f"Device: {device}")
 
-    pbar = None
-    pbar_postfix_entries: dict[str, Any] = {}
-
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=max_iters, eta_min=min_lr)
+
+    progress_logger = None
 
     while True:
         model.train()
@@ -157,13 +158,8 @@ def train(
         train_mask_losses = []
 
         for batch in train_dataloader:
-            if pbar is None:
-                # start timing once first batch has been loaded
-                pbar = tqdm(total=max_iters, desc="Training", smoothing=0)
-
-            sampler = train_dataloader.sampler
-            pbar_postfix_entries['subject_group'] = sampler.current_subject_batch_idx
-            pbar.set_postfix(pbar_postfix_entries, refresh=False)
+            if progress_logger is None:
+                progress_logger = ProgressLogger(desc='Training', total=max_iters, log_every=log_interval)
             input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks, pad_masks, subject_ids = batch
             input_images, target_template_points, tissue_masks, pad_masks = input_images.to(device), target_template_points.to(device), tissue_masks.to(device), pad_masks.to(device)
 
@@ -199,12 +195,6 @@ def train(
                 "train/coord_loss": coordinate_loss.item(),
                 "train/learning_rate": optimizer.param_groups[0]['lr'],
             }, step=global_step)
-
-            pbar_postfix_entries['loss'] = f"{loss.item():.6f}"
-            pbar_postfix_entries['coord_loss'] = f"{coordinate_loss.item():.6f}"
-            pbar.set_postfix(pbar_postfix_entries, refresh=False)
-            pbar.update(1)
-
 
             # Periodic evaluation
             if global_step % eval_interval == 0:
@@ -299,7 +289,7 @@ def train(
                     # Early stopping
                     if patience_counter >= patience:
                         logger.info(f"\nEarly stopping triggered after {global_step} steps")
-                        logger.info(f"Best validation MAE: {best_val_coord_loss:.6f}")
+                        logger.info(f"Best validation coord loss: {best_val_coord_loss:.6f}")
                         mlflow.log_metric("final_best_val_rmse", best_val_coord_loss)
 
                         return best_val_coord_loss
@@ -312,3 +302,5 @@ def train(
 
                 mlflow.log_metric("final_best_val_coord_loss", best_val_coord_loss)
                 return best_val_coord_loss
+
+            progress_logger.log_progress(other=f'subject_group={train_dataloader.sampler.current_subject_batch_idx}, coord_loss={coordinate_loss.item():.3f}')

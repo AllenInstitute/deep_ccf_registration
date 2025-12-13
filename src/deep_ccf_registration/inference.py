@@ -19,6 +19,7 @@ import  torch.nn.functional as F
 from deep_ccf_registration.datasets.slice_dataset import SliceDataset
 from deep_ccf_registration.metadata import SliceOrientation
 from deep_ccf_registration.metrics.point_wise_rmse import PointwiseRMSE
+from deep_ccf_registration.utils.logging_utils import ProgressLogger
 from deep_ccf_registration.utils.transforms import convert_from_ants_space_tensor, mirror_points
 from deep_ccf_registration.utils.utils import get_ccf_annotations
 from deep_ccf_registration.utils.visualization import create_diagnostic_image
@@ -460,6 +461,7 @@ def evaluate_batch(
     predict_tissue_mask: bool = True,
     exclude_background_pixels: bool = False,
     max_iters: int = 200,
+    log_every: int = 20
 ):
     viz_indices = np.arange(len(dataloader.dataset))
     np.random.shuffle(viz_indices)
@@ -476,15 +478,11 @@ def evaluate_batch(
 
     sample_count = 0
 
-    pbar = None
-
     limited_batches = islice(dataloader, max_iters)
     total_iters = min(len(dataloader), max_iters)
+    progress = ProgressLogger(desc='Evaluation', total=total_iters, log_every=min(total_iters, log_every))
 
     for batch_idx, batch in enumerate(limited_batches):
-        if pbar is None:
-            pbar = tqdm(total=total_iters, desc="Evaluation")
-
         input_images, target_template_points, dataset_indices, slice_indices, patch_ys, patch_xs, orientations, input_image_transforms, tissue_masks, pad_masks, subject_ids = batch
         input_images, target_template_points, pad_masks, tissue_masks = input_images.to(device), target_template_points.to(device), pad_masks.to(device), tissue_masks.to(device)
 
@@ -542,7 +540,8 @@ def evaluate_batch(
                                       f"inference/{"train" if is_train else "val"}/iteration/{iteration}/{fig_filename}")
                     plt.close(fig)
             sample_count += 1
-        pbar.update(1)
+        progress.log_progress()
+
     # *1000 to convert to micron
     rmse = rmse.compute().item() * 1000
 

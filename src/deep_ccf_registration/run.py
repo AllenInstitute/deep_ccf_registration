@@ -211,7 +211,7 @@ def main(config_path: Path):
         memmap_dir=config.memmap_cache_path / 'train_eval',
     )
     logger.info('caching train eval')
-    train_eval_prefetcher.cache_data(subject_idx_batch=train_eval_subject_idxs.tolist())
+    train_eval_prefetcher.cache_data(subject_idx_batch=list(range(len(train_eval_subject_idxs))))
 
     train_eval_dataloader = DataLoader(
         dataset=train_eval_dataset,
@@ -297,7 +297,7 @@ def main(config_path: Path):
         persistent_workers=config.num_workers > 0,
     )
 
-    logger.info('start train BatchPrefetcher')
+    logger.info('start train BatchPrefetcher ')
     train_prefetcher.start()
 
     logger.info(f"Num train samples: {len(train_dataset)}")

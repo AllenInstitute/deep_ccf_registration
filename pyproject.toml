@@ -23,7 +23,6 @@ dependencies = [
     "tensorstore>=0.1.77",
     "torch>=2.8.0",
     "torchmetrics>=1.8.2",
-    "tqdm>=4.67.1",
     "zarr>=3.1.3",
 ]
 
