@@ -303,4 +303,4 @@ def train(
                 mlflow.log_metric("final_best_val_coord_loss", best_val_coord_loss)
                 return best_val_coord_loss
 
-            progress_logger.log_progress(other=f'subject_group={train_dataloader.sampler.current_subject_batch_idx}, coord_loss={coordinate_loss.item():.3f}')
+            progress_logger.log_progress(other=f'coord_loss={coordinate_loss.item():.3f}')

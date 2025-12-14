@@ -94,6 +94,7 @@ class ProgressLogger:
 
         if self._completed % self._log_every == 0:
             other = '' if other is None else other
+            rate_log = f'{1/rate:.2f} s/it' if rate < 1 else f'{rate:.2f} it/s'
             logger.info(
-                f"{self._desc}: {self._completed}/{self._total} [{format_hh_mm_ss(int(elapsed))}<{format_hh_mm_ss(int(eta))}] {other}"
+                f"{self._desc}: {self._completed}/{self._total} [{format_hh_mm_ss(int(elapsed))}<{format_hh_mm_ss(int(eta))}], {rate_log}, {other}"
             )

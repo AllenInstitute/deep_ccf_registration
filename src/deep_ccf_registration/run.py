@@ -29,7 +29,6 @@ from deep_ccf_registration.metadata import SubjectMetadata
 from deep_ccf_registration.train import train
 from deep_ccf_registration.models import UNetWithRegressionHeads
 from deep_ccf_registration.utils.dataloading import BatchPrefetcher
-from deep_ccf_registration.utils.sampler import SliceSampler
 
 logger.remove()
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -277,11 +276,6 @@ def main(config_path: Path):
     train_dataloader = DataLoader(
         dataset=train_dataset,
         batch_size=config.batch_size,
-        sampler=SliceSampler(
-            dataset=train_dataset,
-            subject_batch_iter=train_prefetcher,
-            max_iters_per_subject_batch=config.max_num_subject_batch_iterations,
-            batch_size=config.batch_size, is_debug=config.debug),
         num_workers=config.num_workers,
         persistent_workers=config.num_workers > 0,
         pin_memory=(device == "cuda"),
@@ -297,8 +291,8 @@ def main(config_path: Path):
         persistent_workers=config.num_workers > 0,
     )
 
-    logger.info('start train BatchPrefetcher ')
-    train_prefetcher.start()
+    logger.info('caching train')
+    train_prefetcher.cache_data(subject_idx_batch=list(range(len(train_metadata))))
 
     logger.info(f"Num train samples: {len(train_dataset)}")
     logger.info(f"Num val samples: {len(val_dataset)}")
