@@ -402,7 +402,9 @@ def main(config_path: Path):
 
     os.remove(ccf_annotations_path)
 
-    train_prefetcher.stop()
+    train_prefetcher.cleanup()
+    train_eval_prefetcher.cleanup()
+    val_prefetcher.cleanup()
 
 
 def split_train_val_test(
