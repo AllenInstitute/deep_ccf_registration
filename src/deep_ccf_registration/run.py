@@ -106,6 +106,14 @@ def main(config_path: Path):
     subject_metadata = [SubjectMetadata.model_validate(x) for x in subject_metadata_dicts]
     logger.info(f"Total subjects loaded: {len(subject_metadata)}")
 
+    # limit subjects to subject_frac subjects
+    subject_idxs = np.arange(len(subject_metadata))
+    np.random.shuffle(subject_idxs)
+    subject_idxs = subject_idxs[:int(len(subject_idxs) * config.subject_frac)]
+    if config.subject_frac < 1:
+        logger.info(f'limiting from {len(subject_metadata)} subjects to {len(subject_idxs)}')
+    subject_metadata = [subject_metadata[i] for i in subject_idxs]
+
     # Split into train/val
     train_metadata, val_metadata, test_metadata = split_train_val_test(
         subject_metadata=subject_metadata,
@@ -161,9 +169,9 @@ def main(config_path: Path):
         data_cache_dir=config.memmap_cache_path / 'train',
     )
 
-    train_subject_idxs = np.arange(len(train_metadata))
-    np.random.shuffle(train_subject_idxs)
-    train_eval_subject_idxs = train_subject_idxs[:10]
+    train_eval_subject_idxs = np.arange(len(train_metadata))
+    np.random.shuffle(train_eval_subject_idxs)
+    train_eval_subject_idxs = train_eval_subject_idxs[:10]
 
     train_eval_dataset = SliceDataset(
         dataset_meta=[train_metadata[i] for i in train_eval_subject_idxs],
@@ -198,9 +206,16 @@ def main(config_path: Path):
     train_volumes = load_volumes(dataset_meta=train_metadata)
     train_warps = load_warps(dataset_meta=train_metadata, tensorstore_aws_credentials_method=config.tensorstore_aws_credentials_method)
 
-    # Keep a subset of volumes/warps aligned with the train-eval dataset to avoid memmap index mismatches
     train_eval_volumes = [train_volumes[i] for i in train_eval_subject_idxs]
     train_eval_warps = [train_warps[i] for i in train_eval_subject_idxs]
+
+    train_prefetcher = BatchPrefetcher(
+        volumes=train_volumes,
+        warps=train_warps,
+        subject_metadata=train_dataset.subject_metadata,
+        n_subjects_per_batch=config.num_subjects_per_rotation,
+        memmap_dir=config.memmap_cache_path / 'train',
+    )
 
     train_eval_prefetcher = BatchPrefetcher(
         volumes=train_eval_volumes,
@@ -220,14 +235,6 @@ def main(config_path: Path):
         pin_memory=(device == "cuda"),
         prefetch_factor=config.dataloader_prefetch_factor,
         persistent_workers=config.num_workers > 0,
-    )
-
-    train_prefetcher = BatchPrefetcher(
-        volumes=train_volumes,
-        warps=train_warps,
-        subject_metadata=train_dataset.subject_metadata,
-        n_subjects_per_batch=config.num_subjects_per_rotation,
-        memmap_dir=config.memmap_cache_path / 'train',
     )
 
     val_dataset = SliceDataset(
