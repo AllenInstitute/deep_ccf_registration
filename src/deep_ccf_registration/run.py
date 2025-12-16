@@ -11,6 +11,7 @@ import mlflow
 import numpy as np
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
+from monai.networks.nets import UNet
 
 from torch.utils.data import DataLoader
 from contextlib import nullcontext
@@ -304,20 +305,12 @@ def main(config_path: Path):
     logger.info(f"Num train samples: {len(train_dataset)}")
     logger.info(f"Num val samples: {len(val_dataset)}")
 
-    model = UNetWithRegressionHeads(
+    model = UNet(
         spatial_dims=2,
         in_channels=1,
-        feature_channels=config.model.unet_feature_channels,
-        dropout=config.model.unet_dropout,
+        out_channels=3,
         channels=config.model.unet_channels,
         strides=config.model.unet_stride,
-        out_coords=3,
-        include_tissue_mask=config.predict_tissue_mask,
-        head_size=config.model.unet_head_size,
-        use_positional_encoding=config.model.unet_use_positional_encoding,
-        pos_encoding_channels=config.model.unet_pos_encoding_channels,
-        image_height=config.patch_size[0],
-        image_width=config.patch_size[1],
     )
 
     if config.load_checkpoint:
