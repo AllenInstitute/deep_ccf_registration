@@ -13,7 +13,7 @@ import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from monai.networks.nets import UNet
 
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from contextlib import nullcontext
 from loguru import logger
 import json
@@ -169,6 +169,8 @@ def main(config_path: Path):
         template_ml_dim_size=ls_template_ml_dim,
         data_cache_dir=config.memmap_cache_path / 'train',
     )
+    if config.debug:
+        train_dataset = Subset(train_dataset, indices=[1000])
 
     train_eval_subject_idxs = np.arange(len(train_metadata))
     np.random.shuffle(train_eval_subject_idxs)
@@ -213,7 +215,7 @@ def main(config_path: Path):
     train_prefetcher = BatchPrefetcher(
         volumes=train_volumes,
         warps=train_warps,
-        subject_metadata=train_dataset.subject_metadata,
+        subject_metadata=train_dataset.dataset.subject_metadata if isinstance(train_dataset, Subset) else train_dataset.subject_metadata,
         n_subjects_per_batch=config.num_subjects_per_rotation,
         memmap_dir=config.memmap_cache_path / 'train',
     )
@@ -312,6 +314,7 @@ def main(config_path: Path):
         channels=config.model.unet_channels,
         strides=config.model.unet_stride,
     )
+    logger.info(model)
 
     if config.load_checkpoint:
         logger.info(f"Loading checkpoint from: {config.load_checkpoint}")
