@@ -232,7 +232,7 @@ def evaluate_batch(
 ):
     viz_indices = np.arange(len(dataloader.dataset))
     np.random.shuffle(viz_indices)
-    viz_indices = viz_indices[:10]
+    viz_indices = [x for x in viz_indices if x < max_iters * dataloader.batch_size][:10]
 
     model.eval()
 
