@@ -14,17 +14,7 @@ from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 
 
-class ChunkDataset(Dataset):
-    """
-    Dataset that:
-    1. Loads a random 512x512x128 chunk from the volume
-    2. Caches it
-    3. Samples 512x512 2D patches that respect tissue bounding boxes
-    """
-
-    PATCH_SIZE = 512
-    CHUNK_SIZE = 128
-
+class SliceDatasetCache(Dataset):
     def __init__(
         self,
         dataset_meta: list[SubjectMetadata],
@@ -33,6 +23,9 @@ class ChunkDataset(Dataset):
         orientation: Optional[SliceOrientation] = None,
         tensorstore_aws_credentials_method: str = "anonymous",
         registration_downsample_factor: int = 3,
+        patch_size: int = 512,
+        chunk_size: int = 128,
+        debug_fixed_slice_idx: Optional[int] = None,
     ):
         super().__init__()
         self._dataset_meta = dataset_meta
@@ -41,6 +34,9 @@ class ChunkDataset(Dataset):
         self._orientation = orientation or SliceOrientation.SAGITTAL
         self._registration_downsample_factor = registration_downsample_factor
         self._tensorstore_aws_credentials_method = tensorstore_aws_credentials_method
+        self._patch_size = patch_size
+        self._chunk_size = chunk_size
+        self._debug_fixed_slice_idx = debug_fixed_slice_idx
 
         self._volumes: dict[int, tensorstore.TensorStore] = {}
         self._valid_locations = self._build_dataset_tissue_slices_map()
@@ -103,17 +99,22 @@ class ChunkDataset(Dataset):
         vol_w = vol_shape[x_axis]
         vol_d = vol_shape[slice_axis.dimension]
 
-        chunk_h = min(self.PATCH_SIZE, vol_h)
-        chunk_w = min(self.PATCH_SIZE, vol_w)
-        chunk_d = min(self.CHUNK_SIZE, vol_d)
+        chunk_h = min(self._patch_size, vol_h)
+        chunk_w = min(self._patch_size, vol_w)
+        chunk_d = min(self._chunk_size, vol_d)
 
         # Pick a random slice range that has valid tissue slices
         slice_indices = sorted([s[0] for s in valid_slices])
         min_valid_slice = min(slice_indices)
         max_valid_slice = max(slice_indices)
 
-        # Random start slice within valid tissue range
-        start_slice = random.randint(min_valid_slice, min(vol_d - chunk_d, max_valid_slice))
+        debug_slice = self._debug_fixed_slice_idx
+        if debug_slice is not None:
+            clamped_target = max(0, min(vol_d - 1, debug_slice))
+            start_slice = min(clamped_target, vol_d - chunk_d)
+            start_slice = max(0, start_slice)
+        else:
+            start_slice = random.randint(min_valid_slice, min(vol_d - chunk_d, max_valid_slice))
 
         # Get bboxes for slices that will be in this chunk
         slices_in_chunk = [
@@ -121,14 +122,26 @@ class ChunkDataset(Dataset):
             if start_slice <= idx < start_slice + chunk_d
         ]
 
+        if not slices_in_chunk:
+            raise ValueError(
+                "No tissue slices fell within the chunk boundaries. "
+            )
+
         # Position chunk to overlap with tissue - use union of bboxes
         union_min_y = min(bbox.y for _, bbox in slices_in_chunk)
         union_min_x = min(bbox.x for _, bbox in slices_in_chunk)
         union_max_y = max(bbox.y + bbox.height for _, bbox in slices_in_chunk)
         union_max_x = max(bbox.x + bbox.width for _, bbox in slices_in_chunk)
 
-        start_y = random.randint(union_min_y, max(union_max_y - chunk_h, union_min_y + 1))
-        start_x = random.randint(union_min_x, max(union_max_x - chunk_w, union_min_x + 1))
+        if union_max_y <= chunk_h:
+            start_y = 0
+        else:
+            start_y = random.randint(union_min_y, max(union_max_y - chunk_h, union_min_y + 1))
+
+        if union_max_x <= chunk_w:
+            start_x = 0
+        else:
+            start_x = random.randint(union_min_x, max(union_max_x - chunk_w, union_min_x + 1))
  
         end_y = min(start_y + chunk_h, vol_h)
         end_x = min(start_x + chunk_w, vol_w)
@@ -185,12 +198,13 @@ class ChunkDataset(Dataset):
         start_slice = info['start_slice']
         slice_axis = info['slice_axis']
 
-        patch_h = min(self.PATCH_SIZE, chunk_h)
-        patch_w = min(self.PATCH_SIZE, chunk_w)
+        patch_h = min(self._patch_size, chunk_h)
+        patch_w = min(self._patch_size, chunk_w)
 
-        slice_range = list(slice_bboxes.keys())
-        if not slice_range:
-            return []
+        if self._debug_fixed_slice_idx is not None:
+            return self._sample_debug_patch(slice_bboxes, info, patch_h, patch_w)
+
+        slice_range = range(info['chunk_d'])
 
         # Sample a fraction of the available slices, respecting sparsity in the cache
         target_samples = max(1, int(len(slice_range) * self._sample_fraction))
@@ -198,60 +212,56 @@ class ChunkDataset(Dataset):
 
         # Shuffle slice order so we try different slices each call, but keep sampling until
         # we reach the target or exhaust valid slices.
-        shuffled_slices = slice_range[:]
+        shuffled_slices = list(slice_range)
         random.shuffle(shuffled_slices)
 
         patches: list[tuple[int, int, int, np.ndarray]] = []
-        chunk_end_y = chunk_start_y + chunk_h
-        chunk_end_x = chunk_start_x + chunk_w
-
         for local_idx in shuffled_slices:
-            bbox = slice_bboxes[local_idx]
-            # Restrict anchors to the bbox portion that actually overlaps the cached chunk.
-            overlap_min_y = max(bbox.y, chunk_start_y)
-            overlap_max_y = min(bbox.y + max(1, bbox.height) - 1, chunk_end_y - 1)
-            overlap_min_x = max(bbox.x, chunk_start_x)
-            overlap_max_x = min(bbox.x + max(1, bbox.width) - 1, chunk_end_x - 1)
-
-            if overlap_min_y > overlap_max_y or overlap_min_x > overlap_max_x:
-                continue
-
-            anchor_y = random.randint(overlap_min_y, overlap_max_y)
-            anchor_x = random.randint(overlap_min_x, overlap_max_x)
-
-            start_y_min = max(chunk_start_y, anchor_y - patch_h + 1)
-            start_y_max = min(anchor_y, chunk_end_y - patch_h)
-            start_x_min = max(chunk_start_x, anchor_x - patch_w + 1)
-            start_x_max = min(anchor_x, chunk_end_x - patch_w)
-
-            if start_y_min > start_y_max or start_x_min > start_x_max:
-                continue
-
-            patch_y = random.randint(start_y_min, start_y_max)
-            patch_x = random.randint(start_x_min, start_x_max)
-
-            # Convert to local chunk coordinates
-            local_patch_y = patch_y - chunk_start_y
-            local_patch_x = patch_x - chunk_start_x
-
-            # Extract patch
             if slice_axis == 0:
-                full_slice = self._cached_chunks[local_idx, :, :]
+                patch = self._cached_chunks[local_idx, :, :]
             elif slice_axis == 1:
-                full_slice = self._cached_chunks[:, local_idx, :]
+                patch = self._cached_chunks[:, local_idx, :]
             else:
-                full_slice = self._cached_chunks[:, :, local_idx]
-
-            patch = full_slice[local_patch_y:local_patch_y + patch_h,
-                               local_patch_x:local_patch_x + patch_w]
+                patch = self._cached_chunks[:, :, local_idx]
 
             global_slice_idx = start_slice + local_idx
-            patches.append((global_slice_idx, patch_y, patch_x, patch))
+            patches.append((global_slice_idx, chunk_start_y, chunk_start_x, patch))
 
             if len(patches) >= target_samples:
                 break
 
         return patches
+
+    def _sample_debug_patch(
+        self,
+        slice_bboxes: dict[int, TissueBoundingBox],
+        info: dict,
+        patch_h: int,
+        patch_w: int,
+    ) -> list[tuple[int, int, int, np.ndarray]]:
+        target_slice = max(0, min(info['end_slice'] - 1, self._debug_fixed_slice_idx))
+        start_slice = info['start_slice']
+        local_idx = target_slice - start_slice
+
+        if local_idx not in slice_bboxes:
+            raise ValueError(
+                f"Debug slice {self._debug_fixed_slice_idx} is not cached in the current chunk."
+            )
+
+        slice_axis = info['slice_axis']
+
+        if slice_axis == 0:
+            patch = self._cached_chunks[local_idx, :, :]
+        elif slice_axis == 1:
+            patch = self._cached_chunks[:, local_idx, :]
+        else:
+            patch = self._cached_chunks[:, :, local_idx]
+
+        if patch.size == 0:
+            raise ValueError("Debug slice produced an empty patch; reload chunk or adjust slice index.")
+
+        global_slice_idx = start_slice + local_idx
+        return [(global_slice_idx, info['start_y'], info['start_x'], patch)]
 
     def clear_cache(self):
         self._cached_chunks = None
