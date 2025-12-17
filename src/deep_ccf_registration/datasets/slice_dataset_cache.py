@@ -3,18 +3,18 @@ ChunkDataset: Load a random 512x512x128 chunk, cache it, and sample 2D patches
 that respect tissue bounding boxes.
 """
 import random
-from typing import Optional
+from typing import Iterator, Optional
 
 import numpy as np
 import tensorstore
-from torch.utils.data import Dataset
+from torch.utils.data import IterableDataset
 
 from deep_ccf_registration.datasets.slice_dataset import TissueBoundingBox, TissueBoundingBoxes
 from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 
 
-class SliceDatasetCache(Dataset):
+class SliceDatasetCache(IterableDataset):
     def __init__(
         self,
         dataset_meta: list[SubjectMetadata],
@@ -40,9 +40,11 @@ class SliceDatasetCache(Dataset):
 
         self._volumes: dict[int, tensorstore.TensorStore] = {}
         self._valid_locations = self._build_dataset_tissue_slices_map()
+        self._total_valid_slices = sum(len(slices) for _, slices in self._valid_locations)
 
         self._cached_chunks: Optional[np.ndarray] = None
         self._cached_region: Optional[dict] = None
+        self._samples_per_chunk = max(1, int(self._chunk_size * self._sample_fraction))
 
     def _get_volume(self, dataset_idx: int) -> tensorstore.TensorStore:
         if dataset_idx not in self._volumes:
@@ -236,8 +238,6 @@ class SliceDatasetCache(Dataset):
         self,
         slice_bboxes: dict[int, TissueBoundingBox],
         info: dict,
-        patch_h: int,
-        patch_w: int,
     ) -> list[tuple[int, int, int, np.ndarray]]:
         target_slice = max(0, min(info['end_slice'] - 1, self._debug_fixed_slice_idx))
         start_slice = info['start_slice']
@@ -267,12 +267,19 @@ class SliceDatasetCache(Dataset):
         self._cached_chunks = None
         self._cached_region = None
 
-    def __len__(self) -> int:
-        return len(self._valid_locations)
+    def __iter__(self) -> Iterator[tuple[int, int, int, np.ndarray]]:
+        dataset_indices = list(range(len(self._valid_locations)))
+        random.shuffle(dataset_indices)
 
-    def __getitem__(self, idx: int) -> dict:
-        dataset_idx, _ = self._valid_locations[idx]
-        return self.load_chunk_region(dataset_idx)
+        for idx in dataset_indices:
+            dataset_idx, _ = self._valid_locations[idx]
+            self.load_chunk_region(dataset_idx)
+            patches = self.sample_patches_from_cache()
+
+            for patch in patches:
+                yield patch
+
+            self.clear_cache()
 
     @property
     def cached_region_info(self) -> Optional[dict]:
