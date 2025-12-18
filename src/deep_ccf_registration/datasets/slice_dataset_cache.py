@@ -24,8 +24,42 @@ class PatchSample:
     start_y: int
     start_x: int
     data: np.ndarray
-    dataset_idx: int = -1
+    dataset_idx: str = ""
     worker_id: int = -1
+    orientation: str = ""
+    subject_id: str = ""
+
+    def to_dict(self) -> dict:
+        """Convert to dictionary for batch collation."""
+        return {
+            "slice_idx": self.slice_idx,
+            "start_y": self.start_y,
+            "start_x": self.start_x,
+            "data": self.data,
+            "dataset_idx": self.dataset_idx,
+            "worker_id": self.worker_id,
+            "orientation": self.orientation,
+            "subject_id": self.subject_id,
+        }
+
+
+@dataclass
+class CachedRegion:
+    """Metadata about a cached chunk region."""
+    dataset_idx: str
+    worker_id: int
+    start_slice: int
+    end_slice: int
+    start_y: int
+    end_y: int
+    start_x: int
+    end_x: int
+    chunk_h: int
+    chunk_w: int
+    chunk_d: int
+    slice_axis: int
+    slice_bboxes: dict[int, TissueBoundingBox]
+    chunk_id: int = -1
 
 
 class SliceDatasetCache(IterableDataset):
@@ -72,7 +106,7 @@ class SliceDatasetCache(IterableDataset):
             )
 
         self._cached_chunks: Optional[np.ndarray] = None
-        self._cached_region: Optional[dict[str, Any]] = None
+        self._cached_region: Optional[CachedRegion] = None
         self._samples_per_chunk = max(1, int(self._chunk_size * self._sample_fraction))
 
         self._worker_id = 0
@@ -113,7 +147,7 @@ class SliceDatasetCache(IterableDataset):
             valid_slices.append((slice_idx, bbox))
         return valid_slices
 
-    def load_chunk_region(self) -> dict[str, Any]:
+    def load_chunk_region(self) -> CachedRegion:
         """Load a random chunk from the volume, positioned to overlap with tissue."""
         meta = self._metadata
         volume = self._get_volume()
@@ -142,16 +176,22 @@ class SliceDatasetCache(IterableDataset):
 
         debug_slice = self._debug_fixed_slice_idx
         if debug_slice is not None:
-            clamped_target = max(0, min(vol_d - 1, debug_slice))
-            start_slice = min(clamped_target, vol_d - chunk_d)
+            # Ensure chunk contains the debug slice
+            # Find closest valid slice to the requested debug slice
+            closest_valid = min(slice_indices, key=lambda x: abs(x - debug_slice))
+            # Position chunk so the target slice is included
+            start_slice = max(0, closest_valid - chunk_d // 2)
+            start_slice = min(start_slice, vol_d - chunk_d)
             start_slice = max(0, start_slice)
         else:
             start_slice = random.randint(min_valid_slice, min(vol_d - chunk_d, max_valid_slice))
 
+        end_slice = start_slice + chunk_d
+
         # Get bboxes for slices that will be in this chunk
         slices_in_chunk = [
             (idx, bbox) for idx, bbox in valid_slices
-            if start_slice <= idx < start_slice + chunk_d
+            if start_slice <= idx < end_slice
         ]
 
         if not slices_in_chunk:
@@ -174,10 +214,9 @@ class SliceDatasetCache(IterableDataset):
             start_x = 0
         else:
             start_x = random.randint(union_min_x, max(union_max_x - chunk_w, union_min_x + 1))
- 
+
         end_y = min(start_y + chunk_h, vol_h)
         end_x = min(start_x + chunk_w, vol_w)
-        end_slice = start_slice + chunk_d
 
         # Build slice for volume indexing
         slices = [0, 0, None, None, None]
@@ -198,29 +237,28 @@ class SliceDatasetCache(IterableDataset):
             f"slices {start_slice}-{end_slice}, y {start_y}-{end_y}, x {start_x}-{end_x}"
         )
 
-        # Get bboxes for slices in this range
+        # Get bboxes for slices in this range (keyed by local index)
         slice_bboxes = {
             idx - start_slice: bbox
             for idx, bbox in valid_slices
             if start_slice <= idx < end_slice
         }
 
-        self._cached_region = {
-            "dataset_idx": self._dataset_idx,
-            "worker_id": self._worker_id,
-            "start_slice": start_slice,
-            "end_slice": end_slice,
-            "start_y": start_y,
-            "end_y": end_y,
-            "start_x": start_x,
-            "end_x": end_x,
-            "chunk_h": chunk_h,
-            "chunk_w": chunk_w,
-            "chunk_d": chunk_d,
-            "slice_axis": slice_axis.dimension,
-            "slice_bboxes": dict(slice_bboxes),
-            "chunk_id": -1,
-        }
+        self._cached_region = CachedRegion(
+            dataset_idx=self._dataset_idx,
+            worker_id=self._worker_id,
+            start_slice=start_slice,
+            end_slice=end_slice,
+            start_y=start_y,
+            end_y=end_y,
+            start_x=start_x,
+            end_x=end_x,
+            chunk_h=chunk_h,
+            chunk_w=chunk_w,
+            chunk_d=chunk_d,
+            slice_axis=slice_axis.dimension,
+            slice_bboxes=slice_bboxes,
+        )
 
         return self._cached_region
 
@@ -246,6 +284,8 @@ class SliceDatasetCache(IterableDataset):
             data=patch,
             dataset_idx=self._dataset_idx,
             worker_id=self._worker_id,
+            orientation=self._orientation.value,
+            subject_id=self._metadata.subject_id,
         )
 
     def sample_patches_from_cache(self) -> list[PatchSample]:
@@ -259,20 +299,14 @@ class SliceDatasetCache(IterableDataset):
         if self._cached_chunks is None:
             return []
 
-        info = self._cached_region
-        if info is None:
+        region = self._cached_region
+        if region is None:
             return []
 
-        slice_bboxes = info["slice_bboxes"]
-        chunk_start_y = info["start_y"]
-        chunk_start_x = info["start_x"]
-        start_slice = info["start_slice"]
-        slice_axis = info["slice_axis"]
-
         if self._debug_fixed_slice_idx is not None:
-            return self._sample_debug_patch(slice_bboxes, info)
+            return self._sample_debug_patch(region)
 
-        slice_range = range(info["chunk_d"])
+        slice_range = range(region.chunk_d)
 
         # Sample a fraction of the available slices
         target_samples = max(1, int(len(slice_range) * self._sample_fraction))
@@ -284,34 +318,37 @@ class SliceDatasetCache(IterableDataset):
 
         patches: list[PatchSample] = []
         for local_idx in shuffled_slices[:target_samples]:
-            patch = self._extract_slice(local_idx, slice_axis)
+            patch = self._extract_slice(local_idx, region.slice_axis)
             if self._transform is not None:
                 patch = self._transform(image=patch)['image']
-            global_slice_idx = start_slice + local_idx
-            patches.append(self._build_patch_output(global_slice_idx, chunk_start_y, chunk_start_x, patch))
+            global_slice_idx = region.start_slice + local_idx
+            patches.append(self._build_patch_output(global_slice_idx, region.start_y, region.start_x, patch))
 
         return patches
 
-    def _sample_debug_patch(
-        self,
-        slice_bboxes: dict[int, TissueBoundingBox],
-        info: dict[str, Any],
-    ) -> list[PatchSample]:
-        target_slice = max(0, min(info["end_slice"] - 1, self._debug_fixed_slice_idx))
-        start_slice = info["start_slice"]
-        local_idx = target_slice - start_slice
+    def _sample_debug_patch(self, region: CachedRegion) -> list[PatchSample]:
+        """Sample the debug slice from the cached region."""
+        # Find the closest valid slice in the chunk to the requested debug slice
+        valid_local_indices = list(region.slice_bboxes.keys())
+        if not valid_local_indices:
+            raise ValueError("No valid slices in cached region")
 
-        if local_idx not in slice_bboxes:
-            raise ValueError(
-                f"Debug slice {self._debug_fixed_slice_idx} is not cached in the current chunk."
-            )
+        # The debug slice we want (clamped to valid range)
+        target_global = self._debug_fixed_slice_idx
+        target_local = target_global - region.start_slice
 
-        patch = self._extract_slice(local_idx, info["slice_axis"])
+        # Find closest valid local index
+        closest_local = min(valid_local_indices, key=lambda x: abs(x - target_local))
+
+        patch = self._extract_slice(closest_local, region.slice_axis)
+        if self._transform is not None:
+            patch = self._transform(image=patch)['image']
+
         if patch.size == 0:
-            raise ValueError("Debug slice produced an empty patch; reload chunk or adjust slice index.")
+            raise ValueError("Debug slice produced an empty patch")
 
-        global_slice_idx = start_slice + local_idx
-        return [self._build_patch_output(global_slice_idx, info["start_y"], info["start_x"], patch)]
+        global_slice_idx = region.start_slice + closest_local
+        return [self._build_patch_output(global_slice_idx, region.start_y, region.start_x, patch)]
 
     def clear_cache(self):
         self._cached_chunks = None
@@ -336,7 +373,7 @@ class SliceDatasetCache(IterableDataset):
 
         self._chunk_counter += 1
         if self._cached_region is not None:
-            self._cached_region["chunk_id"] = self._chunk_counter
+            self._cached_region.chunk_id = self._chunk_counter
         patches = self.sample_patches_from_cache()
         self.clear_cache()
 
@@ -355,6 +392,8 @@ class SliceDatasetCache(IterableDataset):
                 data=np.array(patch.data, copy=True),
                 dataset_idx=patch.dataset_idx,
                 worker_id=patch.worker_id,
+                orientation=patch.orientation,
+                subject_id=patch.subject_id,
             )
             self._patch_buffer.append(copied)
 
@@ -403,7 +442,7 @@ class SliceDatasetCache(IterableDataset):
         return self._cached_chunks is not None
 
     @property
-    def dataset_idx(self) -> int:
+    def dataset_idx(self) -> str:
         return self._dataset_idx
 
     @property
@@ -443,6 +482,37 @@ class ShardedMultiDatasetCache(IterableDataset):
         for ds in worker_datasets:
             ds.bind_worker(worker_id, num_workers)
             yield from ds
+
+
+def collate_patch_samples(samples: list[PatchSample]) -> dict:
+    """
+    Collate a list of PatchSample into a batched dictionary.
+
+    Returns a dict with:
+        - input_images: (B, 1, H, W) tensor
+        - dataset_indices: list of dataset identifiers (strings)
+        - slice_indices: (B,) tensor
+        - patch_ys: (B,) tensor
+        - patch_xs: (B,) tensor
+        - orientations: list of str
+        - subject_ids: list of str
+    """
+    import torch
+
+    # Stack images and add channel dimension
+    images = np.stack([s.data for s in samples], axis=0)
+    images = np.expand_dims(images, axis=1)  # Add channel dim: (B, 1, H, W)
+
+    return {
+        "input_images": torch.from_numpy(images),
+        "target_template_points": torch.zeros((images.shape[0], 3, images.shape[2], images.shape[3])), # TODO update
+        "dataset_indices": [s.dataset_idx for s in samples],
+        "slice_indices": torch.tensor([s.slice_idx for s in samples]),
+        "patch_ys": torch.tensor([s.start_y for s in samples]),
+        "patch_xs": torch.tensor([s.start_x for s in samples]),
+        "orientations": [s.orientation for s in samples],
+        "subject_ids": [s.subject_id for s in samples],
+    }
 
 
 class ShuffledBatchIterator:
