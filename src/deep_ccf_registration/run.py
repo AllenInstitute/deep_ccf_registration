@@ -215,14 +215,6 @@ def main(config_path: Path):
     subject_metadata = [SubjectMetadata.model_validate(x) for x in subject_metadata_dicts]
     logger.info(f"Total subjects loaded: {len(subject_metadata)}")
 
-    # limit subjects to subject_frac subjects
-    subject_idxs = np.arange(len(subject_metadata))
-    np.random.shuffle(subject_idxs)
-    subject_idxs = subject_idxs[:int(len(subject_idxs) * config.subject_frac)]
-    if config.subject_frac < 1:
-        logger.info(f'limiting from {len(subject_metadata)} subjects to {len(subject_idxs)}')
-    subject_metadata = [subject_metadata[i] for i in subject_idxs]
-
     # Split into train/val
     train_metadata, val_metadata, test_metadata = split_train_val_test(
         subject_metadata=subject_metadata,

@@ -77,15 +77,3 @@ class TrainConfig(BaseModel):
     use_mlflow: bool = True
 
     model: ModelConfig
-
-    # block until this many subjects have been written to disk
-    # and train/validate this many subjects per rotation
-    num_subjects_per_rotation: int = 15
-
-    # max number of train iterations per subject batch
-    max_num_subject_batch_iterations: int = 200
-
-    memmap_cache_path: Path = Path('/results')
-
-    # limit to this fraction of subjects
-    subject_frac: float = 1.0
