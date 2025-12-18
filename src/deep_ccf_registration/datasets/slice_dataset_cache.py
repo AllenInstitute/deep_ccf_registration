@@ -1,7 +1,4 @@
 """Dataset caches for extracting random tissue-aligned patches from volumes."""
-
-from __future__ import annotations
-
 import random
 import time
 from dataclasses import dataclass
@@ -75,9 +72,8 @@ class SliceDatasetCache(IterableDataset):
         registration_downsample_factor: int = 3,
         patch_size: int = 512,
         chunk_size: int = 128,
-        debug_fixed_slice_idx: Optional[int] = None,
         transform: Optional[Callable] = None,
-        max_chunks_per_dataset: Optional[int] = None,
+        max_chunks_per_dataset: Optional[int] = 1,
     ):
         super().__init__()
 
@@ -96,7 +92,6 @@ class SliceDatasetCache(IterableDataset):
         self._tensorstore_aws_credentials_method = tensorstore_aws_credentials_method
         self._patch_size = patch_size
         self._chunk_size = chunk_size
-        self._debug_fixed_slice_idx = debug_fixed_slice_idx
 
         self._volume: Optional[tensorstore.TensorStore] = None
         self._valid_slices = self._build_valid_slices()
@@ -174,17 +169,7 @@ class SliceDatasetCache(IterableDataset):
         min_valid_slice = min(slice_indices)
         max_valid_slice = max(slice_indices)
 
-        debug_slice = self._debug_fixed_slice_idx
-        if debug_slice is not None:
-            # Ensure chunk contains the debug slice
-            # Find closest valid slice to the requested debug slice
-            closest_valid = min(slice_indices, key=lambda x: abs(x - debug_slice))
-            # Position chunk so the target slice is included
-            start_slice = max(0, closest_valid - chunk_d // 2)
-            start_slice = min(start_slice, vol_d - chunk_d)
-            start_slice = max(0, start_slice)
-        else:
-            start_slice = random.randint(min_valid_slice, min(vol_d - chunk_d, max_valid_slice))
+        start_slice = random.randint(min_valid_slice, min(vol_d - chunk_d, max_valid_slice))
 
         end_slice = start_slice + chunk_d
 
@@ -303,9 +288,6 @@ class SliceDatasetCache(IterableDataset):
         if region is None:
             return []
 
-        if self._debug_fixed_slice_idx is not None:
-            return self._sample_debug_patch(region)
-
         slice_range = range(region.chunk_d)
 
         # Sample a fraction of the available slices
@@ -325,30 +307,6 @@ class SliceDatasetCache(IterableDataset):
             patches.append(self._build_patch_output(global_slice_idx, region.start_y, region.start_x, patch))
 
         return patches
-
-    def _sample_debug_patch(self, region: CachedRegion) -> list[PatchSample]:
-        """Sample the debug slice from the cached region."""
-        # Find the closest valid slice in the chunk to the requested debug slice
-        valid_local_indices = list(region.slice_bboxes.keys())
-        if not valid_local_indices:
-            raise ValueError("No valid slices in cached region")
-
-        # The debug slice we want (clamped to valid range)
-        target_global = self._debug_fixed_slice_idx
-        target_local = target_global - region.start_slice
-
-        # Find closest valid local index
-        closest_local = min(valid_local_indices, key=lambda x: abs(x - target_local))
-
-        patch = self._extract_slice(closest_local, region.slice_axis)
-        if self._transform is not None:
-            patch = self._transform(image=patch)['image']
-
-        if patch.size == 0:
-            raise ValueError("Debug slice produced an empty patch")
-
-        global_slice_idx = region.start_slice + closest_local
-        return [self._build_patch_output(global_slice_idx, region.start_y, region.start_x, patch)]
 
     def clear_cache(self):
         self._cached_chunks = None
