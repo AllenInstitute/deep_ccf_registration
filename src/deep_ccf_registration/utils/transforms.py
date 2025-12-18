@@ -246,7 +246,7 @@ def convert_from_ants_space_tensor(template_parameters: AntsImageParameters, phy
 
     return pts
 
-def map_points_to_left_hemisphere(
+def map_points_to_right_hemisphere(
         template_points: np.ndarray,
         template_parameters: AntsImageParameters,
         ml_dim_size: int
