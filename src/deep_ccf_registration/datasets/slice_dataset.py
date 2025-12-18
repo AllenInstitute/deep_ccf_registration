@@ -22,7 +22,7 @@ from deep_ccf_registration.metadata import AcquisitionAxis, SubjectMetadata, Sli
 from deep_ccf_registration.utils.logging_utils import timed_func, timed
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 from deep_ccf_registration.utils.transforms import transform_points_to_template_ants_space, \
-    apply_transforms_to_points, map_points_to_left_hemisphere
+    apply_transforms_to_points, map_points_to_right_hemisphere
 from deep_ccf_registration.utils.utils import get_ccf_annotations
 
 
@@ -486,7 +486,7 @@ class SliceDataset(Dataset):
         output_points = ls_template_points.reshape((height, width, 3))
 
         if orientation == SliceOrientation.SAGITTAL:
-            output_points = map_points_to_left_hemisphere(
+            output_points = map_points_to_right_hemisphere(
                 template_points=output_points,
                 template_parameters=self._ls_template_parameters,
                 ml_dim_size=self._template_ml_dim_size
