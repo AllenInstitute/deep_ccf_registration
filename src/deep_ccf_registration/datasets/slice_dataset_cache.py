@@ -6,6 +6,7 @@ from typing import Any, Iterator, Optional, Sequence, Callable
 
 import numpy as np
 import tensorstore
+import torch
 from loguru import logger
 from torch.utils.data import IterableDataset, get_worker_info
 
@@ -21,6 +22,7 @@ class PatchSample:
     start_y: int
     start_x: int
     data: np.ndarray
+    template_points: Optional[np.ndarray] = None
     dataset_idx: str = ""
     worker_id: int = -1
     orientation: str = ""
@@ -33,6 +35,7 @@ class PatchSample:
             "start_y": self.start_y,
             "start_x": self.start_x,
             "data": self.data,
+            "template_points": self.template_points,
             "dataset_idx": self.dataset_idx,
             "worker_id": self.worker_id,
             "orientation": self.orientation,
@@ -89,18 +92,20 @@ class SliceDatasetCache(IterableDataset):
         self._sample_fraction = sample_fraction
         self._orientation = orientation or SliceOrientation.SAGITTAL
         self._registration_downsample_factor = registration_downsample_factor
-        self._tensorstore_aws_credentials_method = tensorstore_aws_credentials_method
+        self._aws_credentials_method = tensorstore_aws_credentials_method
         self._patch_size = patch_size
         self._chunk_size = chunk_size
 
         self._volume: Optional[tensorstore.TensorStore] = None
+        self._template_points: Optional[tensorstore.TensorStore] = None
         self._valid_slices = self._build_valid_slices()
         if not self._valid_slices:
             raise ValueError(
                 f"No valid tissue slices found for dataset {self._dataset_idx}"
             )
 
-        self._cached_chunks: Optional[np.ndarray] = None
+        self._cached_input_chunks: Optional[np.ndarray] = None
+        self._cached_template_points: Optional[np.ndarray] = None
         self._cached_region: Optional[CachedRegion] = None
         self._samples_per_chunk = max(1, int(self._chunk_size * self._sample_fraction))
 
@@ -126,12 +131,30 @@ class SliceDatasetCache(IterableDataset):
                     "kvstore": create_kvstore(
                         path=str(meta.stitched_volume_path)
                         + f"/{self._registration_downsample_factor}",
-                        aws_credentials_method=self._tensorstore_aws_credentials_method,
+                        aws_credentials_method="anonymous",
                     ),
                 },
                 read=True,
             ).result()
         return self._volume
+
+    def _get_template_points_volume(self) -> tensorstore.TensorStore:
+        if self._template_points is None:
+            logger.debug(
+                f"Worker {self._worker_id} opening template points for dataset {self._dataset_idx}"
+            )
+            meta = self._metadata
+            self._template_points = tensorstore.open(
+                spec={
+                    "driver": "auto",
+                    "kvstore": create_kvstore(
+                        path=str(meta.template_points_path),
+                        aws_credentials_method=self._aws_credentials_method,
+                    ),
+                },
+                read=True,
+            ).result()
+        return self._template_points
 
     def _build_valid_slices(self) -> list[tuple[int, TissueBoundingBox]]:
         subject_bboxes = self._tissue_bboxes
@@ -146,6 +169,7 @@ class SliceDatasetCache(IterableDataset):
         """Load a random chunk from the volume, positioned to overlap with tissue."""
         meta = self._metadata
         volume = self._get_volume()
+        template_points_volume = self._get_template_points_volume()
         slice_axis = meta.get_slice_axis(self._orientation)
 
         valid_slices = self._valid_slices
@@ -215,7 +239,10 @@ class SliceDatasetCache(IterableDataset):
         )
 
         chunk_data = volume[tuple(slices)].read().result()
-        self._cached_chunks = np.array(chunk_data)
+        self._cached_input_chunks = np.array(chunk_data)
+
+        template_chunk = template_points_volume[tuple(slices)].read().result()
+        self._cached_template_points = np.array(template_chunk)
 
         logger.debug(
             f"Worker {self._worker_id} cached chunk for dataset {self._dataset_idx}: "
@@ -247,19 +274,23 @@ class SliceDatasetCache(IterableDataset):
 
         return self._cached_region
 
-    def _extract_slice(self, local_idx: int, slice_axis: int) -> np.ndarray:
-        """Extract a 2D slice from the cached 3D chunk."""
+    def _extract_slice(self, array: np.ndarray, local_idx: int, slice_axis: int) -> np.ndarray:
+        """Extract a 2D slice from a cached 3D chunk."""
         if slice_axis == 0:
-            arr = self._cached_chunks[local_idx, :, :]
+            arr = array[local_idx, :, :]
         elif slice_axis == 1:
-            arr = self._cached_chunks[:, local_idx, :]
+            arr = array[:, local_idx, :]
         else:
-            arr = self._cached_chunks[:, :, local_idx]
-        arr = arr.astype('float32')
-        return arr
+            arr = array[:, :, local_idx]
+        return arr.astype('float32')
 
     def _build_patch_output(
-        self, global_slice_idx: int, start_y: int, start_x: int, patch: np.ndarray
+        self,
+        global_slice_idx: int,
+        start_y: int,
+        start_x: int,
+        patch: np.ndarray,
+        template_patch: Optional[np.ndarray],
     ) -> PatchSample:
         """Build a structured patch sample."""
         return PatchSample(
@@ -267,6 +298,7 @@ class SliceDatasetCache(IterableDataset):
             start_y=start_y,
             start_x=start_x,
             data=patch,
+            template_points=template_patch,
             dataset_idx=self._dataset_idx,
             worker_id=self._worker_id,
             orientation=self._orientation.value,
@@ -281,7 +313,7 @@ class SliceDatasetCache(IterableDataset):
         absolute top-left coordinates, pixel data, and (optionally) the chunk metadata
         used to generate the patch.
         """
-        if self._cached_chunks is None:
+        if self._cached_input_chunks is None or self._cached_template_points is None:
             return []
 
         region = self._cached_region
@@ -300,16 +332,32 @@ class SliceDatasetCache(IterableDataset):
 
         patches: list[PatchSample] = []
         for local_idx in shuffled_slices[:target_samples]:
-            patch = self._extract_slice(local_idx, region.slice_axis)
+            patch = self._extract_slice(array=self._cached_input_chunks, local_idx=local_idx, slice_axis=region.slice_axis)
+            template_patch = self._extract_slice(
+                array=self._cached_template_points, local_idx=local_idx, slice_axis=region.slice_axis
+            )
+
             if self._transform is not None:
-                patch = self._transform(image=patch)['image']
+                transforms = self._transform(image=patch, keypoints=template_patch)
+                patch = transforms['image']
+                template_patch = transforms['keypoints']
+
             global_slice_idx = region.start_slice + local_idx
-            patches.append(self._build_patch_output(global_slice_idx, region.start_y, region.start_x, patch))
+            patches.append(
+                self._build_patch_output(
+                    global_slice_idx,
+                    region.start_y,
+                    region.start_x,
+                    patch,
+                    template_patch,
+                )
+            )
 
         return patches
 
     def clear_cache(self):
-        self._cached_chunks = None
+        self._cached_input_chunks = None
+        self._cached_template_points = None
         self._cached_region = None
 
     def _refill_patch_buffer(self) -> bool:
@@ -348,6 +396,10 @@ class SliceDatasetCache(IterableDataset):
                 start_y=patch.start_y,
                 start_x=patch.start_x,
                 data=np.array(patch.data, copy=True),
+                template_points=
+                    np.array(patch.template_points, copy=True)
+                    if patch.template_points is not None
+                    else None,
                 dataset_idx=patch.dataset_idx,
                 worker_id=patch.worker_id,
                 orientation=patch.orientation,
@@ -397,7 +449,7 @@ class SliceDatasetCache(IterableDataset):
 
     @property
     def has_cache(self) -> bool:
-        return self._cached_chunks is not None
+        return self._cached_input_chunks is not None and self._cached_template_points is not None
 
     @property
     def dataset_idx(self) -> str:
@@ -455,15 +507,16 @@ def collate_patch_samples(samples: list[PatchSample]) -> dict:
         - orientations: list of str
         - subject_ids: list of str
     """
-    import torch
-
     # Stack images and add channel dimension
     images = np.stack([s.data for s in samples], axis=0)
     images = np.expand_dims(images, axis=1)  # Add channel dim: (B, 1, H, W)
 
+    template_points = np.stack([s.template_points for s in samples], axis=0)
+    template_points = np.transpose(template_points, (0, 3, 1, 2))   # move channel dim
+
     return {
         "input_images": torch.from_numpy(images),
-        "target_template_points": torch.zeros((images.shape[0], 3, images.shape[2], images.shape[3])), # TODO update
+        "target_template_points": torch.from_numpy(template_points),
         "dataset_indices": [s.dataset_idx for s in samples],
         "slice_indices": torch.tensor([s.slice_idx for s in samples]),
         "patch_ys": torch.tensor([s.start_y for s in samples]),

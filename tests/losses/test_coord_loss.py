@@ -3,11 +3,7 @@ import torch
 import pytest
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 
-from deep_ccf_registration.losses.coord_loss import (
-    HemisphereAgnosticCoordLoss,
-)
 from deep_ccf_registration.utils.transforms import mirror_points
-from deep_ccf_registration.metadata import SliceOrientation
 
 
 class TestMirrorPoints:

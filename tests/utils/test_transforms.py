@@ -10,6 +10,7 @@ from deep_ccf_registration.utils.transforms import (
     get_cropped_region_from_array,
     transform_points_to_template_ants_space,
     apply_transforms_to_points,
+    map_points_to_right_hemisphere,
 )
 from deep_ccf_registration.metadata import AcquisitionAxis
 
@@ -374,3 +375,47 @@ class TestApplyTransformsToPoints:
                 crop_warp_to_bounding_box=False
             )
             mock_crop.assert_not_called()
+
+
+class TestMapPointsToRightHemisphere:
+    @pytest.fixture
+    def template_parameters(self):
+        return AntsImageParameters(
+            orientation="RAS",
+            dims=3,
+            scale=(1.0, 1.0, 1.0),
+            origin=(0.0, 0.0, 0.0),
+            direction=np.array([1.0, 1.0, 1.0])
+        )
+
+    def test_points_in_right_hemisphere_unchanged(self, template_parameters):
+        template_points = np.array([
+            [[25.0, 10.0, 5.0], [55.0, 10.0, 5.0]],
+            [[35.0, 15.0, 10.0], [45.0, 15.0, 10.0]],
+        ])
+        original = template_points.copy()
+
+        result = map_points_to_right_hemisphere(
+            template_points=template_points,
+            template_parameters=template_parameters,
+            ml_dim_size=100
+        )
+
+        np.testing.assert_array_equal(result, original)
+        np.testing.assert_array_equal(template_points, original)
+
+    def test_points_mirrored_when_all_left(self, template_parameters):
+        template_points = np.array([
+            [[80.0, 5.0, 5.0], [90.0, 5.0, 5.0]],
+            [[85.0, 10.0, 5.0], [95.0, 10.0, 5.0]],
+        ])
+
+        result = map_points_to_right_hemisphere(
+            template_points=template_points,
+            template_parameters=template_parameters,
+            ml_dim_size=100
+        )
+
+        expected = template_points.copy()
+        expected[:, :, 0] = 99 - expected[:, :, 0]
+        np.testing.assert_array_equal(result, expected)

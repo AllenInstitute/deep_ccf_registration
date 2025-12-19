@@ -260,20 +260,25 @@ def map_points_to_right_hemisphere(
     :param ml_dim_size: The ML dim size in template index space
     :return:
     """
-    points_index_space = template_points.copy()
-    for dim in range(template_parameters.dims):
-        points_index_space[:, :, dim] -= template_parameters.origin[dim]
-        points_index_space[:, :, dim] *= template_parameters.direction[dim]
-        points_index_space[:, :, dim] /= template_parameters.scale[dim]
+    flat_points = template_points.reshape(-1, template_parameters.dims)
 
-    # checks whether the ML points are > halfway in index space. the LS template iS RAS.
-    # therefore this checks whether points are in left hemisphere
-    need_mirror = (points_index_space[:, :, 0] > ml_dim_size / 2).all()
-    if need_mirror:
-        # map to right hemisphere
-        template_points = mirror_points(points=np.permute_dims(np.expand_dims(template_points, axis=0), (0, 3, 1, 2)), template_parameters=template_parameters, ml_dim_size=ml_dim_size)
-        template_points = np.permute_dims(template_points.squeeze(0), (1, 2, 0))
-    return template_points
+    # Convert to index space
+    points_index_space = flat_points.copy()
+    for dim in range(template_parameters.dims):
+        points_index_space[:, dim] -= template_parameters.origin[dim]
+        points_index_space[:, dim] *= template_parameters.direction[dim]
+        points_index_space[:, dim] /= template_parameters.scale[dim]
+
+    need_mirror = np.all(points_index_space[:, 0] > ml_dim_size / 2)
+    if not need_mirror:
+        return template_points
+
+    mirrored = mirror_points(
+        points=flat_points,
+        template_parameters=template_parameters,
+        ml_dim_size=ml_dim_size
+    )
+    return mirrored.reshape(template_points.shape)
 
 
 def mirror_points(points: torch.Tensor | np.ndarray, template_parameters: AntsImageParameters, ml_dim_size: int):

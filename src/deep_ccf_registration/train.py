@@ -8,7 +8,7 @@ import numpy as np
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from monai.networks.nets import UNet
-from torch.nn import MSELoss
+from deep_ccf_registration.losses import PointMSELoss
 from loguru import logger
 from torch.utils.data import DataLoader
 
@@ -16,20 +16,10 @@ from deep_ccf_registration.datasets.slice_dataset_cache import ShuffledBatchIter
 from deep_ccf_registration.utils.logging_utils import timed, ProgressLogger
 
 
-def _evaluate_loss(
-        model_out: torch.Tensor,
-        coord_loss: MSELoss,
-        target_template_points: torch.Tensor,
-) -> torch.Tensor:
-    """Compute coordinate regression loss."""
-    coordinate_loss = coord_loss(model_out, target_template_points)
-    return coordinate_loss
-
-
 def _evaluate_on_dataloader(
         dataloader: Iterator,
         model: torch.nn.Module,
-        coord_loss: MSELoss,
+        coord_loss: PointMSELoss,
         device: str,
         autocast_context: ContextManager,
         max_iters: int,
@@ -48,11 +38,7 @@ def _evaluate_on_dataloader(
 
             with autocast_context:
                 model_out = model(input_images)
-                loss = _evaluate_loss(
-                    model_out=model_out,
-                    coord_loss=coord_loss,
-                    target_template_points=target_template_points,
-                )
+                loss = coord_loss(model_out, target_template_points)
             losses.append(loss.item())
 
     return np.mean(losses) if losses else 0.0
@@ -104,7 +90,7 @@ def train(
     """
     os.makedirs(model_weights_out_dir, exist_ok=True)
 
-    coord_loss = MSELoss()
+    coord_loss = PointMSELoss()
     best_val_coord_loss = float("inf")
     patience_counter = 0
     global_step = 0
@@ -134,11 +120,7 @@ def train(
             with autocast_context:
                 with timed():
                     model_out = model(input_images)
-                loss = _evaluate_loss(
-                    model_out=model_out,
-                    coord_loss=coord_loss,
-                    target_template_points=target_template_points,
-                )
+                loss = coord_loss(model_out, target_template_points)
 
             loss.backward()
             optimizer.step()
@@ -151,7 +133,7 @@ def train(
             global_step += 1
 
             mlflow.log_metrics({
-                "train/coord_loss": loss.item(),
+                "train/rmse": np.sqrt(loss.item()),
                 "train/learning_rate": optimizer.param_groups[0]['lr'],
             }, step=global_step)
 
@@ -171,15 +153,15 @@ def train(
 
                 mlflow.log_metrics(
                     metrics={
-                        "eval/train_loss": avg_train_loss,
-                        "eval/val_loss": val_loss,
+                        "eval/train_rmse": np.sqrt(avg_train_loss),
+                        "eval/val_rmse": np.sqrt(val_loss),
                     },
                     step=global_step
                 )
 
                 logger.info(
                     f"Step {global_step} | "
-                    f"Train loss: {avg_train_loss:.6f} | Val loss: {val_loss:.6f} | "
+                    f"Train RMSE: {np.sqrt(avg_train_loss):.6f} | Val RMSE: {np.sqrt(val_loss):.6f} | "
                     f"LR: {current_lr:.6e}"
                 )
 
@@ -201,9 +183,9 @@ def train(
                     patience_counter = 0
 
                     mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
-                    mlflow.log_metric("best_val_loss", best_val_coord_loss, step=global_step)
+                    mlflow.log_metric("best_val_rmse", np.sqrt(best_val_coord_loss), step=global_step)
 
-                    logger.info(f"New best model saved! Val loss: {val_loss:.6f}")
+                    logger.info(f"New best model saved! Val RMSE: {np.sqrt(val_loss):.6f}")
                 else:
                     patience_counter += 1
                     logger.info(f"No improvement. Patience: {patience_counter}/{patience}")
@@ -211,8 +193,8 @@ def train(
                 # Early stopping
                 if patience_counter >= patience:
                     logger.info(f"\nEarly stopping triggered after {global_step} steps")
-                    logger.info(f"Best validation loss: {best_val_coord_loss:.6f}")
-                    mlflow.log_metric("final_best_val_loss", best_val_coord_loss)
+                    logger.info(f"Best validation RMSE: {np.sqrt(best_val_coord_loss):.6f}")
+                    mlflow.log_metric("final_best_val_rmse", np.sqrt(best_val_coord_loss))
 
                     return best_val_coord_loss
 
@@ -222,9 +204,9 @@ def train(
 
             if global_step == max_iters:
                 logger.info(
-                    f"\nTraining completed! Best validation loss: {best_val_coord_loss:.6f}")
+                    f"\nTraining completed! Best validation RMSE: {np.sqrt(best_val_coord_loss):.6f}")
 
-                mlflow.log_metric("final_best_val_loss", best_val_coord_loss)
+                mlflow.log_metric("final_best_val_rmse", np.sqrt(best_val_coord_loss))
                 return best_val_coord_loss
 
-            progress_logger.log_progress(other=f'loss={loss.item():.3f}')
+            progress_logger.log_progress(other=f'rmse={np.sqrt(loss.item()):.3f}')

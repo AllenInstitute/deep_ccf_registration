@@ -46,6 +46,10 @@ def _clone_patch_sample(sample: PatchSample) -> PatchSample:
         start_y=sample.start_y,
         start_x=sample.start_x,
         data=np.array(sample.data, copy=True),
+        template_points=
+            np.array(sample.template_points, copy=True)
+            if sample.template_points is not None
+            else None,
         dataset_idx=sample.dataset_idx,
         worker_id=sample.worker_id,
         orientation=getattr(sample, "orientation", ""),
@@ -89,7 +93,7 @@ class CollatedBatchIterator:
             yield collate_patch_samples(batch)
 
 
-def create_cached_dataloader(
+def create_dataloader(
     metadata: list[SubjectMetadata],
     tissue_bboxes: TissueBoundingBoxes,
     config: TrainConfig,
@@ -102,20 +106,34 @@ def create_cached_dataloader(
 
     Returns a ShuffledBatchIterator that yields collated batch dicts.
     """
-    datasets = [
-        SliceDatasetCache(
-            dataset_meta=meta,
-            tissue_bboxes=tissue_bboxes.bounding_boxes[meta.subject_id],
-            sample_fraction=0.1,
-            orientation=config.orientation,
-            tensorstore_aws_credentials_method=config.tensorstore_aws_credentials_method,
-            registration_downsample_factor=config.registration_downsample_factor,
-            patch_size=config.patch_size[0],
-            max_chunks_per_dataset=1,
-            transform=albumentations.Compose([albumentations.LongestMaxSize(max_size=512)]) if config.patch_size[0] > 512 else None,
+    def _build_transform():
+        transforms = []
+        if config.patch_size[0] > 512:
+            transforms.append(albumentations.LongestMaxSize(max_size=512))
+
+        # transforms.append(albumentations.Normalize(normalization='image'))
+        if len(transforms) > 0:
+            transforms = albumentations.Compose(transforms)
+        else:
+            transforms = None
+        return transforms
+
+    datasets = []
+    for meta in metadata:
+        transform = _build_transform()
+        datasets.append(
+            SliceDatasetCache(
+                dataset_meta=meta,
+                tissue_bboxes=tissue_bboxes.bounding_boxes[meta.subject_id],
+                sample_fraction=0.1,
+                orientation=config.orientation,
+                tensorstore_aws_credentials_method=config.tensorstore_aws_credentials_method,
+                registration_downsample_factor=config.registration_downsample_factor,
+                patch_size=config.patch_size[0],
+                max_chunks_per_dataset=1,
+                transform=transform,
+            )
         )
-        for i, meta in enumerate(metadata)
-    ]
 
     sharded_dataset = ShardedMultiDatasetCache(datasets=datasets)
 
@@ -241,7 +259,7 @@ def main(config_path: Path):
     tissue_bboxes = TissueBoundingBoxes(bounding_boxes=tissue_bboxes)
 
     logger.info("Creating train dataloader")
-    train_dataloader = create_cached_dataloader(
+    train_dataloader = create_dataloader(
         metadata=train_metadata,
         tissue_bboxes=tissue_bboxes,
         config=config,
@@ -251,7 +269,7 @@ def main(config_path: Path):
     )
 
     logger.info("Creating validation dataloader")
-    val_dataloader = create_cached_dataloader(
+    val_dataloader = create_dataloader(
         metadata=val_metadata,
         tissue_bboxes=tissue_bboxes,
         config=config,

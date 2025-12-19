@@ -21,14 +21,10 @@ class SliceOrientation(Enum):
 class SubjectMetadata(BaseModel):
     subject_id: str
     stitched_volume_path: str | Path
+    template_points_path: str
     axes: list[AcquisitionAxis]
     registered_shape: tuple[int, int, int]
     registration_downsample: int
-    ls_to_template_affine_matrix_path: Path
-    # the inverse warp was converted to ome-zarr via `point_transformation_to_ome_zarr.py`
-    ls_to_template_inverse_warp_path: str | Path
-    # this is the original niftii inverse warp just in case
-    ls_to_template_inverse_warp_path_original: Optional[Path] = None
     # The index that splits the 2 hemispheres in voxels the same dim as the sagittal axis in the registered volume
     # obtained via `get_input_space_midline.py`
     sagittal_midline: Optional[int] = None
