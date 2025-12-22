@@ -35,10 +35,11 @@ def _evaluate_on_dataloader(
 
             input_images = batch["input_images"].to(device)
             target_template_points = batch["target_template_points"].to(device)
+            pad_masks = batch["pad_masks"].to(device)
 
             with autocast_context:
                 model_out = model(input_images)
-                loss = coord_loss(model_out, target_template_points)
+                loss = coord_loss(model_out, target_template_points, pad_masks)
             losses.append(loss.item())
 
     return np.mean(losses) if losses else 0.0
@@ -115,12 +116,13 @@ def train(
 
             input_images = batch["input_images"].to(device)
             target_template_points = batch["target_template_points"].to(device)
+            pad_masks = batch["pad_masks"].to(device)
 
             optimizer.zero_grad()
             with autocast_context:
                 with timed():
                     model_out = model(input_images)
-                loss = coord_loss(model_out, target_template_points)
+                loss = coord_loss(model_out, target_template_points, pad_masks)
 
             loss.backward()
             optimizer.step()

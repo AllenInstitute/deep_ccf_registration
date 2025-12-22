@@ -483,7 +483,7 @@ class ShardedMultiDatasetCache(IterableDataset):
             yield from ds
 
 
-def collate_patch_samples(samples: list[PatchSample]) -> dict:
+def collate_patch_samples(samples: list[PatchSample], patch_size: int) -> dict:
     """
     Collate a list of PatchSample into a batched dictionary.
 
@@ -495,17 +495,39 @@ def collate_patch_samples(samples: list[PatchSample]) -> dict:
         - patch_xs: (B,) tensor
         - orientations: list of str
         - subject_ids: list of str
+        - pad_masks: (B, H, W) tensor indicating valid (non-padded) pixels
     """
-    # Stack images and add channel dimension
-    images = np.stack([s.data for s in samples], axis=0)
-    images = np.expand_dims(images, axis=1)  # Add channel dim: (B, 1, H, W)
+    batch_size = len(samples)
+    heights = [s.data.shape[0] for s in samples]
+    widths = [s.data.shape[1] for s in samples]
 
-    template_points = np.stack([s.template_points for s in samples], axis=0)
-    template_points = np.transpose(template_points, (0, 3, 1, 2))   # move channel dim
+    if any(h > patch_size or w > patch_size for h, w in zip(heights, widths)):
+        raise ValueError("Sample patch exceeds configured patch_size")
+    target_h = target_w = patch_size
+
+    image_dtype = samples[0].data.dtype
+    template_dtype = samples[0].template_points.dtype if samples[0].template_points is not None else np.float32
+
+    images = np.zeros((batch_size, 1, target_h, target_w), dtype=image_dtype)
+    template_points = np.zeros((batch_size, 3, target_h, target_w), dtype=template_dtype)
+    pad_masks = np.zeros((batch_size, target_h, target_w), dtype=np.uint8)
+
+    for idx, sample in enumerate(samples):
+        img = sample.data
+        h, w = img.shape
+        images[idx, 0, :h, :w] = img
+
+        if sample.template_points is None:
+            raise ValueError("PatchSample missing template_points; cannot collate")
+        template = np.transpose(sample.template_points, (2, 0, 1))
+        template_points[idx, :, :h, :w] = template
+
+        pad_masks[idx, :h, :w] = 1
 
     return {
         "input_images": torch.from_numpy(images),
         "target_template_points": torch.from_numpy(template_points),
+        "pad_masks": torch.from_numpy(pad_masks.astype(bool)),
         "dataset_indices": [s.dataset_idx for s in samples],
         "slice_indices": torch.tensor([s.slice_idx for s in samples]),
         "patch_ys": torch.tensor([s.start_y for s in samples]),
