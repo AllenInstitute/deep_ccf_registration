@@ -4,12 +4,10 @@ import time
 from dataclasses import dataclass
 from typing import Any, Iterator, Optional, Sequence, Callable
 
-import albumentations
 import numpy as np
 import tensorstore
 import torch
 from loguru import logger
-from skimage.exposure import rescale_intensity
 from torch.utils.data import IterableDataset, get_worker_info
 
 from deep_ccf_registration.datasets.slice_dataset import (
@@ -50,34 +48,10 @@ class CachedRegion:
     """Metadata about a cached chunk region."""
     dataset_idx: str
     worker_id: int
-    start_slice: int
-    end_slice: int
-    start_y: int
-    end_y: int
-    start_x: int
-    end_x: int
-    chunk_h: int
-    chunk_w: int
-    chunk_d: int
-    slice_axis: int
-    slice_bboxes: dict[int, TissueBoundingBox]
+    # per-volume-axis slices (z, y, x) defining the cached subvolume
+    spatial_slices: tuple[slice, slice, slice]
     chunk_id: int = -1
 
-class ImageNormalization(albumentations.ImageOnlyTransform):
-    def __init__(self):
-        super().__init__(p=1.0)
-
-    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
-        img = data['image']
-        low, high = np.percentile(img, (1, 99))
-        return {'low': low, 'high': high}
-
-    def apply(self, img: np.ndarray, low: float, high: float, **params: Any) -> np.ndarray:
-        return rescale_intensity(
-            img,
-            in_range=tuple((low, high)),
-            out_range=(0, 1)
-        )
 
 class SliceDatasetCache(IterableDataset):
     """Cache and stream patches for a single SmartSPIM volume."""
@@ -155,7 +129,14 @@ class SliceDatasetCache(IterableDataset):
             ).result()
         return self._volume
 
-    def _get_template_points_volume(self) -> tensorstore.TensorStore:
+    def _get_template_points_volume(self) -> Optional[tensorstore.TensorStore]:
+        if not getattr(self._metadata, "template_points_path", None):
+            # TODO(#temp-template-path): remove this guard once all subjects provide template points.
+            logger.debug(
+                f"Worker {self._worker_id} skipping template points; no path for dataset {self._dataset_idx}"
+            )
+            return None
+
         if self._template_points is None:
             logger.debug(
                 f"Worker {self._worker_id} opening template points for dataset {self._dataset_idx}"
@@ -258,35 +239,22 @@ class SliceDatasetCache(IterableDataset):
         chunk_data = volume[tuple(slices)].read().result()
         self._cached_input_chunks = np.array(chunk_data)
 
-        template_chunk = template_points_volume[tuple(slices)].read().result()
-        self._cached_template_points = np.array(template_chunk)
+        if template_points_volume is not None:
+            template_chunk = template_points_volume[tuple(slices)].read().result()
+            self._cached_template_points = np.array(template_chunk)
+        else:
+            # TODO(#temp-template-path): remove placeholder once template points exist for every subject.
+            self._cached_template_points = np.zeros(self._cached_input_chunks.shape + (3,), dtype=np.float32)
 
         logger.debug(
             f"Worker {self._worker_id} cached chunk for dataset {self._dataset_idx}: "
             f"slices {start_slice}-{end_slice}, y {start_y}-{end_y}, x {start_x}-{end_x}"
         )
 
-        # Get bboxes for slices in this range (keyed by local index)
-        slice_bboxes = {
-            idx - start_slice: bbox
-            for idx, bbox in valid_slices
-            if start_slice <= idx < end_slice
-        }
-
         self._cached_region = CachedRegion(
             dataset_idx=self._dataset_idx,
             worker_id=self._worker_id,
-            start_slice=start_slice,
-            end_slice=end_slice,
-            start_y=start_y,
-            end_y=end_y,
-            start_x=start_x,
-            end_x=end_x,
-            chunk_h=chunk_h,
-            chunk_w=chunk_w,
-            chunk_d=chunk_d,
-            slice_axis=slice_axis.dimension,
-            slice_bboxes=slice_bboxes,
+            spatial_slices=tuple(slices[2:]),
         )
 
         return self._cached_region
@@ -301,26 +269,6 @@ class SliceDatasetCache(IterableDataset):
             arr = array[:, :, local_idx]
         return arr.astype('float32')
 
-    def _build_patch_output(
-        self,
-        global_slice_idx: int,
-        start_y: int,
-        start_x: int,
-        patch: np.ndarray,
-        template_patch: Optional[np.ndarray],
-    ) -> PatchSample:
-        """Build a structured patch sample."""
-        return PatchSample(
-            slice_idx=global_slice_idx,
-            start_y=start_y,
-            start_x=start_x,
-            data=patch,
-            template_points=template_patch,
-            dataset_idx=self._dataset_idx,
-            worker_id=self._worker_id,
-            orientation=self._orientation.value,
-            subject_id=self._metadata.subject_id,
-        )
 
     def sample_patches_from_cache(self) -> list[PatchSample]:
         """
@@ -337,7 +285,21 @@ class SliceDatasetCache(IterableDataset):
         if region is None:
             return []
 
-        slice_range = range(region.chunk_d)
+        slice_axis = self._metadata.get_slice_axis(self._orientation)
+        plane_axes = [dim for dim in range(3) if dim != slice_axis.dimension]
+        plane_axis_a, plane_axis_b = plane_axes
+
+        spatial_slices = region.spatial_slices
+
+        slice_span = spatial_slices[slice_axis.dimension]
+        plane_span_a = spatial_slices[plane_axis_a]
+        plane_span_b = spatial_slices[plane_axis_b]
+
+        slice_start = slice_span.start
+        start_y = plane_span_a.start
+        start_x = plane_span_b.start
+
+        slice_range = range(slice_span.stop - slice_span.start)
 
         # Sample a fraction of the available slices
         target_samples = max(1, int(len(slice_range) * self._sample_fraction))
@@ -349,24 +311,34 @@ class SliceDatasetCache(IterableDataset):
 
         patches: list[PatchSample] = []
         for local_idx in shuffled_slices[:target_samples]:
-            patch = self._extract_slice(array=self._cached_input_chunks, local_idx=local_idx, slice_axis=region.slice_axis)
+            patch = self._extract_slice(
+                array=self._cached_input_chunks,
+                local_idx=local_idx,
+                slice_axis=slice_axis.dimension,
+            )
             template_patch = self._extract_slice(
-                array=self._cached_template_points, local_idx=local_idx, slice_axis=region.slice_axis
+                array=self._cached_template_points,
+                local_idx=local_idx,
+                slice_axis=slice_axis.dimension,
             )
 
             if self._transform is not None:
-                transforms = self._transform(image=patch, keypoints=template_patch)
+                transforms = self._transform(image=patch, keypoints=template_patch, slice_axis=slice_axis, acquisition_axes=self._metadata.axes, orientation=self._orientation)
                 patch = transforms['image']
                 template_patch = transforms['keypoints']
 
-            global_slice_idx = region.start_slice + local_idx
+            global_slice_idx = slice_start + local_idx
             patches.append(
-                self._build_patch_output(
-                    global_slice_idx,
-                    region.start_y,
-                    region.start_x,
-                    patch,
-                    template_patch,
+                PatchSample(
+                            slice_idx=global_slice_idx,
+                            start_y=start_y,
+                            start_x=start_x,
+                            data=patch,
+                            template_points=template_patch,
+                            dataset_idx=self._dataset_idx,
+                            worker_id=self._worker_id,
+                            orientation=self._orientation.value,
+                            subject_id=self._metadata.subject_id,
                 )
             )
 

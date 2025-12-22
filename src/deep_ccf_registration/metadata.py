@@ -2,9 +2,21 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from aind_smartspim_transform_utils.utils.utils import AcquisitionDirection, AcqusitionAxesName
 from pydantic import BaseModel
 
+
+class AcquisitionDirection(Enum):
+    LEFT_TO_RIGHT = 'Left_to_right'
+    RIGHT_TO_LEFT = 'Right_to_left'
+    POSTERIOR_TO_ANTERIOR = 'Posterior_to_anterior'
+    ANTERIOR_TO_POSTERIOR = 'Anterior_to_posterior'
+    SUPERIOR_TO_INFERIOR = 'Superior_to_inferior'
+    INFERIOR_TO_SUPERIOR = 'Inferior_to_superior'
+
+class AcqusitionAxesName(Enum):
+    X = 'X'
+    Y = 'Y'
+    Z = 'Z'
 
 class AcquisitionAxis(BaseModel):
     dimension: int
@@ -21,7 +33,7 @@ class SliceOrientation(Enum):
 class SubjectMetadata(BaseModel):
     subject_id: str
     stitched_volume_path: str | Path
-    template_points_path: str
+    template_points_path: Optional[str] = None # TODO
     axes: list[AcquisitionAxis]
     registered_shape: tuple[int, int, int]
     registration_downsample: int

@@ -28,8 +28,9 @@ from deep_ccf_registration.datasets.slice_dataset_cache import (
     SliceDatasetCache,
     ShardedMultiDatasetCache,
     ShuffledBatchIterator,
-    collate_patch_samples, ImageNormalization,
-)
+    collate_patch_samples, )
+from deep_ccf_registration.datasets.transforms import ImageNormalization, OrientationNormalization, \
+    build_transform
 from deep_ccf_registration.metadata import SubjectMetadata
 from deep_ccf_registration.train import train
 
@@ -46,10 +47,7 @@ def _clone_patch_sample(sample: PatchSample) -> PatchSample:
         start_y=sample.start_y,
         start_x=sample.start_x,
         data=np.array(sample.data, copy=True),
-        template_points=
-            np.array(sample.template_points, copy=True)
-            if sample.template_points is not None
-            else None,
+        template_points=np.array(sample.template_points, copy=True),
         dataset_idx=sample.dataset_idx,
         worker_id=sample.worker_id,
         orientation=getattr(sample, "orientation", ""),
@@ -106,22 +104,9 @@ def create_dataloader(
 
     Returns a ShuffledBatchIterator that yields collated batch dicts.
     """
-    def _build_transform():
-        transforms = []
-        if config.patch_size[0] > 512:
-            transforms.append(albumentations.LongestMaxSize(max_size=512))
-
-        transforms.append(ImageNormalization())
-
-        if len(transforms) > 0:
-            transforms = albumentations.Compose(transforms, seed=config.seed)
-        else:
-            transforms = None
-        return transforms
-
     datasets = []
     for meta in metadata:
-        transform = _build_transform()
+        transform = build_transform(config=config)
         datasets.append(
             SliceDatasetCache(
                 dataset_meta=meta,

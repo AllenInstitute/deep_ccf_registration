@@ -31,10 +31,10 @@ class TrainConfig(BaseModel):
     tensorstore_aws_credentials_method: str = "default"
     crop_warp_to_bounding_box: bool = True
     patch_size: Optional[tuple[int, int]] = None
-    normalize_orientation_map: Optional[dict[SliceOrientation, list[AcquisitionDirection]]] = {
-        SliceOrientation.SAGITTAL: [AcquisitionDirection.SUPERIOR_TO_INFERIOR,
-                                    AcquisitionDirection.ANTERIOR_TO_POSTERIOR]
-    }
+    # make all input images have uniform orientation
+    normalize_orientation: bool = True
+    # make all input images range from [0, 1] using lower and upper percentiles as thresholds
+    normalize_input_image: bool = True
     limit_sagittal_slices_to_hemisphere: bool = False
     batch_size: int = Field(32, gt=0)
     num_workers: int = Field(0, ge=0)
