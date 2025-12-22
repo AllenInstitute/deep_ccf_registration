@@ -4,10 +4,12 @@ import time
 from dataclasses import dataclass
 from typing import Any, Iterator, Optional, Sequence, Callable
 
+import albumentations
 import numpy as np
 import tensorstore
 import torch
 from loguru import logger
+from skimage.exposure import rescale_intensity
 from torch.utils.data import IterableDataset, get_worker_info
 
 from deep_ccf_registration.datasets.slice_dataset import (
@@ -61,6 +63,21 @@ class CachedRegion:
     slice_bboxes: dict[int, TissueBoundingBox]
     chunk_id: int = -1
 
+class ImageNormalization(albumentations.ImageOnlyTransform):
+    def __init__(self):
+        super().__init__(p=1.0)
+
+    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+        img = data['image']
+        low, high = np.percentile(img, (1, 99))
+        return {'low': low, 'high': high}
+
+    def apply(self, img: np.ndarray, low: float, high: float, **params: Any) -> np.ndarray:
+        return rescale_intensity(
+            img,
+            in_range=tuple((low, high)),
+            out_range=(0, 1)
+        )
 
 class SliceDatasetCache(IterableDataset):
     """Cache and stream patches for a single SmartSPIM volume."""

@@ -28,7 +28,7 @@ from deep_ccf_registration.datasets.slice_dataset_cache import (
     SliceDatasetCache,
     ShardedMultiDatasetCache,
     ShuffledBatchIterator,
-    collate_patch_samples,
+    collate_patch_samples, ImageNormalization,
 )
 from deep_ccf_registration.metadata import SubjectMetadata
 from deep_ccf_registration.train import train
@@ -111,9 +111,10 @@ def create_dataloader(
         if config.patch_size[0] > 512:
             transforms.append(albumentations.LongestMaxSize(max_size=512))
 
-        # transforms.append(albumentations.Normalize(normalization='image'))
+        transforms.append(ImageNormalization())
+
         if len(transforms) > 0:
-            transforms = albumentations.Compose(transforms)
+            transforms = albumentations.Compose(transforms, seed=config.seed)
         else:
             transforms = None
         return transforms

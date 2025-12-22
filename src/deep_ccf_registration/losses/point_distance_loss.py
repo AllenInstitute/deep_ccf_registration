@@ -8,9 +8,6 @@ class PointMSELoss(nn.Module):
 
     For coordinate tensors of shape (B, C, H, W) where C is the coordinate dimension,
     this computes the squared L2 distance for each spatial point and returns the mean.
-
-    This is preferred over PointDistanceLoss for training since MSE has smoother
-    gradients. Use sqrt of this loss for RMSE logging.
     """
 
     def __init__(self, coordinate_dim: int = 1):
