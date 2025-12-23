@@ -6,15 +6,16 @@ from contextlib import nullcontext
 import mlflow
 import numpy as np
 import torch
-from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
+from matplotlib import pyplot as plt
 from monai.networks.nets import UNet
 from deep_ccf_registration.losses import PointMSELoss
 from loguru import logger
-from torch.utils.data import DataLoader
 
 from deep_ccf_registration.datasets.slice_dataset_cache import ShuffledBatchIterator
-from deep_ccf_registration.datasets.transforms import TemplatePointsNormalization
+from deep_ccf_registration.datasets.transforms import TemplatePointsNormalization, \
+    TemplateParameters
 from deep_ccf_registration.utils.logging_utils import timed, ProgressLogger
+from deep_ccf_registration.inference import viz_sample
 
 
 def _evaluate(
@@ -25,11 +26,22 @@ def _evaluate(
     autocast_context: ContextManager,
     max_iters: int,
     template_points_normalizer: Optional[TemplatePointsNormalization] = None,
+    viz_sample_count: int = 10,
+    ls_template_parameters: Optional[TemplateParameters] = None,
+    ccf_annotations: Optional[np.ndarray] = None,
+    global_step: Optional[int] = None,
+    exclude_background_pixels: bool = False,
 ) -> tuple[float, float]:
     """Evaluate model"""
     model.eval()
     losses = []
     losses_denorm = []
+    collected_samples = []
+    enable_viz = (
+        viz_sample_count > 0
+        and ls_template_parameters is not None
+        and ccf_annotations is not None
+    )
 
     with torch.no_grad():
         for i, batch in enumerate(dataloader):
@@ -52,11 +64,66 @@ def _evaluate(
                     loss_denorm = coord_loss(model_out_denorm, target_template_points_denorm, pad_masks)
                     losses_denorm.append(loss_denorm.item())
 
+            if enable_viz and len(collected_samples) < viz_sample_count:
+                errors = (model_out - target_template_points) ** 2
+                slice_indices = batch["slice_indices"]
+                patch_ys = batch["patch_ys"]
+                patch_xs = batch["patch_xs"]
+                subject_ids = batch["subject_ids"]
+
+                remaining = viz_sample_count - len(collected_samples)
+                take = min(remaining, input_images.shape[0])
+                for sample_idx in range(take):
+                    collected_samples.append({
+                        "input_image": input_images[sample_idx].detach().cpu().squeeze(0),
+                        "pred_coords": model_out[sample_idx].detach().cpu(),
+                        "gt_coords": target_template_points[sample_idx].detach().cpu(),
+                        "pad_mask": pad_masks[sample_idx].detach().cpu(),
+                        "errors": errors[sample_idx].detach().cpu().numpy(),
+                        "slice_idx": int(slice_indices[sample_idx].item()),
+                        "patch_y": int(patch_ys[sample_idx].item()),
+                        "patch_x": int(patch_xs[sample_idx].item()),
+                        "subject_id": subject_ids[sample_idx],
+                    })
+                    if len(collected_samples) >= viz_sample_count:
+                        break
+
 
         if losses_denorm:
-            return np.mean(losses), np.sqrt(np.mean(losses_denorm))
+            val_loss = np.mean(losses)
+            val_rmse = np.sqrt(np.mean(losses_denorm))
         else:
-            return np.mean(losses), np.sqrt(np.mean(losses))
+            val_loss = np.mean(losses)
+            val_rmse = np.sqrt(np.mean(losses))
+
+        if enable_viz and collected_samples:
+            iteration = global_step or 0
+            for idx, sample in enumerate(collected_samples):
+                fig = viz_sample(
+                    ls_template_parameters=ls_template_parameters,
+                    pred_coords=sample["pred_coords"],
+                    gt_coords=sample["gt_coords"],
+                    ccf_annotations=ccf_annotations,
+                    iteration=iteration,
+                    pad_mask=sample["pad_mask"],
+                    input_image=sample["input_image"],
+                    slice_idx=sample["slice_idx"],
+                    errors=sample["errors"],
+                    pred_tissue_mask=None,
+                    tissue_mask=sample["pad_mask"],
+                    exclude_background=exclude_background_pixels,
+                )
+                fig_filename = (
+                    f"subject_{sample['subject_id']}_slice_{sample['slice_idx']}"
+                    f"_y_{sample['patch_y']}_x_{sample['patch_x']}_step_{iteration}_viz_{idx}.png"
+                )
+                mlflow.log_figure(
+                    fig,
+                    f"validation_samples/step_{iteration}/{fig_filename}"
+                )
+                plt.close(fig)
+
+        return val_loss, val_rmse
 
 def train(
         train_dataloader: ShuffledBatchIterator,
@@ -76,6 +143,10 @@ def train(
         is_debug: bool = False,
         log_interval: int = 20,
         template_points_normalizer: Optional[TemplatePointsNormalization] = None,
+        ls_template_parameters: Optional[TemplateParameters] = None,
+        ccf_annotations: Optional[np.ndarray] = None,
+        val_viz_samples: int = 0,
+        exclude_background_pixels: bool = False,
 ):
     """
     Train slice registration model
@@ -99,6 +170,8 @@ def train(
     device: Device to train on
     ccf_annotations: 25 micron resolution CCF annotation volume
     ls_template_parameters: ls template AntsImageParameters
+    val_viz_samples: number of validation samples to visualize each evaluation
+    exclude_background_pixels: whether to zero-out background pixels in visualizations
 
     Returns
     -------
@@ -165,6 +238,11 @@ def train(
                     autocast_context=autocast_context,
                     max_iters=1 if is_debug else eval_iters,
                     template_points_normalizer=template_points_normalizer,
+                    viz_sample_count=val_viz_samples,
+                    ls_template_parameters=ls_template_parameters,
+                    ccf_annotations=ccf_annotations,
+                    global_step=global_step,
+                    exclude_background_pixels=exclude_background_pixels,
                 )
 
                 current_lr = optimizer.param_groups[0]['lr']
