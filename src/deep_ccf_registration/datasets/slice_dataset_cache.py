@@ -13,6 +13,7 @@ from torch.utils.data import IterableDataset, get_worker_info
 from deep_ccf_registration.datasets.slice_dataset import (
     TissueBoundingBox,
 )
+from deep_ccf_registration.datasets.transforms import TemplatePointsNormalization
 from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 
@@ -68,6 +69,7 @@ class SliceDatasetCache(IterableDataset):
         chunk_size: int = 128,
         transform: Optional[Callable] = None,
         max_chunks_per_dataset: Optional[int] = 1,
+        template_points_normalizer: Optional[TemplatePointsNormalization] = None
     ):
         super().__init__()
 
@@ -109,6 +111,7 @@ class SliceDatasetCache(IterableDataset):
         if max_chunks_per_dataset is not None and max_chunks_per_dataset < 1:
             raise ValueError("max_chunks_per_dataset must be >= 1 or None")
         self._max_chunks_per_dataset = max_chunks_per_dataset
+        self._template_points_normalizer = template_points_normalizer
 
     def _get_volume(self) -> tensorstore.TensorStore:
         if self._volume is None:
@@ -326,6 +329,9 @@ class SliceDatasetCache(IterableDataset):
                 transforms = self._transform(image=patch, keypoints=template_patch, slice_axis=slice_axis, acquisition_axes=self._metadata.axes, orientation=self._orientation)
                 patch = transforms['image']
                 template_patch = transforms['keypoints']
+
+            if self._template_points_normalizer is not None:
+                template_patch = self._template_points_normalizer.apply(x=template_patch)
 
             global_slice_idx = slice_start + local_idx
             patches.append(

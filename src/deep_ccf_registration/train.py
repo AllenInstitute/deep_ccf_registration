@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import ContextManager, Iterator
+from typing import ContextManager, Iterator, Optional
 from contextlib import nullcontext
 
 import mlflow
@@ -13,20 +13,23 @@ from loguru import logger
 from torch.utils.data import DataLoader
 
 from deep_ccf_registration.datasets.slice_dataset_cache import ShuffledBatchIterator
+from deep_ccf_registration.datasets.transforms import TemplatePointsNormalization
 from deep_ccf_registration.utils.logging_utils import timed, ProgressLogger
 
 
-def _evaluate_on_dataloader(
-        dataloader: Iterator,
-        model: torch.nn.Module,
-        coord_loss: PointMSELoss,
-        device: str,
-        autocast_context: ContextManager,
-        max_iters: int,
-) -> float:
-    """Evaluate model on a dataloader, returning average loss."""
+def _evaluate(
+    dataloader: Iterator,
+    model: torch.nn.Module,
+    coord_loss: PointMSELoss,
+    device: str,
+    autocast_context: ContextManager,
+    max_iters: int,
+    template_points_normalizer: Optional[TemplatePointsNormalization] = None,
+) -> tuple[float, float]:
+    """Evaluate model"""
     model.eval()
     losses = []
+    losses_denorm = []
 
     with torch.no_grad():
         for i, batch in enumerate(dataloader):
@@ -40,9 +43,20 @@ def _evaluate_on_dataloader(
             with autocast_context:
                 model_out = model(input_images)
                 loss = coord_loss(model_out, target_template_points, pad_masks)
-            losses.append(loss.item())
+                losses.append(loss.item())
 
-    return np.mean(losses) if losses else 0.0
+                # denormalize if normalizer is provided
+                if template_points_normalizer is not None:
+                    model_out_denorm = template_points_normalizer.inverse(model_out)
+                    target_template_points_denorm = template_points_normalizer.inverse(target_template_points)
+                    loss_denorm = coord_loss(model_out_denorm, target_template_points_denorm, pad_masks)
+                    losses_denorm.append(loss_denorm.item())
+
+
+        if losses_denorm:
+            return np.mean(losses), np.sqrt(np.mean(losses_denorm))
+        else:
+            return np.mean(losses), np.sqrt(np.mean(losses))
 
 def train(
         train_dataloader: ShuffledBatchIterator,
@@ -60,7 +74,8 @@ def train(
         autocast_context: ContextManager = nullcontext(),
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         is_debug: bool = False,
-        log_interval: int = 20
+        log_interval: int = 20,
+        template_points_normalizer: Optional[TemplatePointsNormalization] = None,
 ):
     """
     Train slice registration model
@@ -92,7 +107,7 @@ def train(
     os.makedirs(model_weights_out_dir, exist_ok=True)
 
     coord_loss = PointMSELoss()
-    best_val_coord_loss = float("inf")
+    best_val_rmse = float("inf")
     patience_counter = 0
     global_step = 0
     min_lr = learning_rate / 10 # should be ~= learning_rate/10 per Chinchilla
@@ -135,35 +150,36 @@ def train(
             global_step += 1
 
             mlflow.log_metrics({
-                "train/rmse": np.sqrt(loss.item()),
+                "train/loss": loss.item(),
                 "train/learning_rate": optimizer.param_groups[0]['lr'],
             }, step=global_step)
 
             # Periodic evaluation
             if global_step % eval_interval == 0:
-                val_loss = _evaluate_on_dataloader(
+                logger.info(f"Evaluating at step {global_step}")
+                val_loss, val_rmse = _evaluate(
                     dataloader=val_dataloader,
                     model=model,
                     coord_loss=coord_loss,
                     device=device,
                     autocast_context=autocast_context,
                     max_iters=1 if is_debug else eval_iters,
+                    template_points_normalizer=template_points_normalizer,
                 )
 
                 current_lr = optimizer.param_groups[0]['lr']
-                avg_train_loss = np.mean(train_losses) if train_losses else 0.0
 
                 mlflow.log_metrics(
                     metrics={
-                        "eval/train_rmse": np.sqrt(avg_train_loss),
-                        "eval/val_rmse": np.sqrt(val_loss),
+                        "eval/loss": val_loss,
+                        "eval/val_rmse": val_rmse
                     },
                     step=global_step
                 )
 
                 logger.info(
                     f"Step {global_step} | "
-                    f"Train RMSE: {np.sqrt(avg_train_loss):.6f} | Val RMSE: {np.sqrt(val_loss):.6f} | "
+                    f"Train loss: {loss.item():.6f} | Val loss: {val_loss:.6f} | Val RMSE: {val_rmse:.6f} |"
                     f"LR: {current_lr:.6e}"
                 )
 
@@ -173,21 +189,21 @@ def train(
                         'global_step': global_step,
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
-                        'val_loss': val_loss,
+                        'val_rmse': val_rmse,
                         'lr': scheduler.get_last_lr()
                     },
                     f=checkpoint_path,
                 )
 
                 # Check for improvement
-                if val_loss < best_val_coord_loss - min_delta:
-                    best_val_coord_loss = val_loss
+                if val_rmse < best_val_rmse - min_delta:
+                    best_val_rmse = val_rmse
                     patience_counter = 0
 
                     mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
-                    mlflow.log_metric("best_val_rmse", np.sqrt(best_val_coord_loss), step=global_step)
+                    mlflow.log_metric("best_val_rmse", best_val_rmse, step=global_step)
 
-                    logger.info(f"New best model saved! Val RMSE: {np.sqrt(val_loss):.6f}")
+                    logger.info(f"New best model saved! Val RMSE: {val_rmse:.6f}")
                 else:
                     patience_counter += 1
                     logger.info(f"No improvement. Patience: {patience_counter}/{patience}")
@@ -195,10 +211,10 @@ def train(
                 # Early stopping
                 if patience_counter >= patience:
                     logger.info(f"\nEarly stopping triggered after {global_step} steps")
-                    logger.info(f"Best validation RMSE: {np.sqrt(best_val_coord_loss):.6f}")
-                    mlflow.log_metric("final_best_val_rmse", np.sqrt(best_val_coord_loss))
+                    logger.info(f"Best validation RMSE: {best_val_rmse:.6f}")
+                    mlflow.log_metric("final_best_val_rmse", best_val_rmse)
 
-                    return best_val_coord_loss
+                    return best_val_rmse
 
                 # Reset train losses for next eval period
                 train_losses = []
@@ -206,9 +222,9 @@ def train(
 
             if global_step == max_iters:
                 logger.info(
-                    f"\nTraining completed! Best validation RMSE: {np.sqrt(best_val_coord_loss):.6f}")
+                    f"\nTraining completed! Best validation RMSE: {best_val_rmse:.6f}")
 
-                mlflow.log_metric("final_best_val_rmse", np.sqrt(best_val_coord_loss))
-                return best_val_coord_loss
+                mlflow.log_metric("final_best_val_rmse", best_val_rmse)
+                return best_val_rmse
 
-            progress_logger.log_progress(other=f'rmse={np.sqrt(loss.item()):.3f}')
+            progress_logger.log_progress(other=f'loss={loss.item():.3f}')

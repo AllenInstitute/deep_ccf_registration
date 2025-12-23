@@ -35,6 +35,8 @@ class TrainConfig(BaseModel):
     normalize_orientation: bool = True
     # make all input images range from [0, 1] using lower and upper percentiles as thresholds
     normalize_input_image: bool = True
+    # normalize template points to [-1,1] (background points will be outside this range)
+    normalize_template_points: bool = True
     limit_sagittal_slices_to_hemisphere: bool = False
     batch_size: int = Field(32, gt=0)
     num_workers: int = Field(0, ge=0)

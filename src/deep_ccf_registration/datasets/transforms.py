@@ -1,13 +1,22 @@
+from enum import Enum
 from typing import Any
 
 import albumentations
 import numpy as np
-from aind_smartspim_transform_utils.utils.utils import AcquisitionDirection
+import torch
 from skimage.exposure import rescale_intensity
 
 from deep_ccf_registration.configs.train_config import TrainConfig
 from deep_ccf_registration.metadata import SliceOrientation, AcquisitionAxis
 
+
+class AcquisitionDirection(Enum):
+    LEFT_TO_RIGHT = 'Left_to_right'
+    RIGHT_TO_LEFT = 'Right_to_left'
+    POSTERIOR_TO_ANTERIOR = 'Posterior_to_anterior'
+    ANTERIOR_TO_POSTERIOR = 'Anterior_to_posterior'
+    SUPERIOR_TO_INFERIOR = 'Superior_to_inferior'
+    INFERIOR_TO_SUPERIOR = 'Inferior_to_superior'
 
 class ImageNormalization(albumentations.ImageOnlyTransform):
     def __init__(self):
@@ -119,6 +128,53 @@ def _get_orientation_transform(
 
     return original, swapped, transform_matrix
 
+class TemplatePointsNormalization:
+    """
+    Normalizes template points to [-1,1] (background points will be outside this range)
+    """
+    def __init__(self, origin: tuple[float, ...], scale: tuple[float, ...], direction: tuple[float, ...], shape: tuple[int, ...]):
+        self._physical_extent = get_physical_extent(
+            origin=origin,
+            scale=scale,
+            direction=direction,
+            shape=shape
+        )
+
+    def apply(self, x: np.ndarray) -> np.ndarray:
+        extent_min, extent_max = self._physical_extent
+        return 2 * (x - extent_min) / (extent_max - extent_min) - 1
+
+    def inverse(self, x):
+        """
+        Inverse transform: converts normalized coordinates [-1,1] back to physical coordinates.
+
+        Works with both numpy arrays and torch tensors.
+        """
+        extent_min, extent_max = self._physical_extent
+
+        # Convert to same type as input
+        if isinstance(x, torch.Tensor):
+            extent_min = torch.tensor(extent_min, dtype=x.dtype, device=x.device)
+            extent_max = torch.tensor(extent_max, dtype=x.dtype, device=x.device)
+            # Reshape for broadcasting with (B, C, H, W) tensors
+            if x.dim() == 4:
+                extent_min = extent_min.view(1, 3, 1, 1)
+                extent_max = extent_max.view(1, 3, 1, 1)
+
+        return ((x + 1.0) / 2.0) * (extent_max - extent_min) + extent_min
+
+def get_physical_extent(origin, scale, direction, shape):
+    origin = np.array(origin)
+    scale = np.array(scale)
+    direction = np.array(direction)
+    shape = np.array(shape)
+
+    extent = shape * scale
+    extent_min = np.where(direction > 0, origin, origin + direction * extent)
+    extent_max = np.where(direction > 0, origin + extent, origin)
+
+    return extent_min, extent_max
+
 def build_transform(config: TrainConfig):
     transforms = []
     if config.patch_size[0] > 512:
@@ -128,7 +184,6 @@ def build_transform(config: TrainConfig):
         transforms.append(ImageNormalization())
     if config.normalize_orientation:
         transforms.append(OrientationNormalization())
-
     if len(transforms) > 0:
         transforms = albumentations.Compose(transforms, seed=config.seed)
     else:

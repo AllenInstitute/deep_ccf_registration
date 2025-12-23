@@ -30,7 +30,7 @@ from deep_ccf_registration.datasets.slice_dataset_cache import (
     ShuffledBatchIterator,
     collate_patch_samples, )
 from deep_ccf_registration.datasets.transforms import ImageNormalization, OrientationNormalization, \
-    build_transform
+    build_transform, TemplatePointsNormalization
 from deep_ccf_registration.metadata import SubjectMetadata
 from deep_ccf_registration.train import train
 
@@ -98,6 +98,7 @@ def create_dataloader(
     config: TrainConfig,
     batch_size: int,
     num_workers: int,
+    template_points_normalizer: Optional[TemplatePointsNormalization],
     buffer_batches: int = 8,
 ):
     """
@@ -107,7 +108,9 @@ def create_dataloader(
     """
     datasets = []
     for meta in metadata:
-        transform = build_transform(config=config)
+        transform = build_transform(
+            config=config,
+        )
         datasets.append(
             SliceDatasetCache(
                 dataset_meta=meta,
@@ -119,6 +122,7 @@ def create_dataloader(
                 patch_size=config.patch_size[0],
                 max_chunks_per_dataset=1,
                 transform=transform,
+                template_points_normalizer=template_points_normalizer,
             )
         )
 
@@ -210,7 +214,7 @@ def main(config_path: Path):
     logger.info(f"Loading light sheet template from: {config.ls_template_path}")
     ls_template = ants.image_read(filename=str(config.ls_template_path))
     ls_template_parameters = AntsImageParameters.from_ants_image(image=ls_template)
-    ls_template_ml_dim = ls_template.shape[0]
+    ls_template_shape = ls_template.shape
     del ls_template
 
     # Load dataset metadata
@@ -245,6 +249,17 @@ def main(config_path: Path):
         tissue_bboxes = json.load(f)
     tissue_bboxes = TissueBoundingBoxes(bounding_boxes=tissue_bboxes)
 
+    # Create template points normalizer
+    template_points_normalizer = None
+    if config.normalize_template_points:
+        template_points_normalizer = TemplatePointsNormalization(
+            origin=ls_template_parameters.origin,
+            scale=ls_template_parameters.scale,
+            direction=ls_template_parameters.direction,
+            shape=ls_template_shape,
+        )
+        logger.info(f"Template points normalizer created with extent: {template_points_normalizer._physical_extent}")
+
     logger.info("Creating train dataloader")
     train_dataloader = create_dataloader(
         metadata=train_metadata,
@@ -253,6 +268,7 @@ def main(config_path: Path):
         batch_size=config.batch_size,
         num_workers=config.num_workers,
         buffer_batches=8,
+        template_points_normalizer=template_points_normalizer,
     )
 
     logger.info("Creating validation dataloader")
@@ -263,6 +279,7 @@ def main(config_path: Path):
         batch_size=config.batch_size,
         num_workers=min(2, config.num_workers),
         buffer_batches=4,
+        template_points_normalizer=template_points_normalizer,
     )
 
     logger.info(f"Train subjects: {len(train_metadata)}")
@@ -342,6 +359,7 @@ def main(config_path: Path):
             device=device,
             eval_iters=config.eval_iters,
             is_debug=config.debug,
+            template_points_normalizer=template_points_normalizer,
         )
 
     logger.info("=" * 60)
