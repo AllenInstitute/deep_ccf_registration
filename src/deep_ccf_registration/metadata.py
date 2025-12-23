@@ -78,3 +78,18 @@ class SubjectMetadata(BaseModel):
         else:
             raise NotImplementedError(f'{orientation} not supported')
         return slice_axis
+
+
+class TissueBoundingBox(BaseModel):
+    """
+    start y, x and width, height of tissue bounding boxes, obtained via
+    `get_tissue_bounding_box.py`
+    """
+    y: int
+    x: int
+    width: int
+    height: int
+
+
+class TissueBoundingBoxes(BaseModel):
+    bounding_boxes: dict[str, list[Optional[TissueBoundingBox]]]

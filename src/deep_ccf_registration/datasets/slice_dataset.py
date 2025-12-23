@@ -14,11 +14,11 @@ from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from aind_smartspim_transform_utils.utils.utils import AcquisitionDirection, \
     convert_from_ants_space
 from loguru import logger
-from pydantic import BaseModel
 from skimage.exposure import rescale_intensity
 from torch.utils.data import Dataset
 
-from deep_ccf_registration.metadata import AcquisitionAxis, SubjectMetadata, SliceOrientation
+from deep_ccf_registration.metadata import AcquisitionAxis, SubjectMetadata, SliceOrientation, \
+    TissueBoundingBox, TissueBoundingBoxes
 from deep_ccf_registration.utils.logging_utils import timed_func, timed
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 from deep_ccf_registration.utils.transforms import transform_points_to_template_ants_space, \
@@ -108,19 +108,6 @@ class TrainMode(Enum):
     TRAIN = 0
     TEST = 1
 
-
-class TissueBoundingBox(BaseModel):
-    """
-    start y, x and width, height of tissue bounding boxes, obtained via
-    `get_tissue_bounding_box.py`
-    """
-    y: int
-    x: int
-    width: int
-    height: int
-
-class TissueBoundingBoxes(BaseModel):
-    bounding_boxes: dict[str, list[Optional[TissueBoundingBox]]]
 
 class SliceDataset(Dataset):
     """

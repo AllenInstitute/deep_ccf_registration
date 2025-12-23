@@ -10,12 +10,11 @@ import torch
 from loguru import logger
 from torch.utils.data import IterableDataset, get_worker_info
 
-from deep_ccf_registration.datasets.slice_dataset import (
-    TissueBoundingBox,
-)
-from deep_ccf_registration.datasets.transforms import TemplatePointsNormalization
-from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation
+from deep_ccf_registration.datasets.transforms import TemplatePointsNormalization, \
+    TemplateParameters, map_points_to_right_hemisphere
+from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, TissueBoundingBox
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
+
 
 @dataclass(frozen=True)
 class PatchSample:
@@ -61,6 +60,7 @@ class SliceDatasetCache(IterableDataset):
         self,
         dataset_meta: SubjectMetadata,
         tissue_bboxes: Sequence[Optional[TissueBoundingBox]],
+        template_parameters: TemplateParameters,
         sample_fraction: float = 0.25,
         orientation: Optional[SliceOrientation] = None,
         tensorstore_aws_credentials_method: str = "anonymous",
@@ -112,6 +112,7 @@ class SliceDatasetCache(IterableDataset):
             raise ValueError("max_chunks_per_dataset must be >= 1 or None")
         self._max_chunks_per_dataset = max_chunks_per_dataset
         self._template_points_normalizer = template_points_normalizer
+        self._template_parameters = template_parameters
 
     def _get_volume(self) -> tensorstore.TensorStore:
         if self._volume is None:
@@ -323,6 +324,11 @@ class SliceDatasetCache(IterableDataset):
                 array=self._cached_template_points,
                 local_idx=local_idx,
                 slice_axis=slice_axis.dimension,
+            )
+
+            template_patch = map_points_to_right_hemisphere(
+                template_points=template_patch,
+                template_parameters=self._template_parameters
             )
 
             if self._transform is not None:

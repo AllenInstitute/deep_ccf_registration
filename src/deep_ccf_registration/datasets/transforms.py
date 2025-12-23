@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from enum import Enum
 from typing import Any
 
@@ -189,3 +190,59 @@ def build_transform(config: TrainConfig):
     else:
         transforms = None
     return transforms
+
+
+@dataclass
+class TemplateParameters:
+    origin: tuple
+    scale: tuple
+    direction: tuple
+    shape: tuple
+    dims: int = 3
+
+def map_points_to_right_hemisphere(
+        template_points: np.ndarray,
+        template_parameters: TemplateParameters,
+):
+    """
+    Because which hemisphere a slice is in is ambiguous, this maps the ground truth template points
+    to the right hemisphere.
+
+    :param template_points:
+    :param template_parameters:
+    :return:
+    """
+    points_index_space = template_points.copy()
+    for dim in range(template_parameters.dims):
+        points_index_space[:, :, dim] -= template_parameters.origin[dim]
+        points_index_space[:, :, dim] *= template_parameters.direction[dim]
+        points_index_space[:, :, dim] /= template_parameters.scale[dim]
+
+    # checks whether the ML points are > halfway in index space. the LS template iS RAS.
+    # therefore this checks whether points are in left hemisphere
+    need_mirror = (points_index_space[:, :, 0] > template_parameters.shape[0] / 2).all()
+    if need_mirror:
+        # map to right hemisphere
+        template_points = mirror_points(points=template_points, template_parameters=template_parameters)
+    return template_points
+
+
+def mirror_points(points: torch.Tensor | np.ndarray, template_parameters: TemplateParameters):
+    flipped = points.clone() if isinstance(points, torch.Tensor) else points.copy()
+
+    # 1. Convert to index space
+    for dim in range(template_parameters.dims):
+        flipped[:, :, dim] -= template_parameters.origin[dim]
+        flipped[:, :, dim] *= template_parameters.direction[dim]
+        flipped[:, :, dim] /= template_parameters.scale[dim]
+
+    # 2. Flip ML in index space
+    flipped[:, :, 0] = template_parameters.shape[0]-1 - flipped[:, 0]
+
+    # 3. Convert back to physical
+    for dim in range(template_parameters.dims):
+        flipped[:, :, dim] *= template_parameters.scale[dim]
+        flipped[:, :, dim] *= template_parameters.direction[dim]
+        flipped[:, :, dim] += template_parameters.origin[dim]
+
+    return flipped
