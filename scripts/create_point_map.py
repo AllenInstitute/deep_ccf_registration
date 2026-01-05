@@ -1,7 +1,8 @@
 import json
+import math
 import os
+import shutil
 import sys
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import numpy as np
@@ -13,29 +14,38 @@ from loguru import logger
 from tqdm import tqdm
 
 
-from deep_ccf_registration.metadata import SubjectMetadata, AcquisitionAxis
+from deep_ccf_registration.metadata import AcquisitionAxis
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 
 logger.remove()
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logger.add(sys.stderr, level=log_level)
 
-def get_points(shape: tuple[int, ...], axes: list[AcquisitionAxis]) -> pd.DataFrame:
+def iter_point_batches(
+    shape: tuple[int, ...],
+    axes: list[AcquisitionAxis],
+    batch_size: int,
+    scale: int,
+):
     axes = sorted(axes, key=lambda x: x.dimension)
-    indices = np.indices(shape).reshape(len(shape), -1).T
     columns = [x.name.value.lower() for x in axes]
-    return pd.DataFrame(indices, columns=columns)
+    total_points = int(np.prod(shape))
+    for start_idx in range(0, total_points, batch_size):
+        end_idx = min(start_idx + batch_size, total_points)
+        flat_indices = np.arange(start_idx, end_idx, dtype=np.int64)
+        coords = np.column_stack(np.unravel_index(flat_indices, shape))
+        if scale != 1:
+            coords = coords * scale
+        yield start_idx, pd.DataFrame(coords, columns=columns)
 
 def create_point_map(
     full_res_path: str,
     registered_volume_path: str,
-    dataset_meta_path: Path,
-    subject_id: str,
     warp_path: Path,
     affine_path: Path,
     acquisition_path: Path,
     ls_template_path: Path,
-    output_zarr_path: Path,
+    output_zarr_path: str,
     batch_size: int,
 ) -> None:
     full_res = tensorstore.open(
@@ -60,53 +70,76 @@ def create_point_map(
         read=True
     ).result()
 
-    with open(dataset_meta_path) as f:
-        meta = json.load(f)
+    spec = registered_volume.spec().to_json()
+    spec['dtype'] = 'float32'
 
-    meta = [SubjectMetadata.model_validate(x) for x in meta]
-    meta = [x for x in meta if x.subject_id == subject_id][0]
-    points = get_points(shape=registered_volume.shape[2:], axes=meta.axes)
-    points = points * 2**3  # scale to full resolution indices
+    spec['kvstore'] = create_kvstore(path=str(output_zarr_path))
+    spec['metadata']['dtype'] = '<f4'
+    spec['metadata']['chunks'] = [*spec['metadata']['chunks'], 3]
+    spec['metadata']['shape'] = [*spec['metadata']['shape'], 3]
+    spec['transform']['input_exclusive_max'] = [*spec['transform']['input_exclusive_max'], [3]]
+    spec['transform']['input_inclusive_min'] = [*spec['transform']['input_inclusive_min'], 0]
+    ls_template_points_ts = tensorstore.open(spec, create=True, open=True).result()
+
+    tmp_warp_path = f'/results/{Path(warp_path).name}'
+    logger.info(f'copying warp path from {warp_path} to {tmp_warp_path}')
+    shutil.copy(warp_path, tmp_warp_path)
 
     with open(acquisition_path) as f:
         acquisition = json.load(f)
 
+    resolution = acquisition["tiles"][0]["coordinate_transformations"][1]["scale"]
+    resolution_ordering = {'X': 0, 'Y': 1, 'Z': 2}
+
+    axes = [
+        AcquisitionAxis(
+            **x,
+            resolution=resolution[resolution_ordering[x["name"]]]
+        ) for x in acquisition['axes']]
+    spatial_shape = registered_volume.shape[2:]
+    if not spatial_shape:
+        raise ValueError('registered volume must have spatial dimensions beyond the first two axes')
+    total_points = int(np.prod(spatial_shape))
+    point_batches = iter_point_batches(
+        shape=spatial_shape,
+        axes=axes,
+        batch_size=batch_size,
+        scale=2**3,
+    )
     coord_transform = CoordinateTransform(
         name='smartspim_lca',
         dataset_transforms={
             'points_to_ccf': [
                 str(affine_path),
-                str(warp_path),
+                str(tmp_warp_path),
             ]
         },
         acquisition=acquisition,
         image_metadata={'shape': full_res.shape[2:]},
         ls_template_path=str(ls_template_path)
     )
-    batches = [points.iloc[i:i + batch_size] for i in range(0, len(points), batch_size)]
-    with ThreadPoolExecutor(max_workers=1) as executor:
-        ls_template_points = list(tqdm(
-            executor.map(lambda b: coord_transform.forward_transform(b, to_ccf=False, to_index_space=False), batches),
-            total=len(batches), desc='forward_transform'
-        ))
-    ls_template_points = pd.concat(ls_template_points, ignore_index=True)
-    ls_template_points = ls_template_points.values
+    tmp_points_path = '/results/template_points.dat'
+    total_batches = math.ceil(total_points / batch_size) if total_points else 0
+    try:
+        ls_template_points = np.memmap(
+            tmp_points_path,
+            dtype=np.float32,
+            mode='w+',
+            shape=(total_points, 3)
+        )
 
-    ls_template_points = ls_template_points.reshape((*registered_volume.shape, 3))
+        for start_idx, batch in tqdm(point_batches, total=total_batches, desc='forward_transform'):
+            end_idx = start_idx + len(batch)
+            transformed = coord_transform.forward_transform(batch, to_ccf=False, to_index_space=False)
+            ls_template_points[start_idx:end_idx] = transformed.to_numpy(dtype=np.float32, copy=False)
 
-    spec = registered_volume.spec().to_json()
-    spec['dtype'] = 'float32'
-
-    output_zarr_path_str = str(output_zarr_path)
-    spec['kvstore'] = create_kvstore(path=output_zarr_path_str)
-    spec['metadata']['dtype'] = '<f4'
-    spec['metadata']['chunks'] = [*spec['metadata']['chunks'], 3]
-    spec['metadata']['shape'] = [*spec['metadata']['shape'], 3]
-    spec['transform']['input_exclusive_max'] = [*spec['transform']['input_exclusive_max'], [3]]
-    spec['transform']['input_inclusive_min'] = [*spec['transform']['input_inclusive_min'], 0]
-    ls_template_points_ts = tensorstore.open(spec, create=True).result()
-    ls_template_points_ts[:] = ls_template_points
-
+        ls_template_points.flush()
+        reshaped_points = ls_template_points.reshape((*registered_volume.shape, 3))
+        ls_template_points_ts[:] = reshaped_points
+    finally:
+        if os.path.exists(tmp_points_path):
+            os.remove(tmp_points_path)
+        os.remove(tmp_warp_path)
 
 @click.command()
 @click.option(
@@ -114,19 +147,6 @@ def create_point_map(
     default='s3://aind-open-data/SmartSPIM_806624_2025-08-27_15-42-18_stitched_2025-08-29_22-47-08/image_tile_fusing/OMEZarr/Ex_639_Em_680.zarr',
     show_default=True,
     help='Base OME-Zarr path shared by the full-resolution (/0) and registered (/3) volumes.'
-)
-@click.option(
-    '--dataset-meta-path',
-    type=click.Path(path_type=Path),
-    default=Path('/Users/adam.amster/smartspim-registration/dataset_meta-test.json'),
-    show_default=True,
-    help='Path to the dataset metadata JSON file.'
-)
-@click.option(
-    '--subject-id',
-    default='806624',
-    show_default=True,
-    help='Subject identifier to select from the metadata file.'
 )
 @click.option(
     '--warp-path',
@@ -158,8 +178,7 @@ def create_point_map(
 )
 @click.option(
     '--output-zarr-path',
-    type=click.Path(path_type=Path),
-    default=Path('/tmp/806624_template_points.zarr'),
+    default='/tmp/806624_template_points.zarr',
     show_default=True,
     help='Destination path for the generated template point tensorstore.'
 )
@@ -171,13 +190,11 @@ def create_point_map(
 )
 def main(
     zarr_base_path: str,
-    dataset_meta_path: Path,
-    subject_id: str,
     warp_path: Path,
     affine_path: Path,
     acquisition_path: Path,
     ls_template_path: Path,
-    output_zarr_path: Path,
+    output_zarr_path: str,
     batch_size: int,
 ) -> None:
     """Generate a template point map aligned to CCF space."""
@@ -187,8 +204,6 @@ def main(
     create_point_map(
         full_res_path=full_res_path,
         registered_volume_path=registered_volume_path,
-        dataset_meta_path=dataset_meta_path,
-        subject_id=subject_id,
         warp_path=warp_path,
         affine_path=affine_path,
         acquisition_path=acquisition_path,

@@ -19,6 +19,16 @@ class AcquisitionDirection(Enum):
     SUPERIOR_TO_INFERIOR = 'Superior_to_inferior'
     INFERIOR_TO_SUPERIOR = 'Inferior_to_superior'
 
+
+@dataclass
+class TemplateParameters:
+    origin: tuple
+    scale: tuple
+    direction: tuple
+    shape: tuple
+    dims: int = 3
+
+
 class ImageNormalization(albumentations.ImageOnlyTransform):
     def __init__(self):
         super().__init__(p=1.0)
@@ -129,11 +139,12 @@ def _get_orientation_transform(
 
     return original, swapped, transform_matrix
 
-class TemplatePointsNormalization:
+class TemplatePointsNormalization(albumentations.DualTransform):
     """
     Normalizes template points to [-1,1] (background points will be outside this range)
     """
     def __init__(self, origin: tuple[float, ...], scale: tuple[float, ...], direction: tuple[float, ...], shape: tuple[int, ...]):
+        super().__init__(p=1.0)
         self._physical_extent = get_physical_extent(
             origin=origin,
             scale=scale,
@@ -141,28 +152,40 @@ class TemplatePointsNormalization:
             shape=shape
         )
 
-    def apply(self, x: np.ndarray) -> np.ndarray:
+    def apply(self, img: np.ndarray, *args: Any, **params: Any) -> np.ndarray:
+        # just a passthrough
+        return img
+
+    def apply_to_keypoints(self, keypoints: np.ndarray, *args: Any, **params: Any) -> np.ndarray:
+        # repurposing "keypoints" transform for the slice template points
         extent_min, extent_max = self._physical_extent
-        return 2 * (x - extent_min) / (extent_max - extent_min) - 1
+        return 2 * (keypoints - extent_min) / (extent_max - extent_min) - 1
 
-    def inverse(self, x):
-        """
-        Inverse transform: converts normalized coordinates [-1,1] back to physical coordinates.
+    @property
+    def physical_extent(self) -> tuple[np.ndarray, np.ndarray]:
+        return self._physical_extent
 
-        Works with both numpy arrays and torch tensors.
-        """
-        extent_min, extent_max = self._physical_extent
+def get_template_point_normalization_inverse(x: np.ndarray | torch.Tensor, template_parameters: TemplateParameters):
+    """
+    Inverse transform: converts normalized coordinates [-1,1] back to physical coordinates.
+    """
+    extent_min, extent_max = get_physical_extent(
+        origin=template_parameters.origin,
+        scale=template_parameters.scale,
+        direction=template_parameters.direction,
+        shape=template_parameters.shape
+    )
 
-        # Convert to same type as input
-        if isinstance(x, torch.Tensor):
-            extent_min = torch.tensor(extent_min, dtype=x.dtype, device=x.device)
-            extent_max = torch.tensor(extent_max, dtype=x.dtype, device=x.device)
-            # Reshape for broadcasting with (B, C, H, W) tensors
-            if x.dim() == 4:
-                extent_min = extent_min.view(1, 3, 1, 1)
-                extent_max = extent_max.view(1, 3, 1, 1)
+    # Convert to same type as input
+    if isinstance(x, torch.Tensor):
+        extent_min = torch.tensor(extent_min, dtype=x.dtype, device=x.device)
+        extent_max = torch.tensor(extent_max, dtype=x.dtype, device=x.device)
+        # Reshape for broadcasting with (B, C, H, W) tensors
+        if x.dim() == 4:
+            extent_min = extent_min.view(1, 3, 1, 1)
+            extent_max = extent_max.view(1, 3, 1, 1)
 
-        return ((x + 1.0) / 2.0) * (extent_max - extent_min) + extent_min
+    return ((x + 1.0) / 2.0) * (extent_max - extent_min) + extent_min
 
 def get_physical_extent(origin, scale, direction, shape):
     origin = np.array(origin)
@@ -176,7 +199,7 @@ def get_physical_extent(origin, scale, direction, shape):
 
     return extent_min, extent_max
 
-def build_transform(config: TrainConfig):
+def build_transform(config: TrainConfig, is_train: bool, template_parameters: TemplateParameters):
     transforms = []
     if config.patch_size[0] > 512:
         transforms.append(albumentations.LongestMaxSize(max_size=512))
@@ -185,20 +208,18 @@ def build_transform(config: TrainConfig):
         transforms.append(ImageNormalization())
     if config.normalize_orientation:
         transforms.append(OrientationNormalization())
+    if is_train:
+        transforms.append(TemplatePointsNormalization(
+            origin=template_parameters.origin,
+            scale=template_parameters.scale,
+            direction=template_parameters.direction,
+            shape=template_parameters.shape
+        ))
     if len(transforms) > 0:
         transforms = albumentations.Compose(transforms, seed=config.seed)
     else:
         transforms = None
     return transforms
-
-
-@dataclass
-class TemplateParameters:
-    origin: tuple
-    scale: tuple
-    direction: tuple
-    shape: tuple
-    dims: int = 3
 
 def map_points_to_right_hemisphere(
         template_points: np.ndarray,
@@ -228,21 +249,21 @@ def map_points_to_right_hemisphere(
 
 
 def mirror_points(points: torch.Tensor | np.ndarray, template_parameters: TemplateParameters):
-    flipped = points.clone() if isinstance(points, torch.Tensor) else points.copy()
+    points = points.clone() if isinstance(points, torch.Tensor) else points.copy()
 
     # 1. Convert to index space
     for dim in range(template_parameters.dims):
-        flipped[:, :, dim] -= template_parameters.origin[dim]
-        flipped[:, :, dim] *= template_parameters.direction[dim]
-        flipped[:, :, dim] /= template_parameters.scale[dim]
+        points[:, :, dim] -= template_parameters.origin[dim]
+        points[:, :, dim] *= template_parameters.direction[dim]
+        points[:, :, dim] /= template_parameters.scale[dim]
 
     # 2. Flip ML in index space
-    flipped[:, :, 0] = template_parameters.shape[0]-1 - flipped[:, 0]
+    points[:, :, 0] = template_parameters.shape[0]-1 - points[:, :, 0]
 
     # 3. Convert back to physical
     for dim in range(template_parameters.dims):
-        flipped[:, :, dim] *= template_parameters.scale[dim]
-        flipped[:, :, dim] *= template_parameters.direction[dim]
-        flipped[:, :, dim] += template_parameters.origin[dim]
+        points[:, :, dim] *= template_parameters.scale[dim]
+        points[:, :, dim] *= template_parameters.direction[dim]
+        points[:, :, dim] += template_parameters.origin[dim]
 
-    return flipped
+    return points

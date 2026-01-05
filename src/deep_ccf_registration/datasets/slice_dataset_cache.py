@@ -69,7 +69,6 @@ class SliceDatasetCache(IterableDataset):
         chunk_size: int = 128,
         transform: Optional[Callable] = None,
         max_chunks_per_dataset: Optional[int] = 1,
-        template_points_normalizer: Optional[TemplatePointsNormalization] = None
     ):
         super().__init__()
 
@@ -111,7 +110,6 @@ class SliceDatasetCache(IterableDataset):
         if max_chunks_per_dataset is not None and max_chunks_per_dataset < 1:
             raise ValueError("max_chunks_per_dataset must be >= 1 or None")
         self._max_chunks_per_dataset = max_chunks_per_dataset
-        self._template_points_normalizer = template_points_normalizer
         self._template_parameters = template_parameters
 
     def _get_volume(self) -> tensorstore.TensorStore:
@@ -336,9 +334,6 @@ class SliceDatasetCache(IterableDataset):
                 patch = transforms['image']
                 template_patch = transforms['keypoints']
 
-            if self._template_points_normalizer is not None:
-                template_patch = self._template_points_normalizer.apply(x=template_patch)
-
             global_slice_idx = slice_start + local_idx
             patches.append(
                 PatchSample(
@@ -370,13 +365,7 @@ class SliceDatasetCache(IterableDataset):
             return False
 
         start_time = time.perf_counter()
-        try:
-            self.load_chunk_region()
-        except ValueError:
-            logger.warning(
-                f"Worker {self._worker_id} found no patches for dataset {self._dataset_idx}; skipping."
-            )
-            return False
+        self.load_chunk_region()
 
         self._chunk_counter += 1
         if self._cached_region is not None:
@@ -531,8 +520,8 @@ def collate_patch_samples(samples: list[PatchSample], patch_size: int) -> dict:
 
         if sample.template_points is None:
             raise ValueError("PatchSample missing template_points; cannot collate")
-        template = np.transpose(sample.template_points, (2, 0, 1))
-        template_points[idx, :, :h, :w] = template
+        sample_template_points = np.transpose(sample.template_points, (2, 0, 1))
+        template_points[idx, :, :h, :w] = sample_template_points
 
         pad_masks[idx, :h, :w] = 1
 

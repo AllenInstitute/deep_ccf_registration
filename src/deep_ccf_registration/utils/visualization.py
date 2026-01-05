@@ -2,10 +2,13 @@ from typing import Optional
 
 import numpy as np
 import torch
+from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from matplotlib import pyplot as plt
 
 from deep_ccf_registration.metrics.point_wise_rmse import PointwiseRMSE, PointwiseMAE
-from deep_ccf_registration.utils.utils import fetch_complete_colormap, visualize_ccf_annotations
+from deep_ccf_registration.utils.transforms import convert_from_ants_space_tensor
+from deep_ccf_registration.utils.utils import fetch_complete_colormap, visualize_ccf_annotations, \
+    get_ccf_annotations
 
 
 def create_diagnostic_image(
@@ -157,4 +160,58 @@ def create_diagnostic_image(
     title = f'{iteration_title}slice: {slice_idx} MAE {mae:.3f} RMSE {rmse:.3f} microns'
     fig.suptitle(title, fontsize=16, fontweight='bold')
 
+    return fig
+
+
+def viz_sample(
+    ls_template_parameters: AntsImageParameters,
+    pred_coords: torch.Tensor,
+    gt_coords: torch.Tensor,
+    ccf_annotations: np.ndarray,
+    iteration: int,
+    pad_mask: torch.Tensor,
+    input_image: torch.Tensor,
+    slice_idx: int,
+    errors: np.ndarray,
+    pred_tissue_mask: Optional[torch.Tensor] = None,
+    tissue_mask: Optional[torch.Tensor] = None,
+    exclude_background: bool = False
+):
+    pred_index_space = convert_from_ants_space_tensor(template_parameters=ls_template_parameters,
+                                                      physical_pts=pred_coords.permute(
+                                                          (1, 2, 0)).reshape((-1, 3)))
+    gt_index_space = convert_from_ants_space_tensor(template_parameters=ls_template_parameters,
+                                                    physical_pts=gt_coords.permute(
+                                                        (1, 2, 0)).reshape((-1, 3)))
+
+    pred_ccf_annot = get_ccf_annotations(ccf_annotations, pred_index_space,
+                                         return_np=False).reshape(
+        pred_coords.shape[1:])
+    if exclude_background:
+        pred_ccf_annot[~tissue_mask] = 0
+    else:
+        pred_ccf_annot[~pad_mask] = 0
+    gt_ccf_annot = get_ccf_annotations(ccf_annotations, gt_index_space, return_np=False).reshape(
+        gt_coords.shape[1:])
+
+    if exclude_background:
+        gt_ccf_annot[~tissue_mask] = 0
+    else:
+        gt_ccf_annot[~pad_mask] = 0
+
+
+    fig = create_diagnostic_image(
+        input_image=input_image,
+        slice_idx=slice_idx,
+        errors=errors,
+        pred_ccf_annotations=pred_ccf_annot.cpu().numpy(),
+        gt_ccf_annotations=gt_ccf_annot.cpu().numpy(),
+        iteration=iteration,
+        pred_template_points=pred_coords,
+        gt_template_points=gt_coords,
+        pad_mask=pad_mask.cpu().bool().numpy(),
+        exclude_background=exclude_background,
+        tissue_mask=tissue_mask.cpu().bool().numpy(),
+        pred_mask=pred_tissue_mask.cpu().bool().numpy() if pred_tissue_mask is not None else None,
+    )
     return fig

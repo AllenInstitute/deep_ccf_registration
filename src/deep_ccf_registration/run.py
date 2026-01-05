@@ -29,7 +29,7 @@ from deep_ccf_registration.datasets.slice_dataset_cache import (
     collate_patch_samples, )
 from deep_ccf_registration.datasets.transforms import build_transform, TemplatePointsNormalization, TemplateParameters
 from deep_ccf_registration.metadata import SubjectMetadata, TissueBoundingBoxes
-from deep_ccf_registration.train import train
+from deep_ccf_registration.train import train, LRScheduler
 
 
 def _identity_collate(batch):
@@ -93,10 +93,10 @@ def create_dataloader(
     metadata: list[SubjectMetadata],
     tissue_bboxes: TissueBoundingBoxes,
     config: TrainConfig,
+    is_train: bool,
     batch_size: int,
     num_workers: int,
     ls_template_parameters: TemplateParameters,
-    template_points_normalizer: Optional[TemplatePointsNormalization],
     buffer_batches: int = 8,
 ):
     """
@@ -105,9 +105,18 @@ def create_dataloader(
     Returns a ShuffledBatchIterator that yields collated batch dicts.
     """
     datasets = []
+    template_parameters = TemplateParameters(
+        origin=ls_template_parameters.origin,
+        scale=ls_template_parameters.scale,
+        direction=ls_template_parameters.direction,
+        shape=ls_template_parameters.shape
+    )
+
     for meta in metadata:
         transform = build_transform(
             config=config,
+            template_parameters=template_parameters,
+            is_train=is_train,
         )
         datasets.append(
             SliceDatasetCache(
@@ -120,13 +129,7 @@ def create_dataloader(
                 patch_size=config.patch_size[0],
                 max_chunks_per_dataset=1,
                 transform=transform,
-                template_points_normalizer=template_points_normalizer,
-                template_parameters=TemplateParameters(
-                    origin=ls_template_parameters.origin,
-                    scale=ls_template_parameters.scale,
-                    direction=ls_template_parameters.direction,
-                    shape=ls_template_parameters.shape
-                )
+                template_parameters=template_parameters,
             )
         )
 
@@ -258,18 +261,7 @@ def main(config_path: Path):
         tissue_bboxes = json.load(f)
     tissue_bboxes = TissueBoundingBoxes(bounding_boxes=tissue_bboxes)
 
-    # Create template points normalizer
-    template_points_normalizer = None
-    if config.normalize_template_points:
-        template_points_normalizer = TemplatePointsNormalization(
-            origin=ls_template_parameters.origin,
-            scale=ls_template_parameters.scale,
-            direction=ls_template_parameters.direction,
-            shape=ls_template_parameters.shape
-        )
-        logger.info(f"Template points normalizer created with extent: {template_points_normalizer._physical_extent}")
 
-    logger.info("Creating train dataloader")
     train_dataloader = create_dataloader(
         metadata=train_metadata,
         tissue_bboxes=tissue_bboxes,
@@ -277,11 +269,9 @@ def main(config_path: Path):
         batch_size=config.batch_size,
         num_workers=config.num_workers,
         buffer_batches=8,
-        template_points_normalizer=template_points_normalizer,
-        ls_template_parameters=ls_template_parameters
+        ls_template_parameters=ls_template_parameters,
+        is_train=True,
     )
-
-    logger.info("Creating validation dataloader")
     val_dataloader = create_dataloader(
         metadata=val_metadata,
         tissue_bboxes=tissue_bboxes,
@@ -289,8 +279,8 @@ def main(config_path: Path):
         batch_size=config.batch_size,
         num_workers=min(2, config.num_workers),
         buffer_batches=4,
-        template_points_normalizer=template_points_normalizer,
-        ls_template_parameters=ls_template_parameters
+        ls_template_parameters=ls_template_parameters,
+        is_train=False,
     )
 
     logger.info(f"Train subjects: {len(train_metadata)}")
@@ -362,7 +352,6 @@ def main(config_path: Path):
             max_iters=config.max_iters,
             model_weights_out_dir=config.model_weights_out_dir,
             learning_rate=config.learning_rate,
-            decay_learning_rate=config.decay_learning_rate,
             eval_interval=config.eval_interval,
             patience=config.patience,
             min_delta=config.min_delta,
@@ -370,11 +359,12 @@ def main(config_path: Path):
             device=device,
             eval_iters=config.eval_iters,
             is_debug=config.debug,
-            template_points_normalizer=template_points_normalizer,
             ls_template_parameters=ls_template_parameters,
             ccf_annotations=ccf_annotations,
             val_viz_samples=config.val_viz_samples,
             exclude_background_pixels=config.exclude_background_pixels,
+            lr_scheduler=LRScheduler.ReduceLROnPlateau,
+            normalize_target_points=config.normalize_template_points,
         )
 
     logger.info("=" * 60)

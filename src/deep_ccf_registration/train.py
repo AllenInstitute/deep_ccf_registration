@@ -1,4 +1,5 @@
 import os
+from enum import Enum
 from pathlib import Path
 from typing import ContextManager, Iterator, Optional
 from contextlib import nullcontext
@@ -8,24 +9,83 @@ import numpy as np
 import torch
 from matplotlib import pyplot as plt
 from monai.networks.nets import UNet
-from deep_ccf_registration.losses import PointMSELoss
+from torch import nn
+import torch.nn.functional as F
+
 from loguru import logger
 
 from deep_ccf_registration.datasets.slice_dataset_cache import ShuffledBatchIterator
 from deep_ccf_registration.datasets.transforms import TemplatePointsNormalization, \
-    TemplateParameters
+    TemplateParameters, get_template_point_normalization_inverse
 from deep_ccf_registration.utils.logging_utils import timed, ProgressLogger
-from deep_ccf_registration.inference import viz_sample
+from deep_ccf_registration.utils.visualization import viz_sample
+
+
+class MaskedCoordLoss(nn.Module):
+    def forward(self, pred: torch.Tensor, target: torch.Tensor,
+                mask: torch.Tensor) -> torch.Tensor:
+
+        mask = mask.expand_as(pred).bool()
+        return F.smooth_l1_loss(pred[mask], target[mask])
+
+class RMSE(nn.Module):
+    """
+    Computes root mean squared Euclidean distance between predicted and target points.
+    """
+
+    def __init__(self, coordinate_dim: int = 1):
+        """
+        Parameters
+        ----------
+        coordinate_dim : int
+            The dimension containing coordinates (default=1 for shape B, C, H, W)
+        """
+        super().__init__()
+        self.coordinate_dim = coordinate_dim
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """
+        Compute mean squared point distance loss.
+
+        Parameters
+        ----------
+        pred : torch.Tensor
+            Predicted coordinates, shape (B, C, H, W)
+        target : torch.Tensor
+            Target coordinates, shape (B, C, H, W)
+
+        Returns
+        -------
+        torch.Tensor
+            Scalar mean squared Euclidean distance
+        """
+        squared_errors = (pred - target) ** 2
+        per_point_squared_distance = squared_errors.sum(dim=self.coordinate_dim)
+
+        if mask is not None:
+            if mask.dim() == per_point_squared_distance.dim() + 1:
+                mask = mask.sum(dim=self.coordinate_dim)
+            if mask.dim() != per_point_squared_distance.dim():
+                raise ValueError("Mask must have same spatial dimensions as coordinates")
+
+            mask = mask.to(per_point_squared_distance.device, per_point_squared_distance.dtype)
+            squared_errors = per_point_squared_distance * mask
+            valid_points = mask.sum().clamp(min=1.0)
+            mse = squared_errors.sum() / valid_points
+        else:
+            mse = per_point_squared_distance.mean()
+
+        return mse.sqrt()
 
 
 def _evaluate(
     dataloader: Iterator,
     model: torch.nn.Module,
-    coord_loss: PointMSELoss,
+    coord_loss: MaskedCoordLoss,
     device: str,
     autocast_context: ContextManager,
     max_iters: int,
-    template_points_normalizer: Optional[TemplatePointsNormalization] = None,
+    denormalize_pred_template_points: bool,
     viz_sample_count: int = 10,
     ls_template_parameters: Optional[TemplateParameters] = None,
     ccf_annotations: Optional[np.ndarray] = None,
@@ -35,14 +95,13 @@ def _evaluate(
     """Evaluate model"""
     model.eval()
     losses = []
-    losses_denorm = []
+    rmses = []
     collected_samples = []
     enable_viz = (
         viz_sample_count > 0
         and ls_template_parameters is not None
         and ccf_annotations is not None
     )
-
     with torch.no_grad():
         for i, batch in enumerate(dataloader):
             if i >= max_iters:
@@ -53,19 +112,18 @@ def _evaluate(
             pad_masks = batch["pad_masks"].to(device)
 
             with autocast_context:
-                model_out = model(input_images)
-                loss = coord_loss(model_out, target_template_points, pad_masks)
+                pred = model(input_images)
+                loss = coord_loss(pred=pred, target=target_template_points, mask=pad_masks)
                 losses.append(loss.item())
 
-                # denormalize if normalizer is provided
-                if template_points_normalizer is not None:
-                    model_out_denorm = template_points_normalizer.inverse(model_out)
-                    target_template_points_denorm = template_points_normalizer.inverse(target_template_points)
-                    loss_denorm = coord_loss(model_out_denorm, target_template_points_denorm, pad_masks)
-                    losses_denorm.append(loss_denorm.item())
+            if denormalize_pred_template_points:
+                pred = get_template_point_normalization_inverse(x=pred,
+                                                                     template_parameters=ls_template_parameters)
+            rmse = RMSE()(pred=pred, target=target_template_points, mask=pad_masks)
+            rmses.append(rmse.item())
 
             if enable_viz and len(collected_samples) < viz_sample_count:
-                errors = (model_out - target_template_points) ** 2
+                errors = (pred - target_template_points) ** 2
                 slice_indices = batch["slice_indices"]
                 patch_ys = batch["patch_ys"]
                 patch_xs = batch["patch_xs"]
@@ -76,7 +134,7 @@ def _evaluate(
                 for sample_idx in range(take):
                     collected_samples.append({
                         "input_image": input_images[sample_idx].detach().cpu().squeeze(0),
-                        "pred_coords": model_out[sample_idx].detach().cpu(),
+                        "pred_coords": pred[sample_idx].detach().cpu(),
                         "gt_coords": target_template_points[sample_idx].detach().cpu(),
                         "pad_mask": pad_masks[sample_idx].detach().cpu(),
                         "errors": errors[sample_idx].detach().cpu().numpy(),
@@ -89,12 +147,8 @@ def _evaluate(
                         break
 
 
-        if losses_denorm:
-            val_loss = np.mean(losses)
-            val_rmse = np.sqrt(np.mean(losses_denorm))
-        else:
-            val_loss = np.mean(losses)
-            val_rmse = np.sqrt(np.mean(losses))
+        val_loss = np.mean(losses)
+        val_rmse = np.mean(rmses)
 
         if enable_viz and collected_samples:
             iteration = global_step or 0
@@ -110,7 +164,7 @@ def _evaluate(
                     slice_idx=sample["slice_idx"],
                     errors=sample["errors"],
                     pred_tissue_mask=None,
-                    tissue_mask=sample["pad_mask"],
+                    tissue_mask=None, # TODO
                     exclude_background=exclude_background_pixels,
                 )
                 fig_filename = (
@@ -125,6 +179,9 @@ def _evaluate(
 
         return val_loss, val_rmse
 
+class LRScheduler(Enum):
+    ReduceLROnPlateau = "ReduceLROnPlateau"
+
 def train(
         train_dataloader: ShuffledBatchIterator,
         val_dataloader: ShuffledBatchIterator,
@@ -132,9 +189,10 @@ def train(
         optimizer,
         max_iters: int,
         model_weights_out_dir: Path,
-        learning_rate: float = 0.001,
+        ls_template_parameters: TemplateParameters,
+        normalize_target_points: bool = True,
+        learning_rate: float = 0.0001,
         eval_iters: int = 200,
-        decay_learning_rate: bool = True,
         eval_interval: int = 500,
         patience: int = 10,
         min_delta: float = 1e-4,
@@ -142,11 +200,10 @@ def train(
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         is_debug: bool = False,
         log_interval: int = 20,
-        template_points_normalizer: Optional[TemplatePointsNormalization] = None,
-        ls_template_parameters: Optional[TemplateParameters] = None,
         ccf_annotations: Optional[np.ndarray] = None,
         val_viz_samples: int = 0,
         exclude_background_pixels: bool = False,
+        lr_scheduler: Optional[LRScheduler] = None
 ):
     """
     Train slice registration model
@@ -179,18 +236,20 @@ def train(
     """
     os.makedirs(model_weights_out_dir, exist_ok=True)
 
-    coord_loss = PointMSELoss()
+    coord_loss = MaskedCoordLoss()
     best_val_rmse = float("inf")
     patience_counter = 0
     global_step = 0
-    min_lr = learning_rate / 10 # should be ~= learning_rate/10 per Chinchilla
 
     model.to(device)
 
     logger.info(f"Starting training for {max_iters} iters")
     logger.info(f"Device: {device}")
 
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer=optimizer, T_max=max_iters, eta_min=min_lr)
+    if lr_scheduler == LRScheduler.ReduceLROnPlateau:
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer, patience=100)
+    else:
+        scheduler = None
 
     progress_logger = None
 
@@ -210,13 +269,16 @@ def train(
             with autocast_context:
                 with timed():
                     model_out = model(input_images)
-                loss = coord_loss(model_out, target_template_points, pad_masks)
+                loss = coord_loss(pred=model_out, target=target_template_points, mask=pad_masks)
 
             loss.backward()
             optimizer.step()
 
-            if decay_learning_rate:
-                scheduler.step()
+            if scheduler is not None:
+                if lr_scheduler == LRScheduler.ReduceLROnPlateau:
+                    scheduler.step(metrics=loss.item())
+                else:
+                    raise ValueError(f'{lr_scheduler} not supported')
 
             train_losses.append(loss.item())
 
@@ -233,16 +295,16 @@ def train(
                 val_loss, val_rmse = _evaluate(
                     dataloader=val_dataloader,
                     model=model,
-                    coord_loss=coord_loss,
                     device=device,
                     autocast_context=autocast_context,
                     max_iters=1 if is_debug else eval_iters,
-                    template_points_normalizer=template_points_normalizer,
+                    denormalize_pred_template_points=normalize_target_points,
                     viz_sample_count=val_viz_samples,
                     ls_template_parameters=ls_template_parameters,
                     ccf_annotations=ccf_annotations,
                     global_step=global_step,
                     exclude_background_pixels=exclude_background_pixels,
+                    coord_loss=coord_loss,
                 )
 
                 current_lr = optimizer.param_groups[0]['lr']
@@ -268,7 +330,7 @@ def train(
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
                         'val_rmse': val_rmse,
-                        'lr': scheduler.get_last_lr()
+                        'lr': scheduler.get_last_lr() if scheduler is not None else learning_rate
                     },
                     f=checkpoint_path,
                 )
