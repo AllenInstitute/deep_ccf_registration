@@ -211,7 +211,7 @@ def viz_sample(
         gt_template_points=gt_coords,
         pad_mask=pad_mask.cpu().bool().numpy(),
         exclude_background=exclude_background,
-        tissue_mask=tissue_mask.cpu().bool().numpy(),
+        tissue_mask=tissue_mask.cpu().bool().numpy() if tissue_mask is not None else None,
         pred_mask=pred_tissue_mask.cpu().bool().numpy() if pred_tissue_mask is not None else None,
     )
     return fig

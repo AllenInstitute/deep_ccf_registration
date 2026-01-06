@@ -484,7 +484,7 @@ class ShardedMultiDatasetCache(IterableDataset):
             yield from ds
 
 
-def collate_patch_samples(samples: list[PatchSample], patch_size: int) -> dict:
+def collate_patch_samples(samples: list[PatchSample], patch_size: int, is_train: bool) -> dict:
     """
     Collate a list of PatchSample into a batched dictionary.
 
@@ -502,16 +502,16 @@ def collate_patch_samples(samples: list[PatchSample], patch_size: int) -> dict:
     heights = [s.data.shape[0] for s in samples]
     widths = [s.data.shape[1] for s in samples]
 
-    if any(h > patch_size or w > patch_size for h, w in zip(heights, widths)):
-        raise ValueError("Sample patch exceeds configured patch_size")
-    target_h = target_w = patch_size
+    target_h, target_w = (max(max(heights, widths)), max(max(heights, widths)))
 
     image_dtype = samples[0].data.dtype
     template_dtype = samples[0].template_points.dtype if samples[0].template_points is not None else np.float32
 
     images = np.zeros((batch_size, 1, target_h, target_w), dtype=image_dtype)
-    template_points = np.zeros((batch_size, 3, target_h, target_w), dtype=template_dtype)
-    pad_masks = np.zeros((batch_size, target_h, target_w), dtype=np.uint8)
+
+    # in train mode we resize the target. For inference we don't modify this size
+    template_points = np.zeros((batch_size, 3, target_h if is_train else patch_size, target_w if is_train else patch_size), dtype=template_dtype)
+    pad_masks = np.zeros((batch_size, target_h if is_train else patch_size, target_w if is_train else patch_size), dtype=np.uint8)
 
     for idx, sample in enumerate(samples):
         img = sample.data
@@ -521,7 +521,7 @@ def collate_patch_samples(samples: list[PatchSample], patch_size: int) -> dict:
         if sample.template_points is None:
             raise ValueError("PatchSample missing template_points; cannot collate")
         sample_template_points = np.transpose(sample.template_points, (2, 0, 1))
-        template_points[idx, :, :h, :w] = sample_template_points
+        template_points[idx, :, :sample_template_points.shape[1], :sample_template_points.shape[2]] = sample_template_points
 
         pad_masks[idx, :h, :w] = 1
 

@@ -113,6 +113,8 @@ def _evaluate(
 
             with autocast_context:
                 pred = model(input_images)
+                # must resize the predictions if they were resized since we do not modify the raw size of the template points
+                pred = _resize_to_target(pred=pred, target_template_points=target_template_points)
                 loss = coord_loss(pred=pred, target=target_template_points, mask=pad_masks)
                 losses.append(loss.item())
 
@@ -178,6 +180,19 @@ def _evaluate(
                 plt.close(fig)
 
         return val_loss, val_rmse
+
+
+def _resize_to_target(
+    pred: torch.Tensor,
+    target_template_points: torch.Tensor,
+) -> torch.Tensor:
+    """Ensure predictions share spatial size with targets."""
+    target_size = target_template_points.shape[-2:]
+    if pred.shape[-2:] == target_size:
+        return pred
+
+    pred = F.interpolate(pred, size=target_size, mode="bilinear", align_corners=False)
+    return pred
 
 class LRScheduler(Enum):
     ReduceLROnPlateau = "ReduceLROnPlateau"

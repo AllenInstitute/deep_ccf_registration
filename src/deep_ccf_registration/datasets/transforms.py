@@ -3,6 +3,7 @@ from enum import Enum
 from typing import Any
 
 import albumentations
+import cv2
 import numpy as np
 import torch
 from skimage.exposure import rescale_intensity
@@ -27,6 +28,48 @@ class TemplateParameters:
     direction: tuple
     shape: tuple
     dims: int = 3
+
+
+class LongestMaxSize(albumentations.DualTransform):
+    """Resize so the longest side matches ``max_size`` while keeping aspect."""
+
+    def __init__(self, max_size: int, interpolation: int = cv2.INTER_LINEAR, is_train: bool = True):
+        super().__init__(p=1.0)
+        self.max_size = max_size
+        self.interpolation = interpolation
+        self.is_train = is_train
+
+    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+        img = data["image"]
+        height, width = img.shape[:2]
+        max_dim = max(height, width)
+        if max_dim <= self.max_size:
+            scale = 1.0
+        else:
+            scale = self.max_size / max_dim
+
+        new_height = int(round(height * scale)) or 1
+        new_width = int(round(width * scale)) or 1
+        return {"scale": scale, "height": new_height, "width": new_width}
+
+    def apply(self, img: np.ndarray, scale: float, height: int, width: int, **params: Any) -> np.ndarray:
+        if scale == 1.0:
+            return img
+        return cv2.resize(img, (width, height), interpolation=self.interpolation)
+
+    def apply_to_keypoints(self, keypoints: np.ndarray, scale: float, height: int, width: int, **params: Any) -> np.ndarray:
+        if not self.is_train or scale == 1.0:
+            return keypoints
+        return self._resize_array(keypoints, height=height, width=width)
+
+    def _resize_array(self, array: np.ndarray, height: int, width: int) -> np.ndarray:
+        if array.ndim != 3 or array.shape[2] != 3:
+            raise ValueError("Template keypoints must be HxWx3")
+        channels = [
+            cv2.resize(array[..., idx], (width, height), interpolation=self.interpolation)
+            for idx in range(3)
+        ]
+        return np.stack(channels, axis=-1)
 
 
 class ImageNormalization(albumentations.ImageOnlyTransform):
@@ -201,8 +244,7 @@ def get_physical_extent(origin, scale, direction, shape):
 
 def build_transform(config: TrainConfig, is_train: bool, template_parameters: TemplateParameters):
     transforms = []
-    if config.patch_size[0] > 512:
-        transforms.append(albumentations.LongestMaxSize(max_size=512))
+    transforms.append(LongestMaxSize(max_size=512, is_train=is_train))
 
     if config.normalize_input_image:
         transforms.append(ImageNormalization())
