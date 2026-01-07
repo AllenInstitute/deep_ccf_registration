@@ -33,13 +33,34 @@ class SliceOrientation(Enum):
 class SubjectMetadata(BaseModel):
     subject_id: str
     stitched_volume_path: str | Path
-    template_points_path: Optional[str] = None # TODO
+    template_points_path: Optional[str] = None
     axes: list[AcquisitionAxis]
     registered_shape: tuple[int, int, int]
     registration_downsample: int
     # The index that splits the 2 hemispheres in voxels the same dim as the sagittal axis in the registered volume
     # obtained via `get_input_space_midline.py`
     sagittal_midline: Optional[int] = None
+
+    def get_template_points_path(self) -> str:
+        """
+        If template_points_path is not passed, infer it from the stitched_path root prefix
+
+        :return:
+        """
+        if self.template_points_path is not None:
+            template_points_path = self.template_points_path
+        else:
+            # Extract the first prefix from stitched_volume_path
+            # e.g., s3://aind-open-data/SmartSPIM_806624_2025-08-27_15-42-18_stitched_2025-08-29_22-47-08/image_tile_fusing/OMEZarr/Ex_639_Em_680.zarr
+            # becomes s3://aind-open-data/SmartSPIM_806624_2025-08-27_15-42-18_stitched_2025-08-29_22-47-08
+            if self.stitched_volume_path.startswith('s3://'):
+                # Split by '/' and take the first 4 parts: s3://bucket/prefix
+                parts = self.stitched_volume_path.split('/')
+                root_prefix = '/'.join(parts[:4])  # s3://aind-open-data/SmartSPIM_...
+            else:
+                raise ValueError('template_points_path not passed and stitched_volume_path is not an s3 uri. Cannot infer template_points_path')
+            template_points_path = f"{root_prefix}/{self.subject_id}_template_points.zarr"
+        return template_points_path
 
     def get_slice_shape(self, orientation: SliceOrientation):
         axes_except_slice = [ax for ax in self.axes if ax != self.get_slice_axis(orientation=orientation)]

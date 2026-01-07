@@ -148,7 +148,7 @@ class SliceDatasetCache(IterableDataset):
                 spec={
                     "driver": "auto",
                     "kvstore": create_kvstore(
-                        path=str(meta.template_points_path),
+                        path=str(meta.get_template_points_path()),
                         aws_credentials_method=self._aws_credentials_method,
                     ),
                 },
