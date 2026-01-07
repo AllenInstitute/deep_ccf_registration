@@ -24,7 +24,10 @@ from deep_ccf_registration.utils.visualization import viz_sample
 class MaskedCoordLoss(nn.Module):
     def forward(self, pred: torch.Tensor, target: torch.Tensor,
                 mask: torch.Tensor) -> torch.Tensor:
-
+        # Handle mask shape: if pred is (B, C, H, W) and mask is (B, H, W), 
+        # unsqueeze to (B, 1, H, W) before expanding to (B, C, H, W)
+        if mask.dim() == pred.dim() - 1:
+            mask = mask.unsqueeze(1)
         mask = mask.expand_as(pred).bool()
         return F.smooth_l1_loss(pred[mask], target[mask])
 

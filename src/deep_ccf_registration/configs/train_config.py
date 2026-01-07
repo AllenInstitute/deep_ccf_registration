@@ -12,11 +12,6 @@ class ModelConfig(BaseModel):
     # number of channels in each layer of the unet in the encoder
     unet_channels: tuple[int, ...]
     unet_stride: tuple[int, ...]
-    unet_dropout: float = 0.0
-    unet_feature_channels: int = 64
-    unet_head_size: str = "small"
-    unet_use_positional_encoding: bool = True
-    unet_pos_encoding_channels: int = 16
 
 class TrainConfig(BaseModel):
     model_config = ConfigDict(extra='forbid')
@@ -29,7 +24,6 @@ class TrainConfig(BaseModel):
     orientation: Optional[SliceOrientation] = None
     registration_downsample_factor: int = 3
     tensorstore_aws_credentials_method: str = "default"
-    crop_warp_to_bounding_box: bool = True
     patch_size: Optional[tuple[int, int]] = None
 
     # downsample input image and target points so that longest max size is this
@@ -52,8 +46,6 @@ class TrainConfig(BaseModel):
     max_iters: int
     learning_rate: float = Field(0.001, gt=0.0)
     weight_decay: float = Field(0.0, ge=0.0)
-    decay_learning_rate: bool = True
-    warmup_iters: int = Field(1000, ge=0)
     eval_iters: int = 50
     val_viz_samples: int = Field(10, ge=0)
 
@@ -77,9 +69,7 @@ class TrainConfig(BaseModel):
     tissue_bounding_boxes_path: Path
 
     mlflow_experiment_name: str = "slice_registration"
-
     mlflow_tracking_uri: Optional[str] = None
-
     use_mlflow: bool = True
 
     model: ModelConfig
