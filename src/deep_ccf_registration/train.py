@@ -91,11 +91,20 @@ def _evaluate(
     ccf_annotations: Optional[np.ndarray] = None,
     global_step: Optional[int] = None,
     exclude_background_pixels: bool = False,
-) -> tuple[float, float]:
-    """Evaluate model"""
+) -> tuple[float, float, float]:
+    """
+    Evaluate model and report losses/RMSEs at multiple resolutions.
+
+    Returns
+    -------
+    tuple[float, float, float]
+        Validation loss, RMSE at the prediction resolution, and RMSE after
+        upsampling predictions back to the raw template resolution.
+    """
     model.eval()
     losses = []
-    rmses = []
+    rmses_downsampled = []
+    rmses_raw = []
     collected_samples = []
     enable_viz = (
         viz_sample_count > 0
@@ -110,22 +119,46 @@ def _evaluate(
             input_images = batch["input_images"].to(device)
             target_template_points = batch["target_template_points"].to(device)
             pad_masks = batch["pad_masks"].to(device)
+            pad_mask_heights = batch["pad_mask_heights"].to(device)
+            pad_mask_widths = batch["pad_mask_widths"].to(device)
 
             with autocast_context:
                 pred = model(input_images)
-                # must resize the predictions if they were resized since we do not modify the raw size of the template points
-                pred = _resize_to_target(pred=pred, target_template_points=target_template_points)
-                loss = coord_loss(pred=pred, target=target_template_points, mask=pad_masks)
+                if pred.shape != target_template_points.shape:
+                    # downsample the target to match the prediction resolution
+                    target_template_points_downsample = F.interpolate(
+                        target_template_points,
+                        size=pred.shape[-2:],
+                        mode="bilinear",
+                        align_corners=False,
+                    )
+                    pad_masks_downsample = _resize_pad_masks_from_sizes(
+                        valid_heights=pad_mask_heights,
+                        valid_widths=pad_mask_widths,
+                        original_size=pad_masks.shape[-2:],
+                        target_size=pred.shape[-2:],
+                    )
+                else:
+                    target_template_points_downsample = target_template_points
+                    pad_masks_downsample = pad_masks
+                loss = coord_loss(pred=pred, target=target_template_points_downsample, mask=pad_masks_downsample)
                 losses.append(loss.item())
 
             if denormalize_pred_template_points:
-                pred = get_template_point_normalization_inverse(x=pred,
-                                                                     template_parameters=ls_template_parameters)
-            rmse = RMSE()(pred=pred, target=target_template_points, mask=pad_masks)
-            rmses.append(rmse.item())
+                pred = get_template_point_normalization_inverse(
+                    x=pred,
+                    template_parameters=ls_template_parameters,
+                )
+
+            pred_upsample = _resize_to_target(pred=pred, target_template_points=target_template_points)
+            rmse_downsample = RMSE()(pred=pred, target=target_template_points_downsample, mask=pad_masks_downsample)
+            rmse_raw = RMSE()(pred=pred_upsample, target=target_template_points, mask=pad_masks)
+
+            rmses_downsampled.append(rmse_downsample.item())
+            rmses_raw.append(rmse_raw.item())
 
             if enable_viz and len(collected_samples) < viz_sample_count:
-                errors = (pred - target_template_points) ** 2
+                errors = (pred - target_template_points_downsample) ** 2
                 slice_indices = batch["slice_indices"]
                 patch_ys = batch["patch_ys"]
                 patch_xs = batch["patch_xs"]
@@ -137,8 +170,8 @@ def _evaluate(
                     collected_samples.append({
                         "input_image": input_images[sample_idx].detach().cpu().squeeze(0),
                         "pred_coords": pred[sample_idx].detach().cpu(),
-                        "gt_coords": target_template_points[sample_idx].detach().cpu(),
-                        "pad_mask": pad_masks[sample_idx].detach().cpu(),
+                        "gt_coords": target_template_points_downsample[sample_idx].detach().cpu(),
+                        "pad_mask": pad_masks_downsample[sample_idx].detach().cpu(),
                         "errors": errors[sample_idx].detach().cpu().numpy(),
                         "slice_idx": int(slice_indices[sample_idx].item()),
                         "patch_y": int(patch_ys[sample_idx].item()),
@@ -148,38 +181,38 @@ def _evaluate(
                     if len(collected_samples) >= viz_sample_count:
                         break
 
+    val_loss = np.mean(losses)
+    val_rmse_downsampled = np.mean(rmses_downsampled)
+    val_rmse_raw = np.mean(rmses_raw)
 
-        val_loss = np.mean(losses)
-        val_rmse = np.mean(rmses)
+    if enable_viz and collected_samples:
+        iteration = global_step or 0
+        for idx, sample in enumerate(collected_samples):
+            fig = viz_sample(
+                ls_template_parameters=ls_template_parameters,
+                pred_coords=sample["pred_coords"],
+                gt_coords=sample["gt_coords"],
+                ccf_annotations=ccf_annotations,
+                iteration=iteration,
+                pad_mask=sample["pad_mask"],
+                input_image=sample["input_image"],
+                slice_idx=sample["slice_idx"],
+                errors=sample["errors"],
+                pred_tissue_mask=None,
+                tissue_mask=None, # TODO
+                exclude_background=exclude_background_pixels,
+            )
+            fig_filename = (
+                f"subject_{sample['subject_id']}_slice_{sample['slice_idx']}"
+                f"_y_{sample['patch_y']}_x_{sample['patch_x']}_step_{iteration}_viz_{idx}.png"
+            )
+            mlflow.log_figure(
+                fig,
+                f"validation_samples/step_{iteration}/{fig_filename}"
+            )
+            plt.close(fig)
 
-        if enable_viz and collected_samples:
-            iteration = global_step or 0
-            for idx, sample in enumerate(collected_samples):
-                fig = viz_sample(
-                    ls_template_parameters=ls_template_parameters,
-                    pred_coords=sample["pred_coords"],
-                    gt_coords=sample["gt_coords"],
-                    ccf_annotations=ccf_annotations,
-                    iteration=iteration,
-                    pad_mask=sample["pad_mask"],
-                    input_image=sample["input_image"],
-                    slice_idx=sample["slice_idx"],
-                    errors=sample["errors"],
-                    pred_tissue_mask=None,
-                    tissue_mask=None, # TODO
-                    exclude_background=exclude_background_pixels,
-                )
-                fig_filename = (
-                    f"subject_{sample['subject_id']}_slice_{sample['slice_idx']}"
-                    f"_y_{sample['patch_y']}_x_{sample['patch_x']}_step_{iteration}_viz_{idx}.png"
-                )
-                mlflow.log_figure(
-                    fig,
-                    f"validation_samples/step_{iteration}/{fig_filename}"
-                )
-                plt.close(fig)
-
-        return val_loss, val_rmse
+    return val_loss, val_rmse_downsampled, val_rmse_raw
 
 
 def _resize_to_target(
@@ -193,6 +226,41 @@ def _resize_to_target(
 
     pred = F.interpolate(pred, size=target_size, mode="bilinear", align_corners=False)
     return pred
+
+
+def _resize_pad_masks_from_sizes(
+    valid_heights: torch.Tensor,
+    valid_widths: torch.Tensor,
+    original_size: tuple[int, int],
+    target_size: tuple[int, int],
+) -> torch.Tensor:
+    """Construct rectangular pad masks scaled to a new spatial resolution."""
+    orig_h, orig_w = original_size
+    target_h, target_w = target_size
+
+    if (orig_h, orig_w) == (target_h, target_w):
+        raise ValueError("Pad mask resizing requested without a size change")
+
+    device = valid_heights.device
+
+    scaled_heights = torch.clamp(
+        (valid_heights.float() * target_h / orig_h).ceil().long(),
+        min=0,
+        max=target_h,
+    )
+    scaled_widths = torch.clamp(
+        (valid_widths.float() * target_w / orig_w).ceil().long(),
+        min=0,
+        max=target_w,
+    )
+
+    row_indices = torch.arange(target_h, device=device).unsqueeze(0)
+    col_indices = torch.arange(target_w, device=device).unsqueeze(0)
+
+    row_mask = row_indices < scaled_heights.unsqueeze(1)
+    col_mask = col_indices < scaled_widths.unsqueeze(1)
+
+    return row_mask.unsqueeze(2) & col_mask.unsqueeze(1)
 
 class LRScheduler(Enum):
     ReduceLROnPlateau = "ReduceLROnPlateau"
@@ -307,7 +375,7 @@ def train(
             # Periodic evaluation
             if global_step % eval_interval == 0:
                 logger.info(f"Evaluating at step {global_step}")
-                val_loss, val_rmse = _evaluate(
+                val_loss, val_rmse_downsampled, val_rmse = _evaluate(
                     dataloader=val_dataloader,
                     model=model,
                     device=device,
@@ -327,14 +395,16 @@ def train(
                 mlflow.log_metrics(
                     metrics={
                         "eval/loss": val_loss,
-                        "eval/val_rmse": val_rmse
+                        "eval/val_rmse": val_rmse,
+                        "eval/val_rmse_downsampled": val_rmse_downsampled,
                     },
                     step=global_step
                 )
 
                 logger.info(
                     f"Step {global_step} | "
-                    f"Train loss: {loss.item():.6f} | Val loss: {val_loss:.6f} | Val RMSE: {val_rmse:.6f} |"
+                    f"Train loss: {loss.item():.6f} | Val loss: {val_loss:.6f} | "
+                    f"Val RMSE (downsampled): {val_rmse_downsampled:.6f} | Val RMSE (raw): {val_rmse:.6f} |"
                     f"LR: {current_lr:.6e}"
                 )
 
@@ -345,6 +415,7 @@ def train(
                         'model_state_dict': model.state_dict(),
                         'optimizer_state_dict': optimizer.state_dict(),
                         'val_rmse': val_rmse,
+                        'val_rmse_downsampled': val_rmse_downsampled,
                         'lr': scheduler.get_last_lr() if scheduler is not None else learning_rate
                     },
                     f=checkpoint_path,

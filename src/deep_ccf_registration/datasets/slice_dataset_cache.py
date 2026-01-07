@@ -497,6 +497,8 @@ def collate_patch_samples(samples: list[PatchSample], patch_size: int, is_train:
         - orientations: list of str
         - subject_ids: list of str
         - pad_masks: (B, H, W) tensor indicating valid (non-padded) pixels
+        - pad_mask_heights: (B,) tensor of valid pixel counts along H
+        - pad_mask_widths: (B,) tensor of valid pixel counts along W
     """
     batch_size = len(samples)
     heights = [s.data.shape[0] for s in samples]
@@ -512,23 +514,30 @@ def collate_patch_samples(samples: list[PatchSample], patch_size: int, is_train:
     # in train mode we resize the target. For inference we don't modify this size
     template_points = np.zeros((batch_size, 3, target_h if is_train else patch_size, target_w if is_train else patch_size), dtype=template_dtype)
     pad_masks = np.zeros((batch_size, target_h if is_train else patch_size, target_w if is_train else patch_size), dtype=np.uint8)
+    pad_mask_heights = np.zeros(batch_size, dtype=np.int32)
+    pad_mask_widths = np.zeros(batch_size, dtype=np.int32)
 
     for idx, sample in enumerate(samples):
         img = sample.data
-        h, w = img.shape
-        images[idx, 0, :h, :w] = img
+        img_h, img_w = img.shape
+        template_points_h, template_points_w = sample.template_points.shape[:-1]
+        images[idx, 0, :img_h, :img_w] = img
 
         if sample.template_points is None:
             raise ValueError("PatchSample missing template_points; cannot collate")
         sample_template_points = np.transpose(sample.template_points, (2, 0, 1))
         template_points[idx, :, :sample_template_points.shape[1], :sample_template_points.shape[2]] = sample_template_points
 
-        pad_masks[idx, :h, :w] = 1
+        pad_masks[idx, :template_points_h, :template_points_w] = 1
+        pad_mask_heights[idx] = template_points_h
+        pad_mask_widths[idx] = template_points_w
 
     return {
         "input_images": torch.from_numpy(images),
         "target_template_points": torch.from_numpy(template_points),
         "pad_masks": torch.from_numpy(pad_masks.astype(bool)),
+        "pad_mask_heights": torch.from_numpy(pad_mask_heights),
+        "pad_mask_widths": torch.from_numpy(pad_mask_widths),
         "dataset_indices": [s.dataset_idx for s in samples],
         "slice_indices": torch.tensor([s.slice_idx for s in samples]),
         "patch_ys": torch.tensor([s.start_y for s in samples]),

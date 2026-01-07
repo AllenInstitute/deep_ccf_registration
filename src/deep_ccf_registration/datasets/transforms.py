@@ -33,11 +33,11 @@ class TemplateParameters:
 class LongestMaxSize(albumentations.DualTransform):
     """Resize so the longest side matches ``max_size`` while keeping aspect."""
 
-    def __init__(self, max_size: int, interpolation: int = cv2.INTER_LINEAR, is_train: bool = True):
+    def __init__(self, max_size: int, interpolation: int = cv2.INTER_LINEAR, resize_target: bool = True):
         super().__init__(p=1.0)
         self.max_size = max_size
         self.interpolation = interpolation
-        self.is_train = is_train
+        self.resize_target = resize_target
 
     def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
         img = data["image"]
@@ -58,7 +58,7 @@ class LongestMaxSize(albumentations.DualTransform):
         return cv2.resize(img, (width, height), interpolation=self.interpolation)
 
     def apply_to_keypoints(self, keypoints: np.ndarray, scale: float, height: int, width: int, **params: Any) -> np.ndarray:
-        if not self.is_train or scale == 1.0:
+        if not self.resize_target or scale == 1.0:
             return keypoints
         return self._resize_array(keypoints, height=height, width=width)
 
@@ -244,7 +244,9 @@ def get_physical_extent(origin, scale, direction, shape):
 
 def build_transform(config: TrainConfig, is_train: bool, template_parameters: TemplateParameters):
     transforms = []
-    transforms.append(LongestMaxSize(max_size=512, is_train=is_train))
+
+    if config.longest_max_size is not None:
+        transforms.append(LongestMaxSize(max_size=config.longest_max_size, resize_target=is_train))
 
     if config.normalize_input_image:
         transforms.append(ImageNormalization())

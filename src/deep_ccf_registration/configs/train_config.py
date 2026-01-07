@@ -31,6 +31,10 @@ class TrainConfig(BaseModel):
     tensorstore_aws_credentials_method: str = "default"
     crop_warp_to_bounding_box: bool = True
     patch_size: Optional[tuple[int, int]] = None
+
+    # downsample input image and target points so that longest max size is this
+    longest_max_size: Optional[int] = None
+
     # make all input images have uniform orientation
     normalize_orientation: bool = True
     # make all input images range from [0, 1] using lower and upper percentiles as thresholds
