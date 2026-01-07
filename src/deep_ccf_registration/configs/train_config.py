@@ -1,10 +1,14 @@
-from aind_smartspim_transform_utils.utils.utils import AcquisitionDirection
+from enum import Enum
+
 from pydantic import BaseModel, Field, ConfigDict
 from typing import Optional, Literal
 from pathlib import Path
 
 from deep_ccf_registration.metadata import SliceOrientation
 
+
+class LRScheduler(Enum):
+    ReduceLROnPlateau = "ReduceLROnPlateau"
 
 class ModelConfig(BaseModel):
     model_config = ConfigDict(extra='forbid')
@@ -73,3 +77,5 @@ class TrainConfig(BaseModel):
     use_mlflow: bool = True
 
     model: ModelConfig
+
+    lr_scheduler: Optional[LRScheduler] = None

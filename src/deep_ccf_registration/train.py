@@ -1,5 +1,4 @@
 import os
-from enum import Enum
 from pathlib import Path
 from typing import ContextManager, Iterator, Optional
 from contextlib import nullcontext
@@ -14,9 +13,9 @@ import torch.nn.functional as F
 
 from loguru import logger
 
+from deep_ccf_registration.configs.train_config import LRScheduler
 from deep_ccf_registration.datasets.slice_dataset_cache import ShuffledBatchIterator
-from deep_ccf_registration.datasets.transforms import TemplatePointsNormalization, \
-    TemplateParameters, get_template_point_normalization_inverse
+from deep_ccf_registration.datasets.transforms import TemplateParameters, get_template_point_normalization_inverse
 from deep_ccf_registration.utils.logging_utils import timed, ProgressLogger
 from deep_ccf_registration.utils.visualization import viz_sample
 
@@ -265,8 +264,6 @@ def _resize_pad_masks_from_sizes(
 
     return row_mask.unsqueeze(2) & col_mask.unsqueeze(1)
 
-class LRScheduler(Enum):
-    ReduceLROnPlateau = "ReduceLROnPlateau"
 
 def train(
         train_dataloader: ShuffledBatchIterator,

@@ -20,7 +20,7 @@ import json
 import ants
 import random
 
-from deep_ccf_registration.configs.train_config import TrainConfig
+from deep_ccf_registration.configs.train_config import TrainConfig, LRScheduler
 from deep_ccf_registration.datasets.slice_dataset_cache import (
     PatchSample,
     SliceDatasetCache,
@@ -29,7 +29,7 @@ from deep_ccf_registration.datasets.slice_dataset_cache import (
     collate_patch_samples, )
 from deep_ccf_registration.datasets.transforms import build_transform, TemplatePointsNormalization, TemplateParameters
 from deep_ccf_registration.metadata import SubjectMetadata, TissueBoundingBoxes
-from deep_ccf_registration.train import train, LRScheduler
+from deep_ccf_registration.train import train
 
 
 def _identity_collate(batch):
@@ -364,7 +364,7 @@ def main(config_path: Path):
             ccf_annotations=ccf_annotations,
             val_viz_samples=config.val_viz_samples,
             exclude_background_pixels=config.exclude_background_pixels,
-            lr_scheduler=LRScheduler.ReduceLROnPlateau,
+            lr_scheduler=config.lr_scheduler,
             normalize_target_points=config.normalize_template_points,
         )
 
