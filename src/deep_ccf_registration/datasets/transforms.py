@@ -252,7 +252,7 @@ def build_transform(config: TrainConfig, is_train: bool, template_parameters: Te
         transforms.append(ImageNormalization())
     if config.normalize_orientation:
         transforms.append(OrientationNormalization())
-    if is_train:
+    if config.normalize_template_points:
         transforms.append(TemplatePointsNormalization(
             origin=template_parameters.origin,
             scale=template_parameters.scale,

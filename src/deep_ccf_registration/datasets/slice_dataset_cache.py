@@ -61,6 +61,7 @@ class SliceDatasetCache(IterableDataset):
         dataset_meta: SubjectMetadata,
         tissue_bboxes: Sequence[Optional[TissueBoundingBox]],
         template_parameters: TemplateParameters,
+        is_train: bool,
         sample_fraction: float = 0.25,
         orientation: Optional[SliceOrientation] = None,
         tensorstore_aws_credentials_method: str = "anonymous",
@@ -69,6 +70,7 @@ class SliceDatasetCache(IterableDataset):
         chunk_size: int = 128,
         transform: Optional[Callable] = None,
         max_chunks_per_dataset: Optional[int] = 1,
+        forced_coords: Optional[tuple[str, int, str, int, int]] = None,
     ):
         super().__init__()
 
@@ -80,6 +82,7 @@ class SliceDatasetCache(IterableDataset):
         self._metadata = dataset_meta
         self._dataset_idx = dataset_meta.subject_id
 
+        self._is_train = is_train
         self._tissue_bboxes: list[Optional[TissueBoundingBox]] = list(tissue_bboxes)
         self._sample_fraction = sample_fraction
         self._orientation = orientation or SliceOrientation.SAGITTAL
@@ -87,6 +90,7 @@ class SliceDatasetCache(IterableDataset):
         self._aws_credentials_method = tensorstore_aws_credentials_method
         self._patch_size = patch_size
         self._chunk_size = chunk_size
+        self._forced_coords = forced_coords
 
         self._volume: Optional[tensorstore.TensorStore] = None
         self._template_points: Optional[tensorstore.TensorStore] = None
@@ -181,14 +185,29 @@ class SliceDatasetCache(IterableDataset):
         chunk_w = min(self._patch_size, vol_w)
         chunk_d = min(self._chunk_size, vol_d)
 
-        # Pick a random slice range that has valid tissue slices
-        slice_indices = sorted([s[0] for s in valid_slices])
-        min_valid_slice = min(slice_indices)
-        max_valid_slice = max(slice_indices)
+        # If forced coords are provided for this dataset, lock chunk to contain that slice/patch
+        if self._forced_coords is not None and self._forced_coords[0] == self._dataset_idx:
+            target_slice = self._forced_coords[1]
+            target_y = self._forced_coords[3]
+            target_x = self._forced_coords[4]
 
-        start_slice = random.randint(min_valid_slice, min(vol_d - chunk_d, max_valid_slice))
+            start_slice = max(0, min(target_slice, vol_d - 1))
+            end_slice = min(start_slice + 1, vol_d)
 
-        end_slice = start_slice + chunk_d
+            start_y = max(0, min(target_y, vol_h - chunk_h))
+            end_y = min(start_y + chunk_h, vol_h)
+
+            start_x = max(0, min(target_x, vol_w - chunk_w))
+            end_x = min(start_x + chunk_w, vol_w)
+        else:
+            # Pick a random slice range that has valid tissue slices
+            slice_indices = sorted([s[0] for s in valid_slices])
+            min_valid_slice = min(slice_indices)
+            max_valid_slice = max(slice_indices)
+
+            start_slice = random.randint(min_valid_slice, min(vol_d - chunk_d, max_valid_slice))
+
+            end_slice = start_slice + chunk_d
 
         # Get bboxes for slices that will be in this chunk
         slices_in_chunk = [
@@ -201,24 +220,25 @@ class SliceDatasetCache(IterableDataset):
                 "No tissue slices fell within the chunk boundaries. "
             )
 
-        # Position chunk to overlap with tissue - use union of bboxes
-        union_min_y = min(bbox.y for _, bbox in slices_in_chunk)
-        union_min_x = min(bbox.x for _, bbox in slices_in_chunk)
-        union_max_y = max(bbox.y + bbox.height for _, bbox in slices_in_chunk)
-        union_max_x = max(bbox.x + bbox.width for _, bbox in slices_in_chunk)
+        if self._forced_coords is None or self._forced_coords[0] != self._dataset_idx:
+            # Position chunk to overlap with tissue - use union of bboxes
+            union_min_y = min(bbox.y for _, bbox in slices_in_chunk)
+            union_min_x = min(bbox.x for _, bbox in slices_in_chunk)
+            union_max_y = max(bbox.y + bbox.height for _, bbox in slices_in_chunk)
+            union_max_x = max(bbox.x + bbox.width for _, bbox in slices_in_chunk)
 
-        if union_max_y <= chunk_h:
-            start_y = 0
-        else:
-            start_y = random.randint(union_min_y, max(union_max_y - chunk_h, union_min_y + 1))
+            if union_max_y <= chunk_h:
+                start_y = 0
+            else:
+                start_y = random.randint(union_min_y, max(union_max_y - chunk_h, union_min_y + 1))
 
-        if union_max_x <= chunk_w:
-            start_x = 0
-        else:
-            start_x = random.randint(union_min_x, max(union_max_x - chunk_w, union_min_x + 1))
+            if union_max_x <= chunk_w:
+                start_x = 0
+            else:
+                start_x = random.randint(union_min_x, max(union_max_x - chunk_w, union_min_x + 1))
 
-        end_y = min(start_y + chunk_h, vol_h)
-        end_x = min(start_x + chunk_w, vol_w)
+            end_y = min(start_y + chunk_h, vol_h)
+            end_x = min(start_x + chunk_w, vol_w)
 
         # Build slice for volume indexing
         slices = [0, 0, None, None, None]
@@ -290,18 +310,32 @@ class SliceDatasetCache(IterableDataset):
         start_y = plane_span_a.start
         start_x = plane_span_b.start
 
+        if self._forced_coords is not None and self._forced_coords[0] == self._dataset_idx:
+            # Respect the requested top-left coords when the chunk was forced
+            start_y = self._forced_coords[3]
+            start_x = self._forced_coords[4]
+
         slice_range = range(slice_span.stop - slice_span.start)
 
-        # Sample a fraction of the available slices
-        target_samples = max(1, int(len(slice_range) * self._sample_fraction))
-        target_samples = min(target_samples, len(slice_range))
+        # If forced coords are provided for this dataset, extract that exact slice deterministically
+        if self._forced_coords is not None and self._forced_coords[0] == self._dataset_idx:
+            target_slice_global = self._forced_coords[1]
+            local_idx = target_slice_global - slice_start
+            if local_idx < 0 or local_idx >= len(slice_range):
+                return []
+            target_indices = [local_idx]
+        else:
+            # Sample a fraction of the available slices
+            target_samples = max(1, int(len(slice_range) * self._sample_fraction))
+            target_samples = min(target_samples, len(slice_range))
 
-        # Shuffle slice order so we try different slices each call
-        shuffled_slices = list(slice_range)
-        random.shuffle(shuffled_slices)
+            # Shuffle slice order so we try different slices each call
+            shuffled_slices = list(slice_range)
+            random.shuffle(shuffled_slices)
+            target_indices = shuffled_slices[:target_samples]
 
         patches: list[PatchSample] = []
-        for local_idx in shuffled_slices[:target_samples]:
+        for local_idx in target_indices:
             patch = self._extract_slice(
                 array=self._cached_input_chunks,
                 local_idx=local_idx,

@@ -37,42 +37,59 @@ def _identity_collate(batch):
     return batch
 
 
-def _clone_patch_sample(sample: PatchSample) -> PatchSample:
-    """Create a detached copy of a PatchSample for safe reuse."""
-    return PatchSample(
-        slice_idx=sample.slice_idx,
-        start_y=sample.start_y,
-        start_x=sample.start_x,
-        data=np.array(sample.data, copy=True),
-        template_points=np.array(sample.template_points, copy=True),
-        dataset_idx=sample.dataset_idx,
-        worker_id=sample.worker_id,
-        orientation=getattr(sample, "orientation", ""),
-        subject_id=getattr(sample, "subject_id", ""),
-    )
-
 
 class RepeatSinglePatchIterator:
     """Yield batches made from a single cached patch (debug helper)."""
+    shared_coords: Optional[tuple[str, int, str, int, int]] = None
 
-    def __init__(self, base_iterator, batch_size: int):
+    def __init__(self, base_iterator, batch_size: int, is_train: bool):
         self._base_iterator = base_iterator
         self._batch_size = batch_size
+        self._is_train = is_train
+        self._logged = False
+        self._sample: Optional[PatchSample] = None
+
+    @staticmethod
+    def _coords(sample: PatchSample) -> tuple[str, int, str, int, int]:
+        return (
+            sample.subject_id,
+            sample.slice_idx,
+            sample.orientation,
+            sample.start_y,
+            sample.start_x,
+        )
+
+    def _locate_sample(self, coords: Optional[tuple[str, int, str, int, int]]) -> Optional[PatchSample]:
+        for batch in self._base_iterator:
+            for candidate in batch:
+                if coords is None or self._coords(candidate) == coords:
+                    return candidate
+        return None
 
     def __iter__(self):
-        sample: Optional[PatchSample] = None
+        coords = RepeatSinglePatchIterator.shared_coords
+        self._sample = self._locate_sample(coords)
 
-        for batch in self._base_iterator:
-            if not batch:
-                continue
-            sample = _clone_patch_sample(batch[0])
-            break
+        if self._sample is None:
+            if coords is None:
+                raise RuntimeError("Debug mode: could not locate initial reference sample")
+            raise RuntimeError(
+                "Debug mode: could not find matching sample in iterator; ensure train and val share subjects"
+            )
 
-        if sample is None:
-            return
+        if coords is None:
+            RepeatSinglePatchIterator.shared_coords = self._coords(self._sample)
+
+        if not self._logged:
+            logger.info(
+                f'is_train={self._is_train}; subject_id={self._sample.subject_id}; '
+                f'slice_idx={self._sample.slice_idx}; orientation={self._sample.orientation}; '
+                f'start_y={self._sample.start_y}; start_x={self._sample.start_x}'
+            )
+            self._logged = True
 
         while True:
-            yield [_clone_patch_sample(sample=sample) for _ in range(self._batch_size)]
+            yield [self._sample for _ in range(self._batch_size)]
 
 
 class CollatedBatchIterator:
@@ -99,6 +116,7 @@ def create_dataloader(
     num_workers: int,
     ls_template_parameters: TemplateParameters,
     buffer_batches: int = 8,
+    forced_coords: Optional[tuple[str, int, str, int, int]] = None,
 ):
     """
     Create a dataloader using SliceDatasetCache with worker sharding and batch shuffling.
@@ -128,9 +146,11 @@ def create_dataloader(
                 tensorstore_aws_credentials_method=config.tensorstore_aws_credentials_method,
                 registration_downsample_factor=config.registration_downsample_factor,
                 patch_size=config.patch_size[0],
-                max_chunks_per_dataset=1,
+                max_chunks_per_dataset=None if config.debug else 1,
                 transform=transform,
                 template_parameters=template_parameters,
+                is_train=is_train,
+                forced_coords=forced_coords,
             )
         )
 
@@ -152,13 +172,28 @@ def create_dataloader(
 
     if config.debug:
         logger.warning("Debug mode: repeating a single cached patch for all batches")
-        iterator = RepeatSinglePatchIterator(iterator, batch_size)
+        if forced_coords is not None:
+            RepeatSinglePatchIterator.shared_coords = forced_coords
+        iterator = RepeatSinglePatchIterator(base_iterator=iterator, batch_size=batch_size, is_train=is_train)
 
     return CollatedBatchIterator(iterator, patch_size=config.patch_size[0], is_train=is_train)
 
 logger.remove()
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logger.add(sys.stderr, level=log_level)
+
+
+def _deterministic_debug_meta(
+    train_metadata: list[SubjectMetadata],
+    tissue_bboxes: TissueBoundingBoxes,
+    orientation: str,
+) -> Optional[tuple[str, int, str, int, int]]:
+    """Pick a deterministic patch for debug mode."""
+    subject = train_metadata[0]
+    bboxes = tissue_bboxes.bounding_boxes[subject.subject_id]
+    slice_idx = int(len(bboxes)/2)
+    bbox = bboxes[slice_idx]
+    return subject.subject_id, slice_idx, orientation, bbox.y, bbox.x
 
 
 def _get_git_commit_from_package(package_name="deep-ccf-registration"):
@@ -244,6 +279,10 @@ def main(config_path: Path):
         val_split=(1 - config.train_val_split) / 2,
     )
 
+    if config.debug:
+        logger.warning("Debug mode: using training metadata for validation to ensure shared subjects")
+        val_metadata = train_metadata
+
     logger.info(f"Train subjects: {len(train_metadata)}")
     logger.info(f"Val subjects: {len(val_metadata)}")
     logger.info(f"Test subjects: {len(test_metadata)}")
@@ -263,6 +302,16 @@ def main(config_path: Path):
     tissue_bboxes = TissueBoundingBoxes(bounding_boxes=tissue_bboxes)
 
 
+    forced_coords = None
+    if config.debug:
+        forced_coords = _deterministic_debug_meta(
+            train_metadata=train_metadata,
+            tissue_bboxes=tissue_bboxes,
+            orientation=config.orientation.value
+        )
+        if forced_coords:
+            logger.info(f"Debug mode: forcing patch coords {forced_coords}")
+
     train_dataloader = create_dataloader(
         metadata=train_metadata,
         tissue_bboxes=tissue_bboxes,
@@ -272,6 +321,7 @@ def main(config_path: Path):
         buffer_batches=8,
         ls_template_parameters=ls_template_parameters,
         is_train=True,
+        forced_coords=forced_coords,
     )
     val_dataloader = create_dataloader(
         metadata=val_metadata,
@@ -282,6 +332,7 @@ def main(config_path: Path):
         buffer_batches=4,
         ls_template_parameters=ls_template_parameters,
         is_train=False,
+        forced_coords=forced_coords,
     )
 
     logger.info(f"Train subjects: {len(train_metadata)}")
@@ -293,6 +344,7 @@ def main(config_path: Path):
         out_channels=3,
         channels=config.model.unet_channels,
         strides=config.model.unet_stride,
+
     )
     logger.info(model)
 

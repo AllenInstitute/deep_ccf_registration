@@ -93,6 +93,7 @@ def _evaluate(
     ccf_annotations: Optional[np.ndarray] = None,
     global_step: Optional[int] = None,
     exclude_background_pixels: bool = False,
+    is_debug: bool = False
 ) -> tuple[float, float, float]:
     """
     Evaluate model and report losses/RMSEs at multiple resolutions.
@@ -149,6 +150,14 @@ def _evaluate(
             if denormalize_pred_template_points:
                 pred = get_template_point_normalization_inverse(
                     x=pred,
+                    template_parameters=ls_template_parameters,
+                )
+                target_template_points = get_template_point_normalization_inverse(
+                    x=target_template_points,
+                    template_parameters=ls_template_parameters,
+                )
+                target_template_points_downsample = get_template_point_normalization_inverse(
+                    x=target_template_points_downsample,
                     template_parameters=ls_template_parameters,
                 )
 
@@ -208,12 +217,15 @@ def _evaluate(
                 f"subject_{sample['subject_id']}_slice_{sample['slice_idx']}"
                 f"_y_{sample['patch_y']}_x_{sample['patch_x']}_step_{iteration}_viz_{idx}.png"
             )
+            if is_debug:
+                plt.show()
             mlflow.log_figure(
                 fig,
                 f"validation_samples/step_{iteration}/{fig_filename}"
             )
             plt.close(fig)
 
+    model.train()
     return val_loss, val_rmse_downsampled, val_rmse_raw
 
 
@@ -354,23 +366,9 @@ def train(
                     model_out = model(input_images)
                 loss = coord_loss(pred=model_out, target=target_template_points, mask=pad_masks)
 
-            loss.backward()
-            optimizer.step()
-
-            if scheduler is not None:
-                if lr_scheduler == LRScheduler.ReduceLROnPlateau:
-                    scheduler.step(metrics=loss.item())
-                else:
-                    raise ValueError(f'{lr_scheduler} not supported')
-
             train_losses.append(loss.item())
 
             global_step += 1
-
-            mlflow.log_metrics({
-                "train/loss": loss.item(),
-                "train/learning_rate": optimizer.param_groups[0]['lr'],
-            }, step=global_step)
 
             # Periodic evaluation
             if global_step % eval_interval == 0:
@@ -388,6 +386,7 @@ def train(
                     global_step=global_step,
                     exclude_background_pixels=exclude_background_pixels,
                     coord_loss=coord_loss,
+                    is_debug=is_debug
                 )
 
                 current_lr = optimizer.param_groups[0]['lr']
@@ -445,6 +444,20 @@ def train(
                 # Reset train losses for next eval period
                 train_losses = []
                 model.train()
+
+            loss.backward()
+            optimizer.step()
+
+            if scheduler is not None:
+                if lr_scheduler == LRScheduler.ReduceLROnPlateau:
+                    scheduler.step(metrics=loss.item())
+                else:
+                    raise ValueError(f'{lr_scheduler} not supported')
+
+            mlflow.log_metrics({
+                "train/loss": loss.item(),
+                "train/learning_rate": optimizer.param_groups[0]['lr'],
+            }, step=global_step)
 
             if global_step == max_iters:
                 logger.info(
