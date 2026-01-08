@@ -50,16 +50,17 @@ class SubjectMetadata(BaseModel):
         if self.template_points_path is not None:
             template_points_path = self.template_points_path
         else:
-            # Extract the first prefix from stitched_volume_path
+            # Extract the prefix from stitched_volume_path
             # e.g., s3://aind-open-data/SmartSPIM_806624_2025-08-27_15-42-18_stitched_2025-08-29_22-47-08/image_tile_fusing/OMEZarr/Ex_639_Em_680.zarr
-            # becomes s3://aind-open-data/SmartSPIM_806624_2025-08-27_15-42-18_stitched_2025-08-29_22-47-08
+            # extract: SmartSPIM_806624_2025-08-27_15-42-18_stitched_2025-08-29_22-47-08
             if self.stitched_volume_path.startswith('s3://'):
-                # Split by '/' and take the first 4 parts: s3://bucket/prefix
+                # Split by '/' and get the 4th part (index 3) which is the prefix
                 parts = self.stitched_volume_path.split('/')
-                root_prefix = '/'.join(parts[:4])  # s3://aind-open-data/SmartSPIM_...
+                prefix = parts[3]  # SmartSPIM_806624_2025-08-27_15-42-18_stitched_2025-08-29_22-47-08
             else:
                 raise ValueError('template_points_path not passed and stitched_volume_path is not an s3 uri. Cannot infer template_points_path')
-            template_points_path = f"{root_prefix}/{self.subject_id}_template_points.zarr"
+            # the template points calculated by scripts/create_point_map.py
+            template_points_path = f"s3://marmot-development-802451596237-us-west-2/smartspim-registration/{prefix}/{self.subject_id}_template_points.zarr"
         return template_points_path
 
     def get_slice_shape(self, orientation: SliceOrientation):

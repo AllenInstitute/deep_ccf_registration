@@ -132,13 +132,6 @@ class SliceDatasetCache(IterableDataset):
         return self._volume
 
     def _get_template_points_volume(self) -> Optional[tensorstore.TensorStore]:
-        if not getattr(self._metadata, "template_points_path", None):
-            # TODO(#temp-template-path): remove this guard once all subjects provide template points.
-            logger.debug(
-                f"Worker {self._worker_id} skipping template points; no path for dataset {self._dataset_idx}"
-            )
-            return None
-
         if self._template_points is None:
             logger.debug(
                 f"Worker {self._worker_id} opening template points for dataset {self._dataset_idx}"
@@ -241,12 +234,8 @@ class SliceDatasetCache(IterableDataset):
         chunk_data = volume[tuple(slices)].read().result()
         self._cached_input_chunks = np.array(chunk_data)
 
-        if template_points_volume is not None:
-            template_chunk = template_points_volume[tuple(slices)].read().result()
-            self._cached_template_points = np.array(template_chunk)
-        else:
-            # TODO(#temp-template-path): remove placeholder once template points exist for every subject.
-            self._cached_template_points = np.zeros(self._cached_input_chunks.shape + (3,), dtype=np.float32)
+        template_chunk = template_points_volume[tuple(slices)].read().result()
+        self._cached_template_points = np.array(template_chunk)
 
         logger.debug(
             f"Worker {self._worker_id} cached chunk for dataset {self._dataset_idx}: "
