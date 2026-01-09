@@ -8,12 +8,9 @@ from typing import Optional
 
 import click
 import mlflow
-import monai
 import numpy as np
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
-from monai.networks.nets import UNet
-import neurite
 
 from torch.utils.data import DataLoader
 from contextlib import nullcontext

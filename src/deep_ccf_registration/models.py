@@ -1,7 +1,6 @@
 import monai.networks.nets
 import torch
 import torch.nn as nn
-from monai.networks.nets import UNet
 from typing import Optional
 
 
