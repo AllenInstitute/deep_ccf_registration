@@ -8,10 +8,12 @@ from typing import Optional
 
 import click
 import mlflow
+import monai
 import numpy as np
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from monai.networks.nets import UNet
+import neurite
 
 from torch.utils.data import DataLoader
 from contextlib import nullcontext
@@ -29,6 +31,7 @@ from deep_ccf_registration.datasets.slice_dataset_cache import (
     collate_patch_samples, )
 from deep_ccf_registration.datasets.transforms import build_transform, TemplatePointsNormalization, TemplateParameters
 from deep_ccf_registration.metadata import SubjectMetadata, TissueBoundingBoxes
+from deep_ccf_registration.models import UNetWithRegressionHeads
 from deep_ccf_registration.train import train
 
 
@@ -338,14 +341,15 @@ def main(config_path: Path):
     logger.info(f"Train subjects: {len(train_metadata)}")
     logger.info(f"Val subjects: {len(val_metadata)}")
 
-    model = UNet(
+    model = UNetWithRegressionHeads(
         spatial_dims=2,
         in_channels=1,
-        out_channels=3,
         channels=config.model.unet_channels,
-        strides=config.model.unet_stride,
-
+        out_coords=3,
+        image_height=config.patch_size[0],
+        image_width=config.patch_size[1],
     )
+
     logger.info(model)
 
     if config.load_checkpoint:
