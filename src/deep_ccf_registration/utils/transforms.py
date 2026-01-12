@@ -7,24 +7,10 @@ import pandas as pd
 import tensorstore
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
-from aind_smartspim_transform_utils.utils.utils import convert_from_ants_space, \
-    AcquisitionDirection
-from retry import retry
-from tensorstore import TensorStore
-
-from deep_ccf_registration.metadata import AcquisitionAxis, SubjectMetadata, SliceOrientation
+from aind_smartspim_transform_utils.utils.utils import convert_from_ants_space
+from deep_ccf_registration.metadata import AcquisitionAxis
 from deep_ccf_registration.utils.interpolation import interpolate
 from deep_ccf_registration.utils.logging_utils import timed_func, timed
-
-
-@retry(tries=3, delay=1, backoff=2)
-def _read_tensorstore_region(array, min_coords, max_coords):
-    """Read a cropped region from tensorstore with retry logic for transient failures."""
-    return array[
-        min_coords[0]:max_coords[0],
-        min_coords[1]:max_coords[1],
-        min_coords[2]:max_coords[2]
-    ].read().result()
 
 
 @timed_func
@@ -94,84 +80,8 @@ def transform_points_to_template_ants_space(
     return ants_pts
 
 
-@timed_func
-def apply_transforms_to_points(
-    points: np.ndarray,
-    affine_path: Path,
-    warp: tensorstore.TensorStore | np.ndarray,
-    template_parameters: AntsImageParameters,
-    warp_interpolation_padding: int = 5,
-    crop_warp_to_bounding_box: bool = True
-) -> np.ndarray:
-    """
-    Apply affine and non-linear transformations to points in input space.
-
-    Transforms points from input space to template space by applying inverse affine
-    transformation followed by displacement field warping.
-
-    Parameters
-    ----------
-    points : np.ndarray
-        Points in physical input space to be transformed.
-    affine_path:
-        Affine path
-    warp : tensorstore.TensorStore or np.ndarray
-        Displacement field for non-linear transformation.
-    template_parameters : AntsImageParameters
-        Template image parameters.
-    warp_interpolation_padding : int, default=5
-        Padding for warp interpolation.
-    crop_warp_to_bounding_box : bool, default=True
-        Whether to crop warp to bounding box of transformed points.
-
-    Returns
-    -------
-    np array of shape n points x 3. The 2nd dim is ordered ["ML", "AP", "DV"] according to light sheet template orientation.
-    The points are in physical space.
-    """
-    # apply inverse affine to points in input space
-    # this returns points in physical space
-    affine_transformed_points = aind_smartspim_transform_utils.utils.utils.apply_transforms_to_points(
-        ants_pts=points,
-        transforms=[str(affine_path)],
-        invert=(True,)
-    )
-
-    # convert physical points to voxels,
-    # so we can index into the displacement field
-    affine_transformed_voxels = convert_from_ants_space(
-        template_parameters=template_parameters,
-        physical_pts=affine_transformed_points
-    )
-
-    with timed():
-        if crop_warp_to_bounding_box:
-            warp = get_cropped_region_from_array(
-                array=warp,
-                points=affine_transformed_voxels,
-                padding=warp_interpolation_padding
-            )
-        else:
-            if isinstance(warp, TensorStore):
-                warp = _read_tensorstore_region(warp, slice(None), slice(None), slice(None))
-
-    displacements = interpolate(
-        array=warp,
-        grid=affine_transformed_voxels,
-        mode='bilinear'
-    )
-
-    # (1, 3, N, 1, 1) -> (N, 3)
-    displacements = displacements.squeeze().T.numpy()
-
-    # apply displacement vector to affine transformed points
-    transformed_points = affine_transformed_points + displacements
-
-    return transformed_points
-
-
 def get_cropped_region_from_array(
-    array: tensorstore.TensorStore | np.ndarray,
+    array: np.ndarray,
     points: np.ndarray,
     padding: int = 5
 ) -> np.ndarray:
@@ -223,19 +133,89 @@ def get_cropped_region_from_array(
         )
 
     # Crop the array
-    if isinstance(array, tensorstore.TensorStore):
-        cropped_array = _read_tensorstore_region(array, min_coords, max_coords)
-    else:
-        cropped_array = array[
-                       min_coords[0]:max_coords[0],
-                       min_coords[1]:max_coords[1],
-                       min_coords[2]:max_coords[2]
-                       ]
+    cropped_array = array[
+                   min_coords[0]:max_coords[0],
+                   min_coords[1]:max_coords[1],
+                   min_coords[2]:max_coords[2]
+                   ]
 
     # Adjust voxel coordinates relative to cropped region
     points -= min_coords
 
     return cropped_array
+
+@timed_func
+def apply_transforms_to_points(
+    points: np.ndarray,
+    affine_path: Path,
+    warp: tensorstore.TensorStore | np.ndarray,
+    template_parameters: AntsImageParameters,
+    crop_warp_to_bounding_box: bool = True,
+    warp_interpolation_padding: int = 5,
+) -> np.ndarray:
+    """
+    Apply affine and non-linear transformations to points in input space.
+
+    Transforms points from input space to template space by applying inverse affine
+    transformation followed by displacement field warping.
+
+    Parameters
+    ----------
+    points : np.ndarray
+        Points in physical input space to be transformed.
+    affine_path:
+        Affine path
+    warp : tensorstore.TensorStore or np.ndarray
+        Displacement field for non-linear transformation.
+    template_parameters : AntsImageParameters
+        Template image parameters.
+    warp_interpolation_padding : int, default=5
+        Padding for warp interpolation.
+    crop_warp_to_bounding_box : bool, default=True
+        Whether to crop warp to bounding box of transformed points.
+
+    Returns
+    -------
+    np array of shape n points x 3. The 2nd dim is ordered ["ML", "AP", "DV"] according to light sheet template orientation.
+    The points are in physical space.
+    """
+    # apply inverse affine to points in input space
+    # this returns points in physical space
+    affine_transformed_points = aind_smartspim_transform_utils.utils.utils.apply_transforms_to_points(
+        ants_pts=points,
+        transforms=[str(affine_path)],
+        invert=(True,)
+    )
+
+    # convert physical points to voxels,
+    # so we can index into the displacement field
+    affine_transformed_voxels = convert_from_ants_space(
+        template_parameters=template_parameters,
+        physical_pts=affine_transformed_points
+    )
+
+    with timed():
+        if crop_warp_to_bounding_box:
+            warp = get_cropped_region_from_array(
+                array=warp,
+                points=affine_transformed_voxels,
+                padding=warp_interpolation_padding
+            )
+
+    displacements = interpolate(
+        array=warp,
+        grid=affine_transformed_voxels,
+        mode='bilinear'
+    )
+
+    # (1, 3, N, 1, 1) -> (N, 3)
+    displacements = displacements.squeeze().T.numpy()
+
+    # apply displacement vector to affine transformed points
+    transformed_points = affine_transformed_points + displacements
+
+    return transformed_points
+
 
 def convert_from_ants_space_tensor(template_parameters: AntsImageParameters, physical_pts: torch.Tensor):
     """
@@ -265,53 +245,3 @@ def convert_from_ants_space_tensor(template_parameters: AntsImageParameters, phy
         pts[:, dim] /= template_parameters.scale[dim]
 
     return pts
-
-def map_points_to_left_hemisphere(
-        template_points: np.ndarray,
-        template_parameters: AntsImageParameters,
-        ml_dim_size: int
-):
-    """
-    Because which hemisphere a slice is in is ambiguous, this maps the ground truth template points
-    to the right hemisphere.
-
-    :param template_points:
-    :param template_parameters:
-    :param ml_dim_size: The ML dim size in template index space
-    :return:
-    """
-    points_index_space = template_points.copy()
-    for dim in range(template_parameters.dims):
-        points_index_space[:, :, dim] -= template_parameters.origin[dim]
-        points_index_space[:, :, dim] *= template_parameters.direction[dim]
-        points_index_space[:, :, dim] /= template_parameters.scale[dim]
-
-    # checks whether the ML points are > halfway in index space. the LS template iS RAS.
-    # therefore this checks whether points are in left hemisphere
-    need_mirror = (points_index_space[:, :, 0] > ml_dim_size / 2).all()
-    if need_mirror:
-        # map to right hemisphere
-        template_points = mirror_points(points=np.permute_dims(np.expand_dims(template_points, axis=0), (0, 3, 1, 2)), template_parameters=template_parameters, ml_dim_size=ml_dim_size)
-        template_points = np.permute_dims(template_points.squeeze(0), (1, 2, 0))
-    return template_points
-
-
-def mirror_points(points: torch.Tensor | np.ndarray, template_parameters: AntsImageParameters, ml_dim_size: int):
-    flipped = points.clone() if isinstance(points, torch.Tensor) else points.copy()
-
-    # 1. Convert to index space
-    for dim in range(template_parameters.dims):
-        flipped[:, dim] -= template_parameters.origin[dim]
-        flipped[:, dim] *= template_parameters.direction[dim]
-        flipped[:, dim] /= template_parameters.scale[dim]
-
-    # 2. Flip ML in index space
-    flipped[:, 0] = ml_dim_size-1 - flipped[:, 0]
-
-    # 3. Convert back to physical
-    for dim in range(template_parameters.dims):
-        flipped[:, dim] *= template_parameters.scale[dim]
-        flipped[:, dim] *= template_parameters.direction[dim]
-        flipped[:, dim] += template_parameters.origin[dim]
-
-    return flipped

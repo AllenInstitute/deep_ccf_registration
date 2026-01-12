@@ -7,8 +7,6 @@ from unittest.mock import Mock, MagicMock, patch
 
 from deep_ccf_registration.datasets.slice_dataset import (
     SliceDataset,
-    TissueBoundingBox,
-    TissueBoundingBoxes,
     Patch,
     TrainMode,
     _create_coordinate_dataframe,
@@ -17,7 +15,7 @@ from deep_ccf_registration.datasets.slice_dataset import (
 from deep_ccf_registration.metadata import (
     AcquisitionAxis,
     SliceOrientation,
-    SubjectMetadata,
+    SubjectMetadata, TissueBoundingBox, TissueBoundingBoxes,
 )
 
 

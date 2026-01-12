@@ -2,9 +2,21 @@ from enum import Enum
 from pathlib import Path
 from typing import Optional
 
-from aind_smartspim_transform_utils.utils.utils import AcquisitionDirection, AcqusitionAxesName
 from pydantic import BaseModel
 
+
+class AcquisitionDirection(Enum):
+    LEFT_TO_RIGHT = 'Left_to_right'
+    RIGHT_TO_LEFT = 'Right_to_left'
+    POSTERIOR_TO_ANTERIOR = 'Posterior_to_anterior'
+    ANTERIOR_TO_POSTERIOR = 'Anterior_to_posterior'
+    SUPERIOR_TO_INFERIOR = 'Superior_to_inferior'
+    INFERIOR_TO_SUPERIOR = 'Inferior_to_superior'
+
+class AcqusitionAxesName(Enum):
+    X = 'X'
+    Y = 'Y'
+    Z = 'Z'
 
 class AcquisitionAxis(BaseModel):
     dimension: int
@@ -21,17 +33,35 @@ class SliceOrientation(Enum):
 class SubjectMetadata(BaseModel):
     subject_id: str
     stitched_volume_path: str | Path
+    template_points_path: Optional[str] = None
     axes: list[AcquisitionAxis]
     registered_shape: tuple[int, int, int]
     registration_downsample: int
-    ls_to_template_affine_matrix_path: Path
-    # the inverse warp was converted to ome-zarr via `point_transformation_to_ome_zarr.py`
-    ls_to_template_inverse_warp_path: str | Path
-    # this is the original niftii inverse warp just in case
-    ls_to_template_inverse_warp_path_original: Optional[Path] = None
     # The index that splits the 2 hemispheres in voxels the same dim as the sagittal axis in the registered volume
     # obtained via `get_input_space_midline.py`
     sagittal_midline: Optional[int] = None
+
+    def get_template_points_path(self) -> str:
+        """
+        If template_points_path is not passed, infer it from the stitched_path root prefix
+
+        :return:
+        """
+        if self.template_points_path is not None:
+            template_points_path = self.template_points_path
+        else:
+            # Extract the prefix from stitched_volume_path
+            # e.g., s3://aind-open-data/SmartSPIM_806624_2025-08-27_15-42-18_stitched_2025-08-29_22-47-08/image_tile_fusing/OMEZarr/Ex_639_Em_680.zarr
+            # extract: SmartSPIM_806624_2025-08-27_15-42-18_stitched_2025-08-29_22-47-08
+            if self.stitched_volume_path.startswith('s3://'):
+                # Split by '/' and get the 4th part (index 3) which is the prefix
+                parts = self.stitched_volume_path.split('/')
+                prefix = parts[3]  # SmartSPIM_806624_2025-08-27_15-42-18_stitched_2025-08-29_22-47-08
+            else:
+                raise ValueError('template_points_path not passed and stitched_volume_path is not an s3 uri. Cannot infer template_points_path')
+            # the template points calculated by scripts/create_point_map.py
+            template_points_path = f"s3://marmot-development-802451596237-us-west-2/smartspim-registration/{prefix}/{self.subject_id}_template_points.zarr"
+        return template_points_path
 
     def get_slice_shape(self, orientation: SliceOrientation):
         axes_except_slice = [ax for ax in self.axes if ax != self.get_slice_axis(orientation=orientation)]
@@ -70,3 +100,18 @@ class SubjectMetadata(BaseModel):
         else:
             raise NotImplementedError(f'{orientation} not supported')
         return slice_axis
+
+
+class TissueBoundingBox(BaseModel):
+    """
+    start y, x and width, height of tissue bounding boxes, obtained via
+    `get_tissue_bounding_box.py`
+    """
+    y: int
+    x: int
+    width: int
+    height: int
+
+
+class TissueBoundingBoxes(BaseModel):
+    bounding_boxes: dict[str, list[Optional[TissueBoundingBox]]]

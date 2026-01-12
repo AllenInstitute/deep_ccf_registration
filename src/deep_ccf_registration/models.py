@@ -1,6 +1,6 @@
+import monai.networks.nets
 import torch
 import torch.nn as nn
-from monai.networks.nets import UNet
 from typing import Optional
 
 
@@ -25,7 +25,7 @@ class UNetWithRegressionHeads(nn.Module):
         channels: tuple[int, ...] = (32, 64, 128, 256, 512, 1024),
         strides: tuple[int, ...] = (2, 2, 2, 2, 2, 2),
         out_coords: int = 3,
-        include_tissue_mask: bool = True,
+        include_tissue_mask: bool = False,
         head_size: str = "small",
         use_positional_encoding: bool = False,
         pos_encoding_channels: int = 16,
@@ -57,7 +57,7 @@ class UNetWithRegressionHeads(nn.Module):
         self.pos_encoding_channels = pos_encoding_channels
 
         # UNet backbone for feature extraction
-        self.unet_backbone = UNet(
+        self.unet_backbone = monai.networks.nets.UNet(
             spatial_dims=spatial_dims,
             in_channels=in_channels,
             out_channels=feature_channels + 1 if include_tissue_mask else feature_channels,
