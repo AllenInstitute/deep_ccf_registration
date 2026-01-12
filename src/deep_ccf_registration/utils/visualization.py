@@ -3,12 +3,14 @@ from typing import Optional
 import numpy as np
 import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
+from aind_smartspim_transform_utils.utils.utils import convert_from_ants_space
 from matplotlib import pyplot as plt
+from scipy.interpolate import griddata
+import seaborn as sns
 
+from deep_ccf_registration.datasets.transforms import TemplateParameters
 from deep_ccf_registration.metrics.point_wise_rmse import PointwiseRMSE, PointwiseMAE
-from deep_ccf_registration.utils.transforms import convert_from_ants_space_tensor
-from deep_ccf_registration.utils.utils import fetch_complete_colormap, visualize_ccf_annotations, \
-    get_ccf_annotations
+from deep_ccf_registration.utils.utils import fetch_complete_colormap, visualize_ccf_annotations
 
 
 def create_diagnostic_image(
@@ -164,54 +166,167 @@ def create_diagnostic_image(
 
 
 def viz_sample(
-    ls_template_parameters: AntsImageParameters,
-    pred_coords: torch.Tensor,
-    gt_coords: torch.Tensor,
-    ccf_annotations: np.ndarray,
-    iteration: int,
-    pad_mask: torch.Tensor,
-    input_image: torch.Tensor,
-    slice_idx: int,
-    errors: np.ndarray,
-    pred_tissue_mask: Optional[torch.Tensor] = None,
-    tissue_mask: Optional[torch.Tensor] = None,
-    exclude_background: bool = False
+    input_image: np.ndarray,
+    predicted_template_points: np.ndarray,
+    gt_template_points: np.ndarray,
+    ls_template_info: TemplateParameters,
+    mask: np.ndarray,
+    template_parameters: AntsImageParameters,
 ):
-    pred_index_space = convert_from_ants_space_tensor(template_parameters=ls_template_parameters,
-                                                      physical_pts=pred_coords.permute(
-                                                          (1, 2, 0)).reshape((-1, 3)))
-    gt_index_space = convert_from_ants_space_tensor(template_parameters=ls_template_parameters,
-                                                    physical_pts=gt_coords.permute(
-                                                        (1, 2, 0)).reshape((-1, 3)))
+    """
+    Visualize predicted vs ground truth registration.
+    """
+    intensities = input_image.flatten()
 
-    pred_ccf_annot = get_ccf_annotations(ccf_annotations, pred_index_space,
-                                         return_np=False).reshape(
-        pred_coords.shape[1:])
-    if exclude_background:
-        pred_ccf_annot[~tissue_mask] = 0
-    else:
-        pred_ccf_annot[~pad_mask] = 0
-    gt_ccf_annot = get_ccf_annotations(ccf_annotations, gt_index_space, return_np=False).reshape(
-        gt_coords.shape[1:])
+    valid_mask = mask.flatten()
+    intensities = intensities[valid_mask]
+    predicted_template_points = predicted_template_points[valid_mask]
+    gt_template_points = gt_template_points[valid_mask]
 
-    if exclude_background:
-        gt_ccf_annot[~tissue_mask] = 0
-    else:
-        gt_ccf_annot[~pad_mask] = 0
-
-
-    fig = create_diagnostic_image(
-        input_image=input_image,
-        slice_idx=slice_idx,
-        errors=errors,
-        pred_ccf_annotations=pred_ccf_annot.cpu().numpy(),
-        gt_ccf_annotations=gt_ccf_annot.cpu().numpy(),
-        iteration=iteration,
-        pred_template_points=pred_coords,
-        gt_template_points=gt_coords,
-        pad_mask=pad_mask.cpu().bool().numpy(),
-        exclude_background=exclude_background,
-        tissue_mask=tissue_mask.cpu().bool().numpy() if tissue_mask is not None else None,
-        pred_mask=pred_tissue_mask.cpu().bool().numpy() if pred_tissue_mask is not None else None,
+    pred_template_points_index_space = convert_from_ants_space(
+        template_parameters=template_parameters,
+        physical_pts=predicted_template_points
     )
+    gt_template_points_index_space = convert_from_ants_space(
+        template_parameters=template_parameters,
+        physical_pts=gt_template_points
+    )
+
+    ML_axis, DV_axis, SI_axis = 0, 1, 2
+
+    # Template grid for SI-DV plane
+    si_grid = np.arange(ls_template_info.shape[SI_axis])
+    dv_grid = np.arange(ls_template_info.shape[DV_axis])
+    SI, DV = np.meshgrid(si_grid, dv_grid)
+
+    def rasterize(pts, values=intensities):
+        return griddata(pts[:, [SI_axis, DV_axis]], values, (SI, DV), method='linear')
+
+    # Rasterize both predicted and GT
+    predicted_raster = rasterize(pred_template_points_index_space)
+    gt_raster = rasterize(gt_template_points_index_space)
+
+    # Compute displacement/error
+    displacement = predicted_template_points - gt_template_points
+    displacement *= 1000  # convert to microns
+
+    fig = plt.figure(figsize=(24, 10))
+
+    # ===== Row 1: 2D Rasterized Images =====
+
+    sns.set_style("darkgrid")
+
+    # Ground truth registration
+    ax1 = fig.add_subplot(2, 5, 1)
+    ax1.imshow(gt_raster, origin='lower', cmap='gray')
+    ax1.set_title('Ground Truth Registration')
+    ax1.set_xlabel('SI')
+    ax1.set_ylabel('DV')
+
+    # Predicted registration
+    ax2 = fig.add_subplot(2, 5, 2)
+    ax2.imshow(predicted_raster, origin='lower', cmap='gray')
+    ax2.set_title('Predicted Registration')
+    ax2.set_xlabel('SI')
+    ax2.set_ylabel('DV')
+
+    # Overlay comparison
+    ax3 = fig.add_subplot(2, 5, 3)
+    ax3.imshow(gt_raster, origin='lower', cmap='gray', alpha=0.7)
+    ax3.imshow(predicted_raster, origin='lower', cmap='Reds', alpha=0.5)
+    ax3.set_title('GT (gray) vs Predicted (red)')
+    ax3.set_xlabel('SI')
+    ax3.set_ylabel('DV')
+
+    # SI displacement component
+    ax5 = fig.add_subplot(2, 5, 4)
+    si_error_image = rasterize(gt_template_points_index_space, values=displacement[:, SI_axis])
+    im = ax5.imshow(si_error_image, origin='lower', cmap='RdBu_r',
+                    vmin=-np.percentile(np.abs(displacement[:, SI_axis]), 95),
+                    vmax=np.percentile(np.abs(displacement[:, SI_axis]), 95))
+    ax5.set_title('SI Error')
+    ax5.set_xlabel('SI')
+    ax5.set_ylabel('DV')
+    plt.colorbar(im, ax=ax5, label='SI (microns)')
+
+    # DV displacement component
+    ax6 = fig.add_subplot(2, 5, 5)
+    dv_error_image = rasterize(gt_template_points_index_space, values=displacement[:, DV_axis])
+    im = ax6.imshow(dv_error_image, origin='lower', cmap='RdBu_r',
+                    vmin=-np.percentile(np.abs(displacement[:, DV_axis]), 95),
+                    vmax=np.percentile(np.abs(displacement[:, DV_axis]), 95))
+    ax6.set_title('DV Error')
+    ax6.set_xlabel('SI')
+    ax6.set_ylabel('DV')
+    plt.colorbar(im, ax=ax6, label='DV (microns)')
+
+    # ===== Row 2: 3D Visualizations =====
+
+    step = 10
+    idx = np.arange(0, len(intensities), step)
+
+    # Use template shape for axis limits
+    ml_lim = [0, ls_template_info.shape[ML_axis]]
+    si_lim = [0, ls_template_info.shape[SI_axis]]
+    dv_lim = [0, ls_template_info.shape[DV_axis]]
+
+    # Ground truth 3D
+    ax7 = fig.add_subplot(2, 5, 6, projection='3d')
+    ax7.scatter(gt_template_points_index_space[idx, ML_axis],
+                gt_template_points_index_space[idx, SI_axis],
+                gt_template_points_index_space[idx, DV_axis],
+                c=intensities[idx], cmap='gray', s=0.5)
+    ax7.view_init(elev=20, azim=45)
+    ax7.set_xlim(ml_lim)
+    ax7.set_ylim(si_lim)
+    ax7.set_zlim(dv_lim)
+    ax7.set_xlabel('ML')
+    ax7.set_ylabel('SI')
+    ax7.set_zlabel('DV')
+    ax7.set_title('Ground Truth 3D')
+    ax7.set_box_aspect([ls_template_info.shape[ML_axis],
+                        ls_template_info.shape[SI_axis],
+                        ls_template_info.shape[DV_axis]])
+
+    # Predicted 3D
+    ax8 = fig.add_subplot(2, 5, 7, projection='3d')
+    ax8.scatter(pred_template_points_index_space[idx, ML_axis],
+                pred_template_points_index_space[idx, SI_axis],
+                pred_template_points_index_space[idx, DV_axis],
+                c=intensities[idx], cmap='gray', s=0.5)
+    ax8.view_init(elev=20, azim=45)
+    ax8.set_xlim(ml_lim)
+    ax8.set_ylim(si_lim)
+    ax8.set_zlim(dv_lim)
+    ax8.set_xlabel('ML')
+    ax8.set_ylabel('SI')
+    ax8.set_zlabel('DV')
+    ax8.set_title('Predicted 3D')
+    ax8.set_box_aspect([ls_template_info.shape[ML_axis],
+                        ls_template_info.shape[SI_axis],
+                        ls_template_info.shape[DV_axis]])
+
+    # ML displacement colored 3D
+    ax10 = fig.add_subplot(2, 5, 8, projection='3d')
+    ml_vmax = np.percentile(np.abs(displacement[:, ML_axis]), 95)
+    sc = ax10.scatter(gt_template_points_index_space[idx, ML_axis],
+                      gt_template_points_index_space[idx, SI_axis],
+                      gt_template_points_index_space[idx, DV_axis],
+                      c=displacement[idx, ML_axis],
+                      cmap='RdBu_r', s=0.5, vmin=-ml_vmax, vmax=ml_vmax)
+    ax10.view_init(elev=20, azim=45)
+    ax10.set_xlim(ml_lim)
+    ax10.set_ylim(si_lim)
+    ax10.set_zlim(dv_lim)
+    ax10.set_xlabel('ML')
+    ax10.set_ylabel('SI')
+    ax10.set_zlabel('DV')
+    ax10.set_title('ML Error')
+    ax10.set_box_aspect([ls_template_info.shape[ML_axis],
+                         ls_template_info.shape[SI_axis],
+                         ls_template_info.shape[DV_axis]])
+    plt.colorbar(sc, ax=ax10, label='ML (microns)', shrink=0.5)
+
+    plt.tight_layout()
+
     return fig

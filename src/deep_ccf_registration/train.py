@@ -161,7 +161,7 @@ def _evaluate(
                     template_parameters=ls_template_parameters,
                 )
 
-            pred_upsample = _resize_to_target(pred=pred, target_template_points=target_template_points)
+            pred_upsample = _resize_to_target(x=pred, target_template_points=target_template_points)
             rmse_downsample = RMSE()(pred=pred, target=target_template_points_downsample, mask=pad_masks_downsample)
             rmse_raw = RMSE()(pred=pred_upsample, target=target_template_points, mask=pad_masks)
 
@@ -169,7 +169,7 @@ def _evaluate(
             rmses_raw.append(rmse_raw.item())
 
             if enable_viz and len(collected_samples) < viz_sample_count:
-                errors = (pred - target_template_points_downsample) ** 2
+                errors = (pred_upsample - target_template_points) ** 2
                 slice_indices = batch["slice_indices"]
                 patch_ys = batch["patch_ys"]
                 patch_xs = batch["patch_xs"]
@@ -179,10 +179,10 @@ def _evaluate(
                 take = min(remaining, input_images.shape[0])
                 for sample_idx in range(take):
                     collected_samples.append({
-                        "input_image": input_images[sample_idx].detach().cpu().squeeze(0),
-                        "pred_coords": pred[sample_idx].detach().cpu(),
-                        "gt_coords": target_template_points_downsample[sample_idx].detach().cpu(),
-                        "pad_mask": pad_masks_downsample[sample_idx].detach().cpu(),
+                        "input_image": _resize_to_target(x=input_images[sample_idx].unsqueeze(0), target_template_points=target_template_points[sample_idx]).squeeze(),
+                        "pred_coords": pred_upsample[sample_idx].detach().cpu(),
+                        "gt_coords": target_template_points[sample_idx].detach().cpu(),
+                        "pad_mask": pad_masks[sample_idx].detach().cpu(),
                         "errors": errors[sample_idx].detach().cpu().numpy(),
                         "slice_idx": int(slice_indices[sample_idx].item()),
                         "patch_y": int(patch_ys[sample_idx].item()),
@@ -200,18 +200,12 @@ def _evaluate(
         iteration = global_step or 0
         for idx, sample in enumerate(collected_samples):
             fig = viz_sample(
-                ls_template_parameters=ls_template_parameters,
-                pred_coords=sample["pred_coords"],
-                gt_coords=sample["gt_coords"],
-                ccf_annotations=ccf_annotations,
-                iteration=iteration,
-                pad_mask=sample["pad_mask"],
-                input_image=sample["input_image"],
-                slice_idx=sample["slice_idx"],
-                errors=sample["errors"],
-                pred_tissue_mask=None,
-                tissue_mask=None, # TODO
-                exclude_background=exclude_background_pixels,
+                predicted_template_points=sample["pred_coords"].moveaxis(0, -1).view(-1, 3).cpu().numpy(),
+                gt_template_points=sample["gt_coords"].moveaxis(0, -1).view(-1, 3).cpu().numpy(),
+                ls_template_info=ls_template_parameters,
+                input_image=sample["input_image"].cpu().numpy(),
+                mask=sample['pad_mask'].cpu().numpy(),
+                template_parameters=ls_template_parameters,
             )
             fig_filename = (
                 f"subject_{sample['subject_id']}_slice_{sample['slice_idx']}"
@@ -230,16 +224,16 @@ def _evaluate(
 
 
 def _resize_to_target(
-    pred: torch.Tensor,
+    x: torch.Tensor,
     target_template_points: torch.Tensor,
 ) -> torch.Tensor:
     """Ensure predictions share spatial size with targets."""
     target_size = target_template_points.shape[-2:]
-    if pred.shape[-2:] == target_size:
-        return pred
+    if x.shape[-2:] == target_size:
+        return x
 
-    pred = F.interpolate(pred, size=target_size, mode="bilinear", align_corners=False)
-    return pred
+    x = F.interpolate(x, size=target_size, mode="bilinear", align_corners=False)
+    return x
 
 
 def _resize_pad_masks_from_sizes(
