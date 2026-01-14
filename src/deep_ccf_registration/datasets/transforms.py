@@ -1,3 +1,4 @@
+import os
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -6,6 +7,7 @@ import albumentations
 import cv2
 import numpy as np
 import torch
+from loguru import logger
 from skimage.exposure import rescale_intensity
 
 from deep_ccf_registration.configs.train_config import TrainConfig
@@ -109,7 +111,7 @@ class OrientationNormalization(albumentations.DualTransform):
 
     def apply_to_keypoints(self, keypoints: np.ndarray, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis, orientation: SliceOrientation,  **params: Any) -> np.ndarray:
         return self._normalize_orientation(x=keypoints, acquisition_axes=acquisition_axes, slice_axis=slice_axis, orientation=orientation)
-    
+
     def _normalize_orientation(self, x: np.ndarray, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis, orientation: SliceOrientation) -> np.ndarray:
         desired_orientation: list[AcquisitionDirection] = self._normalize_orientation_map[orientation]
         acquisition_axes = sorted(acquisition_axes, key=lambda x: x.dimension)
@@ -277,15 +279,23 @@ def map_points_to_right_hemisphere(
     :param template_parameters:
     :return:
     """
-    points_index_space = template_points.copy()
-    for dim in range(template_parameters.dims):
-        points_index_space[:, :, dim] -= template_parameters.origin[dim]
-        points_index_space[:, :, dim] *= template_parameters.direction[dim]
-        points_index_space[:, :, dim] /= template_parameters.scale[dim]
+    template_points = template_points.copy()
 
-    # checks whether the ML points are > halfway in index space. the LS template iS RAS.
+    # convert to index space
+    for dim in range(template_parameters.dims):
+        template_points[:, :, dim] -= template_parameters.origin[dim]
+        template_points[:, :, dim] *= template_parameters.direction[dim]
+        template_points[:, :, dim] /= template_parameters.scale[dim]
+
+    # checks whether the ML points are < halfway in index space. the LS template iS RAS.
     # therefore this checks whether points are in left hemisphere
-    need_mirror = (points_index_space[:, :, 0] > template_parameters.shape[0] / 2).all()
+    need_mirror = (template_points[:, :, 0] < template_parameters.shape[0] / 2).all()
+    if os.environ.get('LOG_LEVEL') == 'DEBUG':
+        logger.debug(
+            f"ML index mean: {template_points[:, :, 0].mean():.1f}, "
+            f"ML index range: {template_points[:, :, 0].min():.1f} - {template_points[:, :, 0].max():.1f} "
+            f"midpoint: {template_parameters.shape[0] / 2:.1f}, "
+            f"need_mirror: {need_mirror}")
     if need_mirror:
         # map to right hemisphere
         template_points = mirror_points(points=template_points, template_parameters=template_parameters)
