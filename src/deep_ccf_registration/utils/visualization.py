@@ -5,6 +5,7 @@ import torch
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from aind_smartspim_transform_utils.utils.utils import convert_from_ants_space
 from matplotlib import pyplot as plt
+from matplotlib.lines import Line2D
 from scipy.interpolate import griddata
 import seaborn as sns
 
@@ -172,6 +173,8 @@ def viz_sample(
     ls_template_info: TemplateParameters,
     mask: np.ndarray,
     template_parameters: AntsImageParameters,
+    predict_tissue_mask: bool = False,
+    predicted_tissue_masks: Optional[np.ndarray] = None,
 ):
     """
     Visualize predicted vs ground truth registration.
@@ -240,7 +243,7 @@ def viz_sample(
 
     # SI displacement component
     ax5 = fig.add_subplot(2, 5, 4)
-    si_error_image = rasterize(gt_template_points_index_space, values=displacement[:, SI_axis])
+    si_error_image = rasterize(pred_template_points_index_space, values=displacement[:, SI_axis])
     im = ax5.imshow(si_error_image, origin='lower', cmap='RdBu_r',
                     vmin=-np.percentile(np.abs(displacement[:, SI_axis]), 95),
                     vmax=np.percentile(np.abs(displacement[:, SI_axis]), 95))
@@ -251,7 +254,7 @@ def viz_sample(
 
     # DV displacement component
     ax6 = fig.add_subplot(2, 5, 5)
-    dv_error_image = rasterize(gt_template_points_index_space, values=displacement[:, DV_axis])
+    dv_error_image = rasterize(pred_template_points_index_space, values=displacement[:, DV_axis])
     im = ax6.imshow(dv_error_image, origin='lower', cmap='RdBu_r',
                     vmin=-np.percentile(np.abs(displacement[:, DV_axis]), 95),
                     vmax=np.percentile(np.abs(displacement[:, DV_axis]), 95))
@@ -309,9 +312,9 @@ def viz_sample(
     # ML displacement colored 3D
     ax10 = fig.add_subplot(2, 5, 8, projection='3d')
     ml_vmax = np.percentile(np.abs(displacement[:, ML_axis]), 95)
-    sc = ax10.scatter(gt_template_points_index_space[idx, ML_axis],
-                      gt_template_points_index_space[idx, SI_axis],
-                      gt_template_points_index_space[idx, DV_axis],
+    sc = ax10.scatter(pred_template_points_index_space[idx, ML_axis],
+                      pred_template_points_index_space[idx, SI_axis],
+                      pred_template_points_index_space[idx, DV_axis],
                       c=displacement[idx, ML_axis],
                       cmap='RdBu_r', s=0.5, vmin=-ml_vmax, vmax=ml_vmax)
     ax10.view_init(elev=20, azim=45)
@@ -326,6 +329,51 @@ def viz_sample(
                          ls_template_info.shape[SI_axis],
                          ls_template_info.shape[DV_axis]])
     plt.colorbar(sc, ax=ax10, label='ML (microns)', shrink=0.5)
+
+    # Tissue mask comparison (if enabled)
+    if predict_tissue_mask and predicted_tissue_masks is not None:
+        # Get predicted and GT masks
+        predicted_mask_flat = predicted_tissue_masks.flatten()[valid_mask]
+        gt_mask_flat = mask.flatten()[valid_mask]  # GT is the input mask
+
+        # Rasterize masks
+        predicted_mask_raster = rasterize(gt_template_points_index_space,
+                                          values=predicted_mask_flat.astype(float))
+        gt_mask_raster = rasterize(gt_template_points_index_space,
+                                   values=gt_mask_flat.astype(float))
+
+        # Tissue mask overlay
+        ax11 = fig.add_subplot(2, 5, 8)
+        # Create RGB image for overlay
+        overlay = np.zeros((*gt_mask_raster.shape, 3))
+        overlay[gt_mask_raster > 0.5] = [0, 1, 0]  # GT in green
+        overlay[predicted_mask_raster > 0.5] = [1, 0, 0]  # Predicted in red
+        overlay[(gt_mask_raster > 0.5) & (predicted_mask_raster > 0.5)] = [1, 1,
+                                                                           0]  # Overlap in yellow
+
+        ax11.imshow(overlay, origin='lower')
+        ax11.set_title('Tissue Mask: GT (green) vs Pred (red)')
+        ax11.set_xlabel('SI')
+        ax11.set_ylabel('DV')
+
+        # Compute mask metrics
+        gt_mask_binary = gt_mask_flat > 0.5
+        pred_mask_binary = predicted_mask_flat > 0.5
+        tp = np.sum(gt_mask_binary & pred_mask_binary)
+        fp = np.sum(~gt_mask_binary & pred_mask_binary)
+        fn = np.sum(gt_mask_binary & ~pred_mask_binary)
+
+        iou = tp / (tp + fp + fn) if (tp + fp + fn) > 0 else 0
+        dice = 2 * tp / (2 * tp + fp + fn) if (2 * tp + fp + fn) > 0 else 0
+
+        # Difference visualization
+        ax12 = fig.add_subplot(2, 5, 9)
+        diff = predicted_mask_raster - gt_mask_raster
+        im = ax12.imshow(diff, origin='lower', cmap='RdBu_r', vmin=-1, vmax=1)
+        ax12.set_title(f'Mask Diff (IoU={iou:.3f}, Dice={dice:.3f})')
+        ax12.set_xlabel('SI')
+        ax12.set_ylabel('DV')
+        plt.colorbar(im, ax=ax12, label='Pred - GT')
 
     plt.tight_layout()
 
