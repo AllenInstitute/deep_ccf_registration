@@ -56,11 +56,13 @@ class UNetWithRegressionHeads(nn.Module):
         self.use_positional_encoding = use_positional_encoding
         self.pos_encoding_channels = pos_encoding_channels
 
+        feature_channels = feature_channels + 1 if include_tissue_mask else feature_channels
+
         # UNet backbone for feature extraction
         self.unet_backbone = monai.networks.nets.UNet(
             spatial_dims=spatial_dims,
             in_channels=in_channels,
-            out_channels=feature_channels + 1 if include_tissue_mask else feature_channels,
+            out_channels=feature_channels,
             dropout=dropout,
             channels=channels,
             strides=strides,

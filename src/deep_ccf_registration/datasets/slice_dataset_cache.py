@@ -8,12 +8,43 @@ import numpy as np
 import tensorstore
 import torch
 from loguru import logger
+from scipy.ndimage import map_coordinates
 from torch.utils.data import IterableDataset, get_worker_info
 
 from deep_ccf_registration.datasets.transforms import TemplateParameters, map_points_to_right_hemisphere
 from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, TissueBoundingBox
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 
+
+def convert_from_ants_space_tensor(template_parameters: TemplateParameters,
+                                   physical_pts: torch.Tensor):
+    """
+    Convert points from the physical space of an ANTsImage and places
+    them into the "index" space required for visualizing
+
+    Parameters
+    ----------
+    template_parameters : `AntsImageParameters`
+        parameters of the ANTsImage physical space from where you are
+        converting the points
+    physical_pts : torch.Tensor
+        the location of cells in physical space
+
+    Returns
+    -------
+    pts : np.ndarray
+        pts converted for ANTsPy physical space to "index" space
+
+    """
+
+    pts = physical_pts.clone()
+
+    for dim in range(template_parameters.dims):
+        pts[:, dim] -= template_parameters.origin[dim]
+        pts[:, dim] *= template_parameters.direction[dim]
+        pts[:, dim] /= template_parameters.scale[dim]
+
+    return pts
 
 @dataclass(frozen=True)
 class PatchSample:
@@ -26,6 +57,7 @@ class PatchSample:
     worker_id: int = -1
     orientation: str = ""
     subject_id: str = ""
+    tissue_mask: Optional[np.ndarray] = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for batch collation."""
@@ -61,6 +93,7 @@ class SliceDatasetCache(IterableDataset):
         tissue_bboxes: Sequence[Optional[TissueBoundingBox]],
         template_parameters: TemplateParameters,
         is_train: bool,
+        ccf_annotations: np.ndarray,
         sample_fraction: float = 0.25,
         orientation: Optional[SliceOrientation] = None,
         tensorstore_aws_credentials_method: str = "anonymous",
@@ -70,6 +103,7 @@ class SliceDatasetCache(IterableDataset):
         transform: Optional[Callable] = None,
         max_chunks_per_dataset: Optional[int] = 1,
         forced_coords: Optional[tuple[str, int, str, int, int]] = None,
+        include_tissue_mask: bool = False
     ):
         super().__init__()
 
@@ -114,6 +148,8 @@ class SliceDatasetCache(IterableDataset):
             raise ValueError("max_chunks_per_dataset must be >= 1 or None")
         self._max_chunks_per_dataset = max_chunks_per_dataset
         self._template_parameters = template_parameters
+        self._ccf_annotations = ccf_annotations
+        self._include_tissue_mask = include_tissue_mask
 
     def _get_volume(self) -> tensorstore.TensorStore:
         if self._volume is None:
@@ -351,10 +387,22 @@ class SliceDatasetCache(IterableDataset):
                 template_parameters=self._template_parameters
             )
 
+            if self._include_tissue_mask:
+                tissue_mask = (map_coordinates(
+                    self._ccf_annotations,
+                    convert_from_ants_space_tensor(template_parameters=self._template_parameters, physical_pts=torch.from_numpy(template_patch).view(-1, 3)).T,
+                    order=0, # nearest
+                    mode='constant',
+                    cval=0  # Value for out-of-bounds
+                ) != 0).astype('uint8').reshape(template_patch.shape[:-1])
+            else:
+                tissue_mask = None
+
             if self._transform is not None:
-                transforms = self._transform(image=patch, keypoints=template_patch, slice_axis=slice_axis, acquisition_axes=self._metadata.axes, orientation=self._orientation)
+                transforms = self._transform(image=patch, keypoints=template_patch, mask=tissue_mask, slice_axis=slice_axis, acquisition_axes=self._metadata.axes, orientation=self._orientation)
                 patch = transforms['image']
                 template_patch = transforms['keypoints']
+                tissue_mask = transforms['mask']
 
             global_slice_idx = slice_start + local_idx
             patches.append(
@@ -368,6 +416,7 @@ class SliceDatasetCache(IterableDataset):
                             worker_id=self._worker_id,
                             orientation=self._orientation.value,
                             subject_id=self._metadata.subject_id,
+                            tissue_mask=tissue_mask,
                 )
             )
 
@@ -416,6 +465,7 @@ class SliceDatasetCache(IterableDataset):
                 worker_id=patch.worker_id,
                 orientation=patch.orientation,
                 subject_id=patch.subject_id,
+                tissue_mask=patch.tissue_mask,
             )
             self._patch_buffer.append(copied)
 
@@ -536,8 +586,10 @@ def collate_patch_samples(samples: list[PatchSample], patch_size: int, is_train:
     # in train mode we resize the target. For inference we don't modify this size
     template_points = np.zeros((batch_size, 3, target_h if is_train else patch_size, target_w if is_train else patch_size), dtype=template_dtype)
     pad_masks = np.zeros((batch_size, target_h if is_train else patch_size, target_w if is_train else patch_size), dtype=np.uint8)
+    tissue_masks = np.zeros((batch_size, target_h if is_train else patch_size, target_w if is_train else patch_size), dtype=np.float32)
     pad_mask_heights = np.zeros(batch_size, dtype=np.int32)
     pad_mask_widths = np.zeros(batch_size, dtype=np.int32)
+
 
     for idx, sample in enumerate(samples):
         img = sample.data
@@ -554,9 +606,13 @@ def collate_patch_samples(samples: list[PatchSample], patch_size: int, is_train:
         pad_mask_heights[idx] = template_points_h
         pad_mask_widths[idx] = template_points_w
 
+        if sample.tissue_mask is not None:
+            tissue_masks[idx, :sample_template_points.shape[1], :sample_template_points.shape[2]] = sample.tissue_mask
+
     return {
         "input_images": torch.from_numpy(images),
         "target_template_points": torch.from_numpy(template_points),
+        "tissue_masks": torch.from_numpy(tissue_masks),
         "pad_masks": torch.from_numpy(pad_masks.astype(bool)),
         "pad_mask_heights": torch.from_numpy(pad_mask_heights),
         "pad_mask_widths": torch.from_numpy(pad_mask_widths),
