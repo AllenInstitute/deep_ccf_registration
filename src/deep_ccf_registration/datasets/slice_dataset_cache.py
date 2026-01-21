@@ -10,7 +10,8 @@ import torch
 from loguru import logger
 from torch.utils.data import IterableDataset, get_worker_info
 
-from deep_ccf_registration.datasets.transforms import TemplateParameters, map_points_to_right_hemisphere
+from deep_ccf_registration.datasets.transforms import map_points_to_right_hemisphere
+from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, TissueBoundingBox
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 

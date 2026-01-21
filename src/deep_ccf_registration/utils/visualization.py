@@ -9,7 +9,7 @@ from matplotlib.lines import Line2D
 from scipy.interpolate import griddata
 import seaborn as sns
 
-from deep_ccf_registration.datasets.transforms import TemplateParameters
+from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.metrics.point_wise_rmse import PointwiseRMSE, PointwiseMAE
 from deep_ccf_registration.utils.utils import fetch_complete_colormap, visualize_ccf_annotations
 

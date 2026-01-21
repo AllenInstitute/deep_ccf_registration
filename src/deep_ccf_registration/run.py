@@ -26,7 +26,8 @@ from deep_ccf_registration.datasets.slice_dataset_cache import (
     ShardedMultiDatasetCache,
     ShuffledBatchIterator,
     collate_patch_samples, )
-from deep_ccf_registration.datasets.transforms import build_transform, TemplatePointsNormalization, TemplateParameters
+from deep_ccf_registration.datasets.transforms import build_transform, TemplatePointsNormalization
+from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.metadata import SubjectMetadata, TissueBoundingBoxes
 from deep_ccf_registration.models import UNetWithRegressionHeads
 from deep_ccf_registration.train import train
