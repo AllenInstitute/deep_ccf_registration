@@ -238,7 +238,6 @@ class SliceDatasetCache(IterableDataset):
         y_axis, x_axis = [axes[i] for i in range(3) if i != slice_axis.dimension]
 
         if self._orientation == SliceOrientation.SAGITTAL:
-            # Map directions to their rotation ranges for SAGITTAL
             direction_to_range = {
                 AcquisitionDirection.SUPERIOR_TO_INFERIOR: SI_rot_range,
                 AcquisitionDirection.INFERIOR_TO_SUPERIOR: SI_rot_range,
@@ -247,9 +246,9 @@ class SliceDatasetCache(IterableDataset):
             }
 
             if y_axis.direction not in direction_to_range:
-                raise ValueError(f'unexpected direction for y axis {y_axis}')
+                raise ValueError(f'unexpected direction for y axis {y_axis.direction}')
             if x_axis.direction not in direction_to_range:
-                raise ValueError(f'unexpected direction for x axis {x_axis}')  # Fixed typo
+                raise ValueError(f'unexpected direction for x axis {x_axis.direction}')
 
             y_rot_range = direction_to_range[y_axis.direction]
             x_rot_range = direction_to_range[x_axis.direction]
@@ -427,12 +426,15 @@ class SliceDatasetCache(IterableDataset):
                 cval=0.0,
             ).astype('float32')
 
-            template_patch = map_coordinates(
-                input=self._cached_template_points,
-                coordinates=coords_local,
-                order=1,
-                mode='nearest',
-            )
+            template_patch = np.stack([
+                map_coordinates(
+                    input=self._cached_template_points[..., i],
+                    coordinates=coords_local,
+                    order=1,
+                    mode='nearest',
+                )
+                for i in range(3)
+            ], axis=-1)
 
             template_patch = map_points_to_right_hemisphere(
                 template_points=template_patch,

@@ -477,6 +477,24 @@ def train(
             # Periodic evaluation
             if global_step % eval_interval == 0:
                 logger.info(f"Evaluating at step {global_step}")
+                if is_debug:
+                    # evaluate train too
+                    _evaluate(
+                        dataloader=train_dataloader,
+                        model=model,
+                        device=device,
+                        autocast_context=autocast_context,
+                        max_iters=1 if is_debug else eval_iters,
+                        denormalize_pred_template_points=normalize_target_points,
+                        viz_sample_count=val_viz_samples,
+                        ls_template_parameters=ls_template_parameters,
+                        ccf_annotations=ccf_annotations,
+                        global_step=global_step,
+                        exclude_background_pixels=exclude_background_pixels,
+                        coord_loss=calc_coord_loss,
+                        is_debug=is_debug,
+                        predict_tissue_mask=predict_tissue_mask,
+                    )
                 val_metrics = _evaluate(
                     dataloader=val_dataloader,
                     model=model,

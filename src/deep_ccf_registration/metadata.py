@@ -4,14 +4,8 @@ from typing import Optional
 
 from pydantic import BaseModel
 
+from deep_ccf_registration.datasets.aquisition_meta import AcquisitionDirection
 
-class AcquisitionDirection(Enum):
-    LEFT_TO_RIGHT = 'Left_to_right'
-    RIGHT_TO_LEFT = 'Right_to_left'
-    POSTERIOR_TO_ANTERIOR = 'Posterior_to_anterior'
-    ANTERIOR_TO_POSTERIOR = 'Anterior_to_posterior'
-    SUPERIOR_TO_INFERIOR = 'Superior_to_inferior'
-    INFERIOR_TO_SUPERIOR = 'Inferior_to_superior'
 
 class AcqusitionAxesName(Enum):
     X = 'X'

@@ -267,8 +267,7 @@ def viz_sample(
 
     # ===== Row 2: 3D Visualizations =====
 
-    step = 10
-    idx = np.arange(0, len(intensities), step)
+    idx = np.arange(0, len(intensities))
 
     # Use template shape for axis limits
     ml_lim = [0, ls_template_info.shape[ML_axis]]
