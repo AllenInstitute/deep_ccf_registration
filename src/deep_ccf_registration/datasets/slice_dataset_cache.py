@@ -8,11 +8,15 @@ import numpy as np
 import tensorstore
 import torch
 from loguru import logger
+from scipy.ndimage import map_coordinates
 from torch.utils.data import IterableDataset, get_worker_info
 
+from deep_ccf_registration.datasets.aquisition_meta import AcquisitionDirection
+from deep_ccf_registration.datasets.data_aug import ObliqueSliceSampler
 from deep_ccf_registration.datasets.transforms import map_points_to_right_hemisphere
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
-from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, TissueBoundingBox
+from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, TissueBoundingBox, \
+    AcqusitionAxesName
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 
 
@@ -50,8 +54,16 @@ class CachedRegion:
     worker_id: int
     # per-volume-axis slices (z, y, x) defining the cached subvolume
     spatial_slices: tuple[slice, slice, slice]
+    oblique_sampler: ObliqueSliceSampler
+    crop_center_yx: tuple[int, int]
     chunk_id: int = -1
 
+
+@dataclass
+class ObliqueSliceRotationRanges:
+    x: tuple[int, int] = (0, 0)
+    y: tuple[int, int] = (0, 0)
+    z: tuple[int, int] = (0, 0)
 
 class SliceDatasetCache(IterableDataset):
     """Cache and stream patches for a single SmartSPIM volume."""
@@ -62,8 +74,8 @@ class SliceDatasetCache(IterableDataset):
         tissue_bboxes: Sequence[Optional[TissueBoundingBox]],
         template_parameters: TemplateParameters,
         is_train: bool,
+        orientation: SliceOrientation,
         sample_fraction: float = 0.25,
-        orientation: Optional[SliceOrientation] = None,
         tensorstore_aws_credentials_method: str = "anonymous",
         registration_downsample_factor: int = 3,
         patch_size: int = 512,
@@ -71,6 +83,7 @@ class SliceDatasetCache(IterableDataset):
         transform: Optional[Callable] = None,
         max_chunks_per_dataset: Optional[int] = 1,
         forced_coords: Optional[tuple[str, int, str, int, int]] = None,
+        sample_oblique_slices: bool = True,
     ):
         super().__init__()
 
@@ -100,7 +113,7 @@ class SliceDatasetCache(IterableDataset):
                 f"No valid tissue slices found for dataset {self._dataset_idx}"
             )
 
-        self._cached_input_chunks: Optional[np.ndarray] = None
+        self._cached_input_chunk: Optional[np.ndarray] = None
         self._cached_template_points: Optional[np.ndarray] = None
         self._cached_region: Optional[CachedRegion] = None
         self._samples_per_chunk = max(1, int(self._chunk_size * self._sample_fraction))
@@ -115,6 +128,11 @@ class SliceDatasetCache(IterableDataset):
             raise ValueError("max_chunks_per_dataset must be >= 1 or None")
         self._max_chunks_per_dataset = max_chunks_per_dataset
         self._template_parameters = template_parameters
+        if sample_oblique_slices:
+            oblique_slice_rotation_ranges = self._get_oblique_rotation_ranges()
+        else:
+            oblique_slice_rotation_ranges = ObliqueSliceRotationRanges(x=(0,0), y=(0,0), z=(0,0))
+        self._oblique_slice_rotation_ranges = oblique_slice_rotation_ranges
 
     def _get_volume(self) -> tensorstore.TensorStore:
         if self._volume is None:
@@ -162,6 +180,55 @@ class SliceDatasetCache(IterableDataset):
             valid_slices.append((slice_idx, bbox))
         return valid_slices
 
+    @property
+    def crop_size(self) -> tuple[int, int]:
+        volume = self._get_volume()
+        vol_shape = volume.shape[2:]
+        slice_axis = self._metadata.get_slice_axis(orientation=self._orientation)
+        in_plane_axes = [i for i in range(3) if i != slice_axis.dimension]
+
+        crop_size = (
+            min(self._patch_size, vol_shape[in_plane_axes[0]]),
+            min(self._patch_size, vol_shape[in_plane_axes[1]]),
+        )
+        return crop_size
+
+    def _get_oblique_rotation_ranges(self) -> ObliqueSliceRotationRanges:
+        # these were obtained from the data as typical ranges
+        AP_rot_range = (-20, 20)
+        SI_rot_range = (-10, 10)
+        ML_rot_range = (-20, 20)
+
+        axes = self._metadata.axes
+        slice_axis = self._metadata.get_slice_axis(orientation=self._orientation)
+        y_axis, x_axis = [axes[i] for i in range(3) if i != slice_axis.dimension]
+
+        if self._orientation == SliceOrientation.SAGITTAL:
+            # Map directions to their rotation ranges for SAGITTAL
+            direction_to_range = {
+                AcquisitionDirection.SUPERIOR_TO_INFERIOR: SI_rot_range,
+                AcquisitionDirection.INFERIOR_TO_SUPERIOR: SI_rot_range,
+                AcquisitionDirection.ANTERIOR_TO_POSTERIOR: AP_rot_range,
+                AcquisitionDirection.POSTERIOR_TO_ANTERIOR: AP_rot_range,
+            }
+
+            if y_axis.direction not in direction_to_range:
+                raise ValueError(f'unexpected direction for y axis {y_axis}')
+            if x_axis.direction not in direction_to_range:
+                raise ValueError(f'unexpected direction for x axis {x_axis}')  # Fixed typo
+
+            y_rot_range = direction_to_range[y_axis.direction]
+            x_rot_range = direction_to_range[x_axis.direction]
+            z_rot_range = ML_rot_range
+        else:
+            raise NotImplementedError(f'{self._orientation} not supported')
+
+        return ObliqueSliceRotationRanges(
+            x=x_rot_range,
+            y=y_rot_range,
+            z=z_rot_range,
+        )
+
     def load_chunk_region(self) -> CachedRegion:
         """Load a random chunk from the volume, positioned to overlap with tissue."""
         meta = self._metadata
@@ -174,16 +241,15 @@ class SliceDatasetCache(IterableDataset):
             raise ValueError(f"No valid slices for dataset {self._dataset_idx}")
 
         vol_shape = volume.shape[2:]
-        y_axis = [i for i in range(3) if i != slice_axis.dimension][0]
-        x_axis = [i for i in range(3) if i != slice_axis.dimension][1]
+        in_plane_axes = [i for i in range(3) if i != slice_axis.dimension]
+        y_axis = in_plane_axes[0]
+        x_axis = in_plane_axes[1]
 
         vol_h = vol_shape[y_axis]
         vol_w = vol_shape[x_axis]
         vol_d = vol_shape[slice_axis.dimension]
 
-        chunk_h = min(self._patch_size, vol_h)
-        chunk_w = min(self._patch_size, vol_w)
-        chunk_d = min(self._chunk_size, vol_d)
+        crop_size = self.crop_size
 
         # If forced coords are provided for this dataset, lock chunk to contain that slice/patch
         if self._forced_coords is not None and self._forced_coords[0] == self._dataset_idx:
@@ -194,102 +260,97 @@ class SliceDatasetCache(IterableDataset):
             start_slice = max(0, min(target_slice, vol_d - 1))
             end_slice = min(start_slice + 1, vol_d)
 
-            start_y = max(0, min(target_y, vol_h - chunk_h))
-            end_y = min(start_y + chunk_h, vol_h)
-
-            start_x = max(0, min(target_x, vol_w - chunk_w))
-            end_x = min(start_x + chunk_w, vol_w)
+            # Crop center from forced coords
+            crop_center_yx = (target_y + crop_size[0] // 2, target_x + crop_size[1] // 2)
         else:
             # Pick a random slice range that has valid tissue slices
             slice_indices = sorted([s[0] for s in valid_slices])
             min_valid_slice = min(slice_indices)
             max_valid_slice = max(slice_indices)
 
-            start_slice = random.randint(min_valid_slice, min(vol_d - chunk_d, max_valid_slice))
+            start_slice = random.randint(min_valid_slice, max(min_valid_slice,
+                                                              min(vol_d - self._chunk_size,
+                                                                  max_valid_slice)))
+            end_slice = min(start_slice + self._chunk_size, vol_d)
 
-            end_slice = start_slice + chunk_d
+            # Get bboxes for slices that will be in this chunk
+            slices_in_chunk = [
+                (idx, bbox) for idx, bbox in valid_slices
+                if start_slice <= idx < end_slice
+            ]
 
-        # Get bboxes for slices that will be in this chunk
-        slices_in_chunk = [
-            (idx, bbox) for idx, bbox in valid_slices
-            if start_slice <= idx < end_slice
-        ]
+            if not slices_in_chunk:
+                raise ValueError(
+                    "No tissue slices fell within the chunk boundaries. "
+                )
 
-        if not slices_in_chunk:
-            raise ValueError(
-                "No tissue slices fell within the chunk boundaries. "
-            )
-
-        if self._forced_coords is None or self._forced_coords[0] != self._dataset_idx:
-            # Position chunk to overlap with tissue - use union of bboxes
+            # Position crop center to overlap with tissue - use union of bboxes
             union_min_y = min(bbox.y for _, bbox in slices_in_chunk)
             union_min_x = min(bbox.x for _, bbox in slices_in_chunk)
             union_max_y = max(bbox.y + bbox.height for _, bbox in slices_in_chunk)
             union_max_x = max(bbox.x + bbox.width for _, bbox in slices_in_chunk)
 
-            if union_max_y <= chunk_h:
-                start_y = 0
-            else:
-                start_y = random.randint(union_min_y, max(union_max_y - chunk_h, union_min_y + 1))
+            # Sample crop center within tissue region
+            center_y_min = max(crop_size[0] // 2, union_min_y)
+            center_y_max = min(vol_h - crop_size[0] // 2, union_max_y)
+            center_x_min = max(crop_size[1] // 2, union_min_x)
+            center_x_max = min(vol_w - crop_size[1] // 2, union_max_x)
 
-            if union_max_x <= chunk_w:
-                start_x = 0
-            else:
-                start_x = random.randint(union_min_x, max(union_max_x - chunk_w, union_min_x + 1))
+            crop_center_yx = (
+                random.randint(center_y_min, max(center_y_min, center_y_max)),
+                random.randint(center_x_min, max(center_x_min, center_x_max)),
+            )
 
-            end_y = min(start_y + chunk_h, vol_h)
-            end_x = min(start_x + chunk_w, vol_w)
+        # 1. Sample oblique params and compute chunk bounds
+        oblique_sampler = ObliqueSliceSampler(
+            slice_range=range(start_slice, end_slice),
+            vol_shape=(vol_shape[0], vol_shape[1], vol_shape[2]),
+            slice_axis=slice_axis.dimension,
+            crop_size=crop_size,
+            crop_center_yx=crop_center_yx,
+            x_range=self._oblique_slice_rotation_ranges.x,
+            y_range=self._oblique_slice_rotation_ranges.y,
+            z_range=self._oblique_slice_rotation_ranges.z,
+        )
 
-        # Build slice for volume indexing
-        slices = [0, 0, None, None, None]
-        slices[slice_axis.dimension + 2] = slice(start_slice, end_slice)
-        slices[y_axis + 2] = slice(start_y, end_y)
-        slices[x_axis + 2] = slice(start_x, end_x)
+        # 2. Get computed chunk bounds (expanded to fit rotated samples)
+        chunk_slices = oblique_sampler.chunk_slices
+
+        # 3. Build slices for volume indexing
+        slices = [0, 0, *chunk_slices]
 
         logger.debug(
             f"Worker {self._worker_id} loading chunk for dataset {self._dataset_idx} "
-            f"(slice_axis={slice_axis.dimension}, chunk_d={chunk_d})"
+            f"(slice_axis={slice_axis.dimension}, oblique_params={oblique_sampler.params})"
         )
 
+        # 4. Load chunk
         chunk_data = volume[tuple(slices)].read().result()
-        self._cached_input_chunks = np.array(chunk_data)
+        self._cached_input_chunk = np.array(chunk_data)
 
         template_chunk = template_points_volume[tuple(slices)].read().result()
         self._cached_template_points = np.array(template_chunk)
 
         logger.debug(
             f"Worker {self._worker_id} cached chunk for dataset {self._dataset_idx}: "
-            f"slices {start_slice}-{end_slice}, y {start_y}-{end_y}, x {start_x}-{end_x}"
+            f"chunk_slices={chunk_slices}, crop_center={crop_center_yx}"
         )
 
         self._cached_region = CachedRegion(
             dataset_idx=self._dataset_idx,
             worker_id=self._worker_id,
-            spatial_slices=tuple(slices[2:]),
+            spatial_slices=chunk_slices,
+            oblique_sampler=oblique_sampler,
+            crop_center_yx=crop_center_yx,
         )
 
         return self._cached_region
 
-    def _extract_slice(self, array: np.ndarray, local_idx: int, slice_axis: int) -> np.ndarray:
-        """Extract a 2D slice from a cached 3D chunk."""
-        if slice_axis == 0:
-            arr = array[local_idx, :, :]
-        elif slice_axis == 1:
-            arr = array[:, local_idx, :]
-        else:
-            arr = array[:, :, local_idx]
-        return arr.astype('float32')
-
-
     def sample_patches_from_cache(self) -> list[PatchSample]:
         """
         Sample 2D patches from the cached chunk.
-
-        Returns a list of ``PatchSample`` objects that capture the global slice index,
-        absolute top-left coordinates, pixel data, and (optionally) the chunk metadata
-        used to generate the patch.
         """
-        if self._cached_input_chunks is None or self._cached_template_points is None:
+        if self._cached_input_chunk is None or self._cached_template_points is None:
             return []
 
         region = self._cached_region
@@ -297,54 +358,46 @@ class SliceDatasetCache(IterableDataset):
             return []
 
         slice_axis = self._metadata.get_slice_axis(self._orientation)
-        plane_axes = [dim for dim in range(3) if dim != slice_axis.dimension]
-        plane_axis_a, plane_axis_b = plane_axes
 
-        spatial_slices = region.spatial_slices
+        oblique_sampler = region.oblique_sampler
+        chunk_slices = oblique_sampler.chunk_slices
+        crop_size = self.crop_size
 
-        slice_span = spatial_slices[slice_axis.dimension]
-        plane_span_a = spatial_slices[plane_axis_a]
-        plane_span_b = spatial_slices[plane_axis_b]
+        # slices that can be safely sampled within the cached region bounds
+        slice_range_global = oblique_sampler.slice_range
 
-        slice_start = slice_span.start
-        start_y = plane_span_a.start
-        start_x = plane_span_b.start
-
-        if self._forced_coords is not None and self._forced_coords[0] == self._dataset_idx:
-            # Respect the requested top-left coords when the chunk was forced
-            start_y = self._forced_coords[3]
-            start_x = self._forced_coords[4]
-
-        slice_range = range(slice_span.stop - slice_span.start)
-
-        # If forced coords are provided for this dataset, extract that exact slice deterministically
+        # If forced coords...
         if self._forced_coords is not None and self._forced_coords[0] == self._dataset_idx:
             target_slice_global = self._forced_coords[1]
-            local_idx = target_slice_global - slice_start
-            if local_idx < 0 or local_idx >= len(slice_range):
+            if target_slice_global not in slice_range_global:
                 return []
-            target_indices = [local_idx]
+            target_slices_global = [target_slice_global]
         else:
-            # Sample a fraction of the available slices
-            target_samples = max(1, int(len(slice_range) * self._sample_fraction))
-            target_samples = min(target_samples, len(slice_range))
+            target_samples = max(1, int(len(slice_range_global) * self._sample_fraction))
+            target_samples = min(target_samples, len(slice_range_global))
 
-            # Shuffle slice order so we try different slices each call
-            shuffled_slices = list(slice_range)
+            shuffled_slices = list(slice_range_global)
             random.shuffle(shuffled_slices)
-            target_indices = shuffled_slices[:target_samples]
+            target_slices_global = shuffled_slices[:target_samples]
 
         patches: list[PatchSample] = []
-        for local_idx in target_indices:
-            patch = self._extract_slice(
-                array=self._cached_input_chunks,
-                local_idx=local_idx,
-                slice_axis=slice_axis.dimension,
-            )
-            template_patch = self._extract_slice(
-                array=self._cached_template_points,
-                local_idx=local_idx,
-                slice_axis=slice_axis.dimension,
+        for global_slice_idx in target_slices_global:
+            coords = oblique_sampler.extract_oblique_coords(slice_idx=global_slice_idx)
+            coords_local = [c - chunk_slices[i].start for i, c in enumerate(coords)]
+
+            patch = map_coordinates(
+                input=self._cached_input_chunk,
+                coordinates=coords_local,
+                order=1,
+                mode='constant',
+                cval=0.0,
+            ).astype('float32')
+
+            template_patch = map_coordinates(
+                input=self._cached_template_points,
+                coordinates=coords_local,
+                order=1,
+                mode='nearest',
             )
 
             template_patch = map_points_to_right_hemisphere(
@@ -353,29 +406,34 @@ class SliceDatasetCache(IterableDataset):
             )
 
             if self._transform is not None:
-                transforms = self._transform(image=patch, keypoints=template_patch, slice_axis=slice_axis, acquisition_axes=self._metadata.axes, orientation=self._orientation)
+                transforms = self._transform(
+                    image=patch,
+                    keypoints=template_patch,
+                    slice_axis=slice_axis,
+                    acquisition_axes=self._metadata.axes,
+                    orientation=self._orientation
+                )
                 patch = transforms['image']
                 template_patch = transforms['keypoints']
 
-            global_slice_idx = slice_start + local_idx
             patches.append(
                 PatchSample(
-                            slice_idx=global_slice_idx,
-                            start_y=start_y,
-                            start_x=start_x,
-                            data=patch,
-                            template_points=template_patch,
-                            dataset_idx=self._dataset_idx,
-                            worker_id=self._worker_id,
-                            orientation=self._orientation.value,
-                            subject_id=self._metadata.subject_id,
+                    slice_idx=global_slice_idx,
+                    start_y=region.crop_center_yx[0] - crop_size[0] // 2,
+                    start_x=region.crop_center_yx[1] - crop_size[1] // 2,
+                    data=patch,
+                    template_points=template_patch,
+                    dataset_idx=self._dataset_idx,
+                    worker_id=self._worker_id,
+                    orientation=self._orientation.value,
+                    subject_id=self._metadata.subject_id,
                 )
             )
 
         return patches
 
     def clear_cache(self):
-        self._cached_input_chunks = None
+        self._cached_input_chunk = None
         self._cached_template_points = None
         self._cached_region = None
 
@@ -462,7 +520,7 @@ class SliceDatasetCache(IterableDataset):
 
     @property
     def has_cache(self) -> bool:
-        return self._cached_input_chunks is not None and self._cached_template_points is not None
+        return self._cached_input_chunk is not None and self._cached_template_points is not None
 
     @property
     def dataset_idx(self) -> str:

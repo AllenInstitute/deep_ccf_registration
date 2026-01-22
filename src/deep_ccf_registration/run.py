@@ -152,6 +152,7 @@ def create_dataloader(
                 template_parameters=template_parameters,
                 is_train=is_train,
                 forced_coords=forced_coords,
+                sample_oblique_slices=is_train and config.sample_oblique_slices,
             )
         )
 

@@ -79,3 +79,5 @@ class TrainConfig(BaseModel):
     model: ModelConfig
 
     lr_scheduler: Optional[LRScheduler] = None
+
+    sample_oblique_slices: bool = False
