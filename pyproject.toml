@@ -9,13 +9,12 @@ requires-python = ">=3.12"
 dynamic = [ "version"]
 dependencies = [
     "aind-smartspim-transform-utils @ https://github.com/AllenInstitute/aind-smartspim-transform-utils.git",
-    "albumentationsx>=2.0.12",
+    "albumentationsx[headless]>=2.0.14",
     "click>=8.3.0",
     "loguru>=0.7.3",
     "mlflow>=3.6.0",
     "monai>=1.5.1",
     "nvidia-ml-py>=13.580.82",
-    "opencv-python-headless>=4.11.0.86",
     "psutil>=7.0.0",
     "pydantic>=2.11.9",
     "retry>=0.9.2",
