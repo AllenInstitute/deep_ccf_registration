@@ -49,19 +49,12 @@ class RMSE(nn.Module):
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
-        Compute mean squared point distance loss.
-
         Parameters
         ----------
         pred : torch.Tensor
             Predicted coordinates, shape (B, C, H, W)
         target : torch.Tensor
             Target coordinates, shape (B, C, H, W)
-
-        Returns
-        -------
-        torch.Tensor
-            Scalar mean squared Euclidean distance
         """
         squared_errors = (pred - target) ** 2
         per_point_squared_distance = squared_errors.sum(dim=self.coordinate_dim)
@@ -75,9 +68,9 @@ class RMSE(nn.Module):
             mask = mask.to(per_point_squared_distance.device, per_point_squared_distance.dtype)
             squared_errors = per_point_squared_distance * mask
             valid_points = mask.sum().clamp(min=1.0)
-            mse = squared_errors.sum() / valid_points
+            mse = squared_errors.sum(dim=(1, 2)) / valid_points
         else:
-            mse = per_point_squared_distance.mean()
+            mse = per_point_squared_distance.mean(dim=(1, 2))
 
         return mse.sqrt()
 
@@ -142,7 +135,14 @@ def _evaluate(
             with autocast_context:
                 pred = model(input_images)
                 if predict_tissue_mask:
-                    pred_points, pred_tissue_mask = pred[:, :-1], pred[:, -1]
+                    pred_points, pred_tissue_mask_logits = pred[:, :-1], pred[:, -1]
+                    pred_tissue_mask = F.sigmoid(pred_tissue_mask_logits) > 0.5
+                    pred_tissue_mask_logits_upsample = _resize_to_target(
+                        x=pred_tissue_mask_logits.unsqueeze(1),
+                        target_template_points=target_template_points).squeeze(1)
+                    pred_tissue_mask_upsample = F.sigmoid(pred_tissue_mask_logits_upsample) > 0.5
+
+
                 else:
                     pred_points = pred
                 if pred_points.shape != target_template_points.shape:
@@ -181,7 +181,7 @@ def _evaluate(
                 point_loss = coord_loss(pred=pred_points, target=target_template_points_downsample, mask=masks)
 
                 if predict_tissue_mask:
-                    tissue_mask_loss = F.binary_cross_entropy_with_logits(pred_tissue_mask,
+                    tissue_mask_loss = F.binary_cross_entropy_with_logits(pred_tissue_mask_logits,
                                                                           tissue_masks_downsample)
                     loss = point_loss + tissue_mask_weight * tissue_mask_loss
                 else:
@@ -195,8 +195,8 @@ def _evaluate(
                     tissue_mask_losses.append(tissue_mask_loss.item())
 
             if denormalize_pred_template_points:
-                pred = get_template_point_normalization_inverse(
-                    x=pred,
+                pred_points = get_template_point_normalization_inverse(
+                    x=pred_points,
                     template_parameters=ls_template_parameters,
                 )
                 target_template_points = get_template_point_normalization_inverse(
@@ -209,23 +209,22 @@ def _evaluate(
                 )
 
             pred_points_upsample = _resize_to_target(x=pred_points, target_template_points=target_template_points)
-            rmse_downsample = RMSE()(pred=pred_points, target=target_template_points_downsample, mask=pad_masks_downsample)
-            rmse_raw = RMSE()(pred=pred_points_upsample, target=target_template_points, mask=pad_masks)
+            rmse_downsample = RMSE()(pred=pred_points, target=target_template_points_downsample, mask=tissue_masks_downsample if predict_tissue_mask else pad_masks_downsample)
+            rmse_raw = RMSE()(pred=pred_points_upsample, target=target_template_points, mask=tissue_masks if predict_tissue_mask else pad_masks)
 
             if predict_tissue_mask:
-                pred_tissue_mask_upsample = _resize_to_target(x=pred_tissue_mask.unsqueeze(1), target_template_points=target_template_points).squeeze(1)
-                tissue_dice_downsample = tissue_mask_downsample_dice_metric(y_pred=(F.sigmoid(pred_tissue_mask) > 0.5).unsqueeze(1), y=tissue_masks_downsample.unsqueeze(1))
-                tissue_dice_raw = tissue_mask_dice_metric(y_pred=(F.sigmoid(pred_tissue_mask_upsample) > 0.5).unsqueeze(1), y=tissue_masks.unsqueeze(1))
+                tissue_dice_downsample = tissue_mask_downsample_dice_metric(y_pred=pred_tissue_mask.unsqueeze(1), y=tissue_masks_downsample.unsqueeze(1))
+                tissue_dice_raw = tissue_mask_dice_metric(y_pred=pred_tissue_mask_upsample.unsqueeze(1), y=tissue_masks.unsqueeze(1))
             else:
                 tissue_dice_downsample = None
                 tissue_dice_raw = None
 
-            rmses_downsampled.append(rmse_downsample.item())
-            rmses_raw.append(rmse_raw.item())
+            rmses_downsampled += rmse_downsample.cpu().tolist()
+            rmses_raw += rmse_raw.cpu().tolist()
 
             if predict_tissue_mask:
-                tissue_dice_scores_downsampled.append(tissue_dice_downsample.item())
-                tissue_dice_scores_raw.append(tissue_dice_raw.item())
+                tissue_dice_scores_downsampled += tissue_dice_downsample.cpu().tolist()
+                tissue_dice_scores_raw += tissue_dice_raw.cpu().tolist()
 
             if enable_viz and len(collected_samples) < viz_sample_count:
                 errors = (pred_points_upsample - target_template_points) ** 2
@@ -243,7 +242,7 @@ def _evaluate(
                         "gt_coords": target_template_points[sample_idx].detach().cpu(),
                         "pad_mask": pad_masks[sample_idx].detach().cpu(),
                         "tissue_mask": tissue_masks[sample_idx].detach() if predict_tissue_mask else None,
-                        "pred_tissue_masks": F.sigmoid(pred_tissue_mask_upsample[sample_idx]).detach() if predict_tissue_mask else None,
+                        "pred_tissue_masks": F.sigmoid(pred_tissue_mask_logits_upsample[sample_idx]).detach() if predict_tissue_mask else None,
                         "errors": errors[sample_idx].detach().cpu().numpy(),
                         "slice_idx": int(slice_indices[sample_idx].item()),
                         "patch_y": int(patch_ys[sample_idx].item()),
