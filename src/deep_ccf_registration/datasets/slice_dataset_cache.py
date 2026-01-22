@@ -233,7 +233,7 @@ class SliceDatasetCache(IterableDataset):
         SI_rot_range = (-10, 10)
         ML_rot_range = (-20, 20)
 
-        axes = self._metadata.axes
+        axes = sorted(self._metadata.axes, key=lambda x: x.dimension)
         slice_axis = self._metadata.get_slice_axis(orientation=self._orientation)
         y_axis, x_axis = [axes[i] for i in range(3) if i != slice_axis.dimension]
 
