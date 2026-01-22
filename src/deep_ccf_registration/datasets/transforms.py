@@ -18,11 +18,12 @@ from deep_ccf_registration.metadata import SliceOrientation, AcquisitionAxis
 class LongestMaxSize(albumentations.DualTransform):
     """Resize so the longest side matches ``max_size`` while keeping aspect."""
 
-    def __init__(self, max_size: int, interpolation: int = cv2.INTER_LINEAR, resize_target: bool = True):
+    def __init__(self, max_size: int, interpolation: int = cv2.INTER_LINEAR, resize_target: bool = True, resize_mask: bool = True):
         super().__init__(p=1.0)
         self.max_size = max_size
         self.interpolation = interpolation
         self.resize_target = resize_target
+        self.resize_mask = resize_mask
 
     def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
         img = data["image"]
@@ -42,17 +43,22 @@ class LongestMaxSize(albumentations.DualTransform):
             return img
         return cv2.resize(img, (width, height), interpolation=self.interpolation)
 
+    def apply_to_mask(self, mask: np.ndarray, *args: Any, scale: float, height: int, width: int, **params: Any) -> np.ndarray:
+        if not self.resize_mask or scale == 1.0:
+            return mask
+        return self._resize_array(mask, height=height, width=width)
+
     def apply_to_keypoints(self, keypoints: np.ndarray, scale: float, height: int, width: int, **params: Any) -> np.ndarray:
         if not self.resize_target or scale == 1.0:
             return keypoints
         return self._resize_array(keypoints, height=height, width=width)
 
     def _resize_array(self, array: np.ndarray, height: int, width: int) -> np.ndarray:
-        if array.ndim != 3 or array.shape[2] != 3:
-            raise ValueError("Template keypoints must be HxWx3")
+        if array.ndim != 3:
+            raise ValueError("array must be HxWxC")
         channels = [
             cv2.resize(array[..., idx], (width, height), interpolation=self.interpolation)
-            for idx in range(3)
+            for idx in range(array.shape[2])
         ]
         return np.stack(channels, axis=-1)
 
@@ -189,7 +195,7 @@ def build_transform(config: TrainConfig, is_train: bool, template_parameters: Te
     transforms = []
 
     if config.longest_max_size is not None:
-        transforms.append(LongestMaxSize(max_size=config.longest_max_size, resize_target=is_train))
+        transforms.append(LongestMaxSize(max_size=config.longest_max_size, resize_target=is_train, resize_mask=is_train))
 
     if config.normalize_input_image:
         transforms.append(ImageNormalization())
@@ -208,6 +214,14 @@ def build_transform(config: TrainConfig, is_train: bool, template_parameters: Te
         transforms = None
     return transforms
 
+def physical_to_index_space(physical_pts: torch.Tensor | np.ndarray, template_parameters: TemplateParameters):
+    points = physical_pts.clone() if isinstance(physical_pts, torch.Tensor) else physical_pts.copy()
+    for dim in range(template_parameters.dims):
+        points[:, :, dim] -= template_parameters.origin[dim]
+        points[:, :, dim] *= template_parameters.direction[dim]
+        points[:, :, dim] /= template_parameters.scale[dim]
+    return points
+
 def map_points_to_right_hemisphere(
         template_points: np.ndarray,
         template_parameters: TemplateParameters,
@@ -220,17 +234,14 @@ def map_points_to_right_hemisphere(
     :param template_parameters:
     :return:
     """
-    template_points = template_points.copy()
-
-    # convert to index space
-    for dim in range(template_parameters.dims):
-        template_points[:, :, dim] -= template_parameters.origin[dim]
-        template_points[:, :, dim] *= template_parameters.direction[dim]
-        template_points[:, :, dim] /= template_parameters.scale[dim]
+    template_points_index_space = physical_to_index_space(
+        physical_pts=template_points,
+        template_parameters=template_parameters,
+    )
 
     # checks whether the ML points are < halfway in index space. the LS template iS RAS.
     # therefore this checks whether points are in left hemisphere
-    need_mirror = (template_points[:, :, 0] < template_parameters.shape[0] / 2).all()
+    need_mirror = (template_points_index_space[:, :, 0] < template_parameters.shape[0] / 2).all()
     if os.environ.get('LOG_LEVEL') == 'DEBUG':
         logger.debug(
             f"ML index mean: {template_points[:, :, 0].mean():.1f}, "
@@ -242,15 +253,11 @@ def map_points_to_right_hemisphere(
         template_points = mirror_points(points=template_points, template_parameters=template_parameters)
     return template_points
 
-
 def mirror_points(points: torch.Tensor | np.ndarray, template_parameters: TemplateParameters):
     points = points.clone() if isinstance(points, torch.Tensor) else points.copy()
 
     # 1. Convert to index space
-    for dim in range(template_parameters.dims):
-        points[:, :, dim] -= template_parameters.origin[dim]
-        points[:, :, dim] *= template_parameters.direction[dim]
-        points[:, :, dim] /= template_parameters.scale[dim]
+    points = physical_to_index_space(physical_pts=points, template_parameters=template_parameters)
 
     # 2. Flip ML in index space
     points[:, :, 0] = template_parameters.shape[0]-1 - points[:, :, 0]

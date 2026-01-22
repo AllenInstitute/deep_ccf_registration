@@ -215,33 +215,3 @@ def apply_transforms_to_points(
     transformed_points = affine_transformed_points + displacements
 
     return transformed_points
-
-
-def convert_from_ants_space_tensor(template_parameters: AntsImageParameters, physical_pts: torch.Tensor):
-    """
-    Convert points from the physical space of an ANTsImage and places
-    them into the "index" space required for visualizing
-
-    Parameters
-    ----------
-    template_parameters : `AntsImageParameters`
-        parameters of the ANTsImage physical space from where you are
-        converting the points
-    physical_pts : torch.Tensor
-        the location of cells in physical space
-
-    Returns
-    -------
-    pts : np.ndarray
-        pts converted for ANTsPy physical space to "index" space
-
-    """
-
-    pts = physical_pts.clone()
-
-    for dim in range(template_parameters.dims):
-        pts[:, dim] -= template_parameters.origin[dim]
-        pts[:, dim] *= template_parameters.direction[dim]
-        pts[:, dim] /= template_parameters.scale[dim]
-
-    return pts

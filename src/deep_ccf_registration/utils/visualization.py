@@ -171,9 +171,10 @@ def viz_sample(
     predicted_template_points: np.ndarray,
     gt_template_points: np.ndarray,
     ls_template_info: TemplateParameters,
-    mask: np.ndarray,
+    pad_mask: np.ndarray,
     template_parameters: AntsImageParameters,
     predict_tissue_mask: bool = False,
+    tissue_mask: Optional[np.ndarray] = None,
     predicted_tissue_masks: Optional[np.ndarray] = None,
 ):
     """
@@ -181,18 +182,19 @@ def viz_sample(
     """
     intensities = input_image.flatten()
 
-    valid_mask = mask.flatten()
+    mask = tissue_mask if tissue_mask is not None else pad_mask
+    valid_mask = (mask > 0.5).flatten()
     intensities = intensities[valid_mask]
-    predicted_template_points = predicted_template_points[valid_mask]
-    gt_template_points = gt_template_points[valid_mask]
+    predicted_template_points_masked = predicted_template_points[valid_mask]
+    gt_template_points_masked = gt_template_points[valid_mask]
 
     pred_template_points_index_space = convert_from_ants_space(
         template_parameters=template_parameters,
-        physical_pts=predicted_template_points
+        physical_pts=predicted_template_points_masked
     )
     gt_template_points_index_space = convert_from_ants_space(
         template_parameters=template_parameters,
-        physical_pts=gt_template_points
+        physical_pts=gt_template_points_masked
     )
 
     ML_axis, DV_axis, SI_axis = 0, 1, 2
@@ -210,7 +212,7 @@ def viz_sample(
     gt_raster = rasterize(gt_template_points_index_space)
 
     # Compute displacement/error
-    displacement = predicted_template_points - gt_template_points
+    displacement = predicted_template_points_masked - gt_template_points_masked
     displacement *= 1000  # convert to microns
 
     fig = plt.figure(figsize=(24, 10))
@@ -332,33 +334,16 @@ def viz_sample(
 
     # Tissue mask comparison (if enabled)
     if predict_tissue_mask and predicted_tissue_masks is not None:
-        # Get predicted and GT masks
-        predicted_mask_flat = predicted_tissue_masks.flatten()[valid_mask]
-        gt_mask_flat = mask.flatten()[valid_mask]  # GT is the input mask
-
         # Rasterize masks
-        predicted_mask_raster = rasterize(gt_template_points_index_space,
-                                          values=predicted_mask_flat.astype(float))
-        gt_mask_raster = rasterize(gt_template_points_index_space,
-                                   values=gt_mask_flat.astype(float))
-
-        # Tissue mask overlay
-        ax11 = fig.add_subplot(2, 5, 8)
-        # Create RGB image for overlay
-        overlay = np.zeros((*gt_mask_raster.shape, 3))
-        overlay[gt_mask_raster > 0.5] = [0, 1, 0]  # GT in green
-        overlay[predicted_mask_raster > 0.5] = [1, 0, 0]  # Predicted in red
-        overlay[(gt_mask_raster > 0.5) & (predicted_mask_raster > 0.5)] = [1, 1,
-                                                                           0]  # Overlap in yellow
-
-        ax11.imshow(overlay, origin='lower')
-        ax11.set_title('Tissue Mask: GT (green) vs Pred (red)')
-        ax11.set_xlabel('SI')
-        ax11.set_ylabel('DV')
-
+        predicted_mask_raster = rasterize(convert_from_ants_space(template_parameters=template_parameters, physical_pts=gt_template_points[pad_mask.flatten()]),
+                                          values=predicted_tissue_masks[pad_mask].astype(float).flatten())
+        gt_mask_raster = rasterize(convert_from_ants_space(template_parameters=template_parameters, physical_pts=gt_template_points[pad_mask.flatten()]),
+                                   values=tissue_mask[pad_mask].astype(float).flatten())
+        gt_reg_raster = rasterize(convert_from_ants_space(template_parameters=template_parameters, physical_pts=gt_template_points[pad_mask.flatten()]),
+                                          values=input_image[pad_mask].astype(float).flatten())
         # Compute mask metrics
-        gt_mask_binary = gt_mask_flat > 0.5
-        pred_mask_binary = predicted_mask_flat > 0.5
+        gt_mask_binary = tissue_mask > 0.5
+        pred_mask_binary = predicted_tissue_masks > 0.5
         tp = np.sum(gt_mask_binary & pred_mask_binary)
         fp = np.sum(~gt_mask_binary & pred_mask_binary)
         fn = np.sum(gt_mask_binary & ~pred_mask_binary)
@@ -368,8 +353,12 @@ def viz_sample(
 
         # Difference visualization
         ax12 = fig.add_subplot(2, 5, 9)
+        predicted_mask_raster = np.nan_to_num(predicted_mask_raster, nan=0.0)
+        gt_mask_raster = np.nan_to_num(gt_mask_raster, nan=0.0)
+
         diff = predicted_mask_raster - gt_mask_raster
         im = ax12.imshow(diff, origin='lower', cmap='RdBu_r', vmin=-1, vmax=1)
+        ax12.imshow(gt_reg_raster, origin='lower', cmap='gray', alpha=0.5)
         ax12.set_title(f'Mask Diff (IoU={iou:.3f}, Dice={dice:.3f})')
         ax12.set_xlabel('SI')
         ax12.set_ylabel('DV')

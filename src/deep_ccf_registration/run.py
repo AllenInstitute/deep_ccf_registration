@@ -116,6 +116,8 @@ def create_dataloader(
     batch_size: int,
     num_workers: int,
     ls_template_parameters: TemplateParameters,
+    ccf_annotations: np.ndarray,
+    include_tissue_mask: bool = False,
     buffer_batches: int = 8,
     forced_coords: Optional[tuple[str, int, str, int, int]] = None,
 ):
@@ -153,6 +155,8 @@ def create_dataloader(
                 is_train=is_train,
                 forced_coords=forced_coords,
                 sample_oblique_slices=is_train and config.sample_oblique_slices,
+                ccf_annotations=ccf_annotations,
+                include_tissue_mask=include_tissue_mask,
             )
         )
 
@@ -193,7 +197,7 @@ def _deterministic_debug_meta(
     """Pick a deterministic patch for debug mode."""
     subject = train_metadata[0]
     bboxes = tissue_bboxes.bounding_boxes[subject.subject_id]
-    slice_idx = int(len(bboxes)/2)
+    slice_idx = 318
     bbox = bboxes[slice_idx]
     return subject.subject_id, slice_idx, orientation, bbox.y, bbox.x
 
@@ -324,6 +328,8 @@ def main(config_path: Path):
         ls_template_parameters=ls_template_parameters,
         is_train=True,
         forced_coords=forced_coords,
+        ccf_annotations=ccf_annotations,
+        include_tissue_mask=config.predict_tissue_mask,
     )
     val_dataloader = create_dataloader(
         metadata=val_metadata,
@@ -335,6 +341,8 @@ def main(config_path: Path):
         ls_template_parameters=ls_template_parameters,
         is_train=False,
         forced_coords=forced_coords,
+        ccf_annotations=ccf_annotations,
+        include_tissue_mask=config.predict_tissue_mask,
     )
 
     logger.info(f"Train subjects: {len(train_metadata)}")
@@ -347,6 +355,7 @@ def main(config_path: Path):
         out_coords=3,
         image_height=config.patch_size[0],
         image_width=config.patch_size[1],
+        include_tissue_mask=config.predict_tissue_mask,
     )
 
     logger.info(model)
@@ -421,6 +430,7 @@ def main(config_path: Path):
             exclude_background_pixels=config.exclude_background_pixels,
             lr_scheduler=config.lr_scheduler,
             normalize_target_points=config.normalize_template_points,
+            predict_tissue_mask=config.predict_tissue_mask,
         )
 
     logger.info("=" * 60)
