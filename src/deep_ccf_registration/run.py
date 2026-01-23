@@ -197,7 +197,7 @@ def _deterministic_debug_meta(
     """Pick a deterministic patch for debug mode."""
     subject = train_metadata[0]
     bboxes = tissue_bboxes.bounding_boxes[subject.subject_id]
-    slice_idx = 318
+    slice_idx = 644
     bbox = bboxes[slice_idx]
     return subject.subject_id, slice_idx, orientation, bbox.y, bbox.x
 

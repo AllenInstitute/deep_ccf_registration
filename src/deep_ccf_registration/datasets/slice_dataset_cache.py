@@ -85,7 +85,8 @@ class CachedRegion:
     # per-volume-axis slices (z, y, x) defining the cached subvolume
     spatial_slices: tuple[slice, slice, slice]
     oblique_sampler: ObliqueSliceSampler
-    crop_center_yx: tuple[int, int]
+    # top-left corner of crop in volume coords
+    start_yx: tuple[int, int]
     chunk_id: int = -1
 
 
@@ -278,25 +279,27 @@ class SliceDatasetCache(IterableDataset):
         y_axis = in_plane_axes[0]
         x_axis = in_plane_axes[1]
 
-        vol_h = vol_shape[y_axis]
-        vol_w = vol_shape[x_axis]
         vol_d = vol_shape[slice_axis.dimension]
 
         crop_size = self.crop_size
 
-        # If forced coords are provided for this dataset, lock chunk to contain that slice/patch
         if self._forced_coords is not None and self._forced_coords[0] == self._dataset_idx:
             target_slice = self._forced_coords[1]
-            target_y = self._forced_coords[3]
-            target_x = self._forced_coords[4]
-
             start_slice = max(0, min(target_slice, vol_d - 1))
             end_slice = min(start_slice + 1, vol_d)
 
-            # Crop center from forced coords
-            crop_center_yx = (target_y + crop_size[0] // 2, target_x + crop_size[1] // 2)
+            forced_y = self._forced_coords[3]
+            forced_x = self._forced_coords[4]
+            slice_bboxes = {
+                target_slice: TissueBoundingBox(
+                    y=forced_y,
+                    x=forced_x,
+                    height=crop_size[0],
+                    width=crop_size[1],
+                )
+            }
+            start_yx = (forced_y, forced_x)
         else:
-            # Pick a random slice range that has valid tissue slices
             slice_indices = sorted([s[0] for s in valid_slices])
             min_valid_slice = min(slice_indices)
             max_valid_slice = max(slice_indices)
@@ -306,83 +309,78 @@ class SliceDatasetCache(IterableDataset):
                                                                   max_valid_slice)))
             end_slice = min(start_slice + self._chunk_size, vol_d)
 
-            # Get bboxes for slices that will be in this chunk
             slices_in_chunk = [
                 (idx, bbox) for idx, bbox in valid_slices
                 if start_slice <= idx < end_slice
             ]
 
             if not slices_in_chunk:
-                raise ValueError(
-                    "No tissue slices fell within the chunk boundaries. "
-                )
+                raise ValueError("No tissue slices fell within the chunk boundaries.")
 
-            # Position crop center to overlap with tissue - use union of bboxes
-            union_min_y = min(bbox.y for _, bbox in slices_in_chunk)
-            union_min_x = min(bbox.x for _, bbox in slices_in_chunk)
-            union_max_y = max(bbox.y + bbox.height for _, bbox in slices_in_chunk)
-            union_max_x = max(bbox.x + bbox.width for _, bbox in slices_in_chunk)
+            slice_bboxes = {idx: bbox for idx, bbox in slices_in_chunk}
 
-            # Sample crop center within tissue region
-            center_y_min = max(crop_size[0] // 2, union_min_y)
-            center_y_max = min(vol_h - crop_size[0] // 2, union_max_y)
-            center_x_min = max(crop_size[1] // 2, union_min_x)
-            center_x_max = min(vol_w - crop_size[1] // 2, union_max_x)
+            # Compute intersection of all bboxes
+            intersect_y_min = max(bbox.y for bbox in slice_bboxes.values())
+            intersect_y_max = min(bbox.y + bbox.height for bbox in slice_bboxes.values())
+            intersect_x_min = max(bbox.x for bbox in slice_bboxes.values())
+            intersect_x_max = min(bbox.x + bbox.width for bbox in slice_bboxes.values())
 
-            crop_center_yx = (
-                random.randint(center_y_min, max(center_y_min, center_y_max)),
-                random.randint(center_x_min, max(center_x_min, center_x_max)),
+            # Valid start positions within intersection
+            start_y_min = intersect_y_min
+            start_y_max = max(intersect_y_min, intersect_y_max - crop_size[0])
+            start_x_min = intersect_x_min
+            start_x_max = max(intersect_x_min, intersect_x_max - crop_size[1])
+
+            start_yx = (
+                random.randint(start_y_min, max(start_y_min, start_y_max)),
+                random.randint(start_x_min, max(start_x_min, start_x_max)),
             )
 
-        # 1. Sample oblique params and compute chunk bounds
+        # Chunk bbox is just the crop region
+        chunk_bbox = TissueBoundingBox(
+            y=start_yx[0],
+            x=start_yx[1],
+            height=crop_size[0],
+            width=crop_size[1],
+        )
+
         oblique_sampler = ObliqueSliceSampler(
             slice_range=range(start_slice, end_slice),
             vol_shape=(vol_shape[0], vol_shape[1], vol_shape[2]),
             slice_axis=slice_axis.dimension,
             crop_size=crop_size,
-            crop_center_yx=crop_center_yx,
+            bbox=chunk_bbox,
             x_range=self._oblique_slice_rotation_ranges.x,
             y_range=self._oblique_slice_rotation_ranges.y,
             z_range=self._oblique_slice_rotation_ranges.z,
         )
 
-        # 2. Get computed chunk bounds (expanded to fit rotated samples)
         chunk_slices = oblique_sampler.chunk_slices
-
-        # 3. Build slices for volume indexing
         slices = [0, 0, *chunk_slices]
 
         logger.debug(
             f"Worker {self._worker_id} loading chunk for dataset {self._dataset_idx} "
-            f"(slice_axis={slice_axis.dimension}, oblique_params={oblique_sampler.params})"
+            f"(slice_axis={slice_axis.dimension}, oblique_params={oblique_sampler.params}, chunk_slices={chunk_slices})"
         )
 
-        # 4. Load chunk
         chunk_data = volume[tuple(slices)].read().result()
         self._cached_input_chunk = np.array(chunk_data)
 
         template_chunk = template_points_volume[tuple(slices)].read().result()
         self._cached_template_points = np.array(template_chunk)
 
-        logger.debug(
-            f"Worker {self._worker_id} cached chunk for dataset {self._dataset_idx}: "
-            f"chunk_slices={chunk_slices}, crop_center={crop_center_yx}"
-        )
-
         self._cached_region = CachedRegion(
             dataset_idx=self._dataset_idx,
             worker_id=self._worker_id,
             spatial_slices=chunk_slices,
             oblique_sampler=oblique_sampler,
-            crop_center_yx=crop_center_yx,
+            start_yx=start_yx,
         )
 
         return self._cached_region
 
     def sample_patches_from_cache(self) -> list[PatchSample]:
-        """
-        Sample 2D patches from the cached chunk.
-        """
+        """Sample 2D patches from the cached chunk."""
         if self._cached_input_chunk is None or self._cached_template_points is None:
             return []
 
@@ -394,12 +392,9 @@ class SliceDatasetCache(IterableDataset):
 
         oblique_sampler = region.oblique_sampler
         chunk_slices = oblique_sampler.chunk_slices
-        crop_size = self.crop_size
 
-        # slices that can be safely sampled within the cached region bounds
         slice_range_global = oblique_sampler.slice_range
 
-        # If forced coords...
         if self._forced_coords is not None and self._forced_coords[0] == self._dataset_idx:
             target_slice_global = self._forced_coords[1]
             if target_slice_global not in slice_range_global:
@@ -413,9 +408,15 @@ class SliceDatasetCache(IterableDataset):
             random.shuffle(shuffled_slices)
             target_slices_global = shuffled_slices[:target_samples]
 
+        # All patches use the same start_yx
+        start_yx = region.start_yx
+
         patches: list[PatchSample] = []
         for global_slice_idx in target_slices_global:
-            coords = oblique_sampler.extract_oblique_coords(slice_idx=global_slice_idx)
+            coords = oblique_sampler.extract_oblique_coords(
+                slice_idx=global_slice_idx,
+                start_yx=start_yx,
+            )
             coords_local = [c - chunk_slices[i].start for i, c in enumerate(coords)]
 
             patch = map_coordinates(
@@ -444,16 +445,21 @@ class SliceDatasetCache(IterableDataset):
             if self._include_tissue_mask:
                 tissue_mask = (map_coordinates(
                     self._ccf_annotations,
-                    convert_from_ants_space_tensor(template_parameters=self._template_parameters, physical_pts=torch.from_numpy(template_patch).view(-1, 3)).T,
-                    order=0, # nearest
+                    convert_from_ants_space_tensor(template_parameters=self._template_parameters,
+                                                   physical_pts=torch.from_numpy(
+                                                       template_patch).view(-1, 3)).T,
+                    order=0,
                     mode='constant',
-                    cval=0  # Value for out-of-bounds
+                    cval=0
                 ) != 0).astype('uint8').reshape(template_patch.shape[:-1])
             else:
                 tissue_mask = None
 
             if self._transform is not None:
-                transforms = self._transform(image=patch, keypoints=template_patch, mask=tissue_mask, slice_axis=slice_axis, acquisition_axes=self._metadata.axes, orientation=self._orientation)
+                transforms = self._transform(image=patch, keypoints=template_patch,
+                                             mask=tissue_mask, slice_axis=slice_axis,
+                                             acquisition_axes=self._metadata.axes,
+                                             orientation=self._orientation)
                 patch = transforms['image']
                 template_patch = transforms['keypoints']
                 tissue_mask = transforms['mask']
@@ -461,8 +467,8 @@ class SliceDatasetCache(IterableDataset):
             patches.append(
                 PatchSample(
                     slice_idx=global_slice_idx,
-                    start_y=region.crop_center_yx[0] - crop_size[0] // 2,
-                    start_x=region.crop_center_yx[1] - crop_size[1] // 2,
+                    start_y=start_yx[0],
+                    start_x=start_yx[1],
                     data=patch,
                     template_points=template_patch,
                     dataset_idx=self._dataset_idx,
