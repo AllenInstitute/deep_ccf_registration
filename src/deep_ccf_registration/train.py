@@ -1,10 +1,12 @@
 import os
+import tempfile
 from pathlib import Path
 from typing import ContextManager, Iterator, Optional, Any
 from contextlib import nullcontext
 
 import mlflow
 import numpy as np
+import pandas as pd
 import torch
 from matplotlib import pyplot as plt
 from monai.metrics import DiceMetric
@@ -83,10 +85,10 @@ def _evaluate(
     autocast_context: ContextManager,
     max_iters: int,
     denormalize_pred_template_points: bool,
+    global_step: int,
     viz_sample_count: int = 10,
     ls_template_parameters: Optional[TemplateParameters] = None,
     ccf_annotations: Optional[np.ndarray] = None,
-    global_step: Optional[int] = None,
     exclude_background_pixels: bool = False,
     predict_tissue_mask: bool = False,
     is_debug: bool = False,
@@ -110,6 +112,7 @@ def _evaluate(
     tissue_dice_scores_downsampled = []
     tissue_dice_scores_raw = []
     collected_samples = []
+    eval_records = []
     enable_viz = (
         viz_sample_count > 0
         and ls_template_parameters is not None
@@ -226,6 +229,19 @@ def _evaluate(
                 tissue_dice_scores_downsampled += tissue_dice_downsample.cpu().tolist()
                 tissue_dice_scores_raw += tissue_dice_raw.cpu().tolist()
 
+            # Collect per-sample metrics for CSV logging
+            batch_size = input_images.shape[0]
+            for sample_idx in range(batch_size):
+                record_idx = len(eval_records)
+                eval_records.append({
+                    'subject_id': batch["subject_ids"][sample_idx],
+                    'slice_idx': int(batch["slice_indices"][sample_idx].item()),
+                    'patch_y': int(batch["patch_ys"][sample_idx].item()),
+                    'patch_x': int(batch["patch_xs"][sample_idx].item()),
+                    'rmse': rmses_raw[record_idx],
+                    'rmse_downsample': rmses_downsampled[record_idx]
+                })
+
             if enable_viz and len(collected_samples) < viz_sample_count:
                 errors = (pred_points_upsample - target_template_points) ** 2
                 slice_indices = batch["slice_indices"]
@@ -292,6 +308,14 @@ def _evaluate(
                 f"validation_samples/step_{iteration}/{fig_filename}"
             )
             plt.close(fig)
+
+    # Log per-sample metrics as CSV
+    metrics_df = pd.DataFrame(eval_records)
+    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+        metrics_df.to_csv(f.name, index=False)
+        csv_path = f.name
+
+        mlflow.log_artifact(csv_path, artifact_path=f"eval_metrics/step_{global_step}")
 
     model.train()
 
