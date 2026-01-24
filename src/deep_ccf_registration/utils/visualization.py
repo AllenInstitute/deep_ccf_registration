@@ -217,7 +217,7 @@ def viz_sample(
 
     fig = plt.figure(figsize=(24, 10))
 
-    # ===== Row 1: 2D Rasterized Images =====
+    # ===== Row 1 =====
 
     sns.set_style("darkgrid")
 
@@ -265,7 +265,7 @@ def viz_sample(
     ax6.set_ylabel('DV')
     plt.colorbar(im, ax=ax6, label='DV (microns)')
 
-    # ===== Row 2: 3D Visualizations =====
+    # ===== Row 2 =====
 
     idx = np.arange(0, len(intensities))
 
@@ -333,13 +333,6 @@ def viz_sample(
 
     # Tissue mask comparison (if enabled)
     if predict_tissue_mask and predicted_tissue_masks is not None:
-        # Rasterize masks
-        predicted_mask_raster = rasterize(convert_from_ants_space(template_parameters=template_parameters, physical_pts=gt_template_points[pad_mask.flatten()]),
-                                          values=predicted_tissue_masks[pad_mask].astype(float).flatten())
-        gt_mask_raster = rasterize(convert_from_ants_space(template_parameters=template_parameters, physical_pts=gt_template_points[pad_mask.flatten()]),
-                                   values=tissue_mask[pad_mask].astype(float).flatten())
-        gt_reg_raster = rasterize(convert_from_ants_space(template_parameters=template_parameters, physical_pts=gt_template_points[pad_mask.flatten()]),
-                                          values=input_image[pad_mask].astype(float).flatten())
         # Compute mask metrics
         gt_mask_binary = tissue_mask > 0.5
         pred_mask_binary = predicted_tissue_masks > 0.5
@@ -350,18 +343,23 @@ def viz_sample(
         iou = tp / (tp + fp + fn) if (tp + fp + fn) > 0 else 0
         dice = 2 * tp / (2 * tp + fp + fn) if (2 * tp + fp + fn) > 0 else 0
 
-        # Difference visualization
-        ax12 = fig.add_subplot(2, 5, 9)
-        predicted_mask_raster = np.nan_to_num(predicted_mask_raster, nan=0.0)
-        gt_mask_raster = np.nan_to_num(gt_mask_raster, nan=0.0)
+        # Reshape to input space
+        H, W = input_image.shape
+        pred_mask_2d = predicted_tissue_masks.reshape(H, W)
+        gt_mask_2d = tissue_mask.reshape(H, W)
 
-        diff = predicted_mask_raster - gt_mask_raster
-        im = ax12.imshow(diff, origin='lower', cmap='RdBu_r', vmin=-1, vmax=1)
-        ax12.imshow(gt_reg_raster, origin='lower', cmap='gray', alpha=0.5)
-        ax12.set_title(f'Mask Diff (IoU={iou:.3f}, Dice={dice:.3f})')
-        ax12.set_xlabel('SI')
-        ax12.set_ylabel('DV')
-        plt.colorbar(im, ax=ax12, label='Pred - GT')
+        # Difference visualization in input space
+        ax = fig.add_subplot(2, 5, 9)
+        diff = pred_mask_2d.astype(float) - gt_mask_2d.astype(float)
+        im = ax.imshow(diff, origin='lower', cmap='RdBu_r', vmin=-1, vmax=1)
+        ax.imshow(input_image, origin='lower', cmap='gray', alpha=0.3)
+        ax.set_title(f'Mask Diff (IoU={iou:.3f}, Dice={dice:.3f})')
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        plt.colorbar(im, ax=ax, label='Pred - GT')
+
+    ax = fig.add_subplot(2, 5, 10)
+    ax.imshow(input_image, cmap='gray')
 
     plt.tight_layout()
 
