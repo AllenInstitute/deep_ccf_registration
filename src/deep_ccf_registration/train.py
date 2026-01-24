@@ -69,7 +69,7 @@ class RMSE(nn.Module):
 
             mask = mask.to(per_point_squared_distance.device, per_point_squared_distance.dtype)
             squared_errors = per_point_squared_distance * mask
-            valid_points = mask.sum().clamp(min=1.0)
+            valid_points = mask.sum(dim=(1, 2)).clamp(min=1.0)
             mse = squared_errors.sum(dim=(1, 2)) / valid_points
         else:
             mse = per_point_squared_distance.mean(dim=(1, 2))
