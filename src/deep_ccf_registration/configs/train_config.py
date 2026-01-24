@@ -81,3 +81,4 @@ class TrainConfig(BaseModel):
     lr_scheduler: Optional[LRScheduler] = None
 
     sample_oblique_slices: bool = False
+    use_positional_encoding: bool = False

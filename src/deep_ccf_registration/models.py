@@ -135,16 +135,14 @@ class UNetWithRegressionHeads(nn.Module):
         features = self.unet_backbone(x)
 
         if self.include_tissue_mask:
-            coord_features = features[:, :-1]
             mask_logits = features[:, -1].unsqueeze(1)
         else:
-            coord_features = features
             mask_logits = None
 
         # Concatenate with positional encoding if enabled
         if self.use_positional_encoding:
             pos_encoding = self.pos_embedding.expand(B, -1, -1, -1)
-            features = torch.cat([coord_features, pos_encoding], dim=1)
+            features = torch.cat([features, pos_encoding], dim=1)
 
         # Predict coordinates using regression head
         coords = self.coord_head(features)
