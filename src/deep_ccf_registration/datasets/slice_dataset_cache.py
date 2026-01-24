@@ -275,10 +275,6 @@ class SliceDatasetCache(IterableDataset):
             raise ValueError(f"No valid slices for dataset {self._dataset_idx}")
 
         vol_shape = volume.shape[2:]
-        in_plane_axes = [i for i in range(3) if i != slice_axis.dimension]
-        y_axis = in_plane_axes[0]
-        x_axis = in_plane_axes[1]
-
         vol_d = vol_shape[slice_axis.dimension]
 
         crop_size = self.crop_size
@@ -290,24 +286,17 @@ class SliceDatasetCache(IterableDataset):
 
             forced_y = self._forced_coords[3]
             forced_x = self._forced_coords[4]
-            slice_bboxes = {
-                target_slice: TissueBoundingBox(
-                    y=forced_y,
-                    x=forced_x,
-                    height=crop_size[0],
-                    width=crop_size[1],
-                )
-            }
             start_yx = (forced_y, forced_x)
         else:
             slice_indices = sorted([s[0] for s in valid_slices])
             min_valid_slice = min(slice_indices)
             max_valid_slice = max(slice_indices)
 
-            start_slice = random.randint(min_valid_slice, max(min_valid_slice,
-                                                              min(vol_d - self._chunk_size,
-                                                                  max_valid_slice)))
-            end_slice = min(start_slice + self._chunk_size, vol_d)
+            start_slice = random.randint(
+                min_valid_slice,
+                max(min_valid_slice, max_valid_slice - self._chunk_size)
+            )
+            end_slice = start_slice + self._chunk_size
 
             slices_in_chunk = [
                 (idx, bbox) for idx, bbox in valid_slices
