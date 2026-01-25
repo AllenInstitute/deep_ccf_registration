@@ -16,6 +16,7 @@ class ModelConfig(BaseModel):
     # number of channels in each layer of the unet in the encoder
     unet_channels: tuple[int, ...]
     unet_stride: tuple[int, ...]
+    coord_regression_head_size: str = "small"
 
 class TrainConfig(BaseModel):
     model_config = ConfigDict(extra='forbid')

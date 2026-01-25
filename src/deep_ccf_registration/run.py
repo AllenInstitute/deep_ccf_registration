@@ -356,7 +356,8 @@ def main(config_path: Path):
         image_height=config.patch_size[0] if config.longest_max_size is None else config.longest_max_size,
         image_width=config.patch_size[1] if config.longest_max_size is None else config.longest_max_size,
         include_tissue_mask=config.predict_tissue_mask,
-        use_positional_encoding=config.use_positional_encoding
+        use_positional_encoding=config.use_positional_encoding,
+        head_size=config.model.coord_regression_head_size,
     )
 
     logger.info(model)

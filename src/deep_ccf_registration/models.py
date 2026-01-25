@@ -88,33 +88,29 @@ class UNetWithRegressionHeads(nn.Module):
         # Coordinate regression head
         if head_size == "small":
             self.coord_head = nn.Sequential(
-                nn.Conv2d(feature_channels, 32, kernel_size=1),
+                nn.Conv2d(feature_channels, 16, kernel_size=1),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(32, 16, kernel_size=1),
+                nn.Conv2d(16, 16, kernel_size=1),
                 nn.ReLU(inplace=True),
                 nn.Conv2d(16, out_coords, kernel_size=1),
             )
         elif head_size == "medium":
             self.coord_head = nn.Sequential(
-                nn.Conv2d(feature_channels, 64, kernel_size=1),
+                nn.Conv2d(feature_channels, 32, kernel_size=1),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(64, 48, kernel_size=1),
+                nn.Conv2d(32, 32, kernel_size=1),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(48, 32, kernel_size=1),
+                nn.Conv2d(32, 32, kernel_size=1),
                 nn.ReLU(inplace=True),
                 nn.Conv2d(32, out_coords, kernel_size=1),
             )
         elif head_size == "large":
             self.coord_head = nn.Sequential(
-                nn.Conv2d(feature_channels, 128, kernel_size=1),
+                nn.Conv2d(feature_channels, 256, kernel_size=1),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(128, 96, kernel_size=1),
+                nn.Conv2d(256, 256, kernel_size=1),
                 nn.ReLU(inplace=True),
-                nn.Conv2d(96, 64, kernel_size=1),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(64, 32, kernel_size=1),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(32, out_coords, kernel_size=1),
+                nn.Conv2d(256, out_channels=out_coords, kernel_size=1),
             )
         else:
             raise ValueError(f"Unknown head_size: {head_size}")
