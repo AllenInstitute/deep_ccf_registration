@@ -17,6 +17,7 @@ class ModelConfig(BaseModel):
     unet_channels: tuple[int, ...]
     unet_stride: tuple[int, ...]
     coord_regression_head_size: str = "small"
+    feature_channels: int = 64
 
 class TrainConfig(BaseModel):
     model_config = ConfigDict(extra='forbid')

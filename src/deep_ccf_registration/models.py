@@ -69,7 +69,12 @@ class UNetWithRegressionHeads(nn.Module):
         self.use_positional_encoding = use_positional_encoding
         self.pos_encoding_channels = pos_encoding_channels
 
+        coord_feature_dim = feature_channels
         feature_channels = feature_channels + 1 if include_tissue_mask else feature_channels
+
+        if self.use_positional_encoding:
+            self.positional_encoding = CoordConv(H=image_height, W=image_width)
+            in_channels += 2
 
         # UNet backbone for feature extraction
         self.unet_backbone = monai.networks.nets.UNet(
@@ -81,14 +86,10 @@ class UNetWithRegressionHeads(nn.Module):
             strides=strides,
         )
 
-        if self.use_positional_encoding:
-            self.positional_encoding = CoordConv(H=image_height, W=image_width)
-            feature_channels += 2
-
         # Coordinate regression head
         if head_size == "small":
             self.coord_head = nn.Sequential(
-                nn.Conv2d(feature_channels, 16, kernel_size=1),
+                nn.Conv2d(coord_feature_dim, 16, kernel_size=1),
                 nn.ReLU(inplace=True),
                 nn.Conv2d(16, 16, kernel_size=1),
                 nn.ReLU(inplace=True),
@@ -96,7 +97,7 @@ class UNetWithRegressionHeads(nn.Module):
             )
         elif head_size == "medium":
             self.coord_head = nn.Sequential(
-                nn.Conv2d(feature_channels, 32, kernel_size=1),
+                nn.Conv2d(coord_feature_dim, 32, kernel_size=1),
                 nn.ReLU(inplace=True),
                 nn.Conv2d(32, 32, kernel_size=1),
                 nn.ReLU(inplace=True),
@@ -106,7 +107,7 @@ class UNetWithRegressionHeads(nn.Module):
             )
         elif head_size == "large":
             self.coord_head = nn.Sequential(
-                nn.Conv2d(feature_channels, 256, kernel_size=1),
+                nn.Conv2d(coord_feature_dim, 256, kernel_size=1),
                 nn.ReLU(inplace=True),
                 nn.Conv2d(256, 256, kernel_size=1),
                 nn.ReLU(inplace=True),
@@ -131,21 +132,21 @@ class UNetWithRegressionHeads(nn.Module):
         """
         B, C, H, W = x.shape
 
+        # Concatenate with positional encoding if enabled
+        if self.use_positional_encoding:
+            pos_encoding = self.positional_encoding(batch_size=B)
+            x = torch.cat([x, pos_encoding], dim=1)
+
         # Extract features from UNet backbone
         features = self.unet_backbone(x)
 
         if self.include_tissue_mask:
-            mask_logits = features[:, -1].unsqueeze(1)
+            coord_features, mask_logits = features[:, :-1], features[:, -1].unsqueeze(1)
         else:
-            mask_logits = None
-
-        # Concatenate with positional encoding if enabled
-        if self.use_positional_encoding:
-            pos_encoding = self.positional_encoding(batch_size=B)
-            features = torch.cat([features, pos_encoding], dim=1)
+            coord_features, mask_logits = features, None
 
         # Predict coordinates using regression head
-        coords = self.coord_head(features)
+        coords = self.coord_head(coord_features)
 
         # Predict tissue mask using classification head
         if self.include_tissue_mask:
