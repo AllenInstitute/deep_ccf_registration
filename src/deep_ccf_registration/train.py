@@ -402,6 +402,7 @@ def train(
         predict_tissue_mask: bool = False,
         lr_scheduler: Optional[LRScheduler] = None,
         tissue_mask_loss_weight: float = 0.1,
+        gradient_accumulation_steps: int = 1,
 ):
     """
     Train slice registration model
@@ -427,6 +428,7 @@ def train(
     ls_template_parameters: ls template AntsImageParameters
     val_viz_samples: number of validation samples to visualize each evaluation
     exclude_background_pixels: whether to zero-out background pixels in visualizations
+    gradient_accumulation_steps: Number of steps to accumulate gradients before optimizer step
 
     Returns
     -------
@@ -438,11 +440,13 @@ def train(
     best_val_loss = float("inf")
     patience_counter = 0
     global_step = 0
+    accumulation_step = 0
 
     model.to(device)
 
     logger.info(f"Starting training for {max_iters} iters")
     logger.info(f"Device: {device}")
+    logger.info(f"Gradient accumulation steps: {gradient_accumulation_steps}")
 
     if lr_scheduler == LRScheduler.ReduceLROnPlateau:
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer, patience=100)
@@ -455,7 +459,7 @@ def train(
         model.train()
         losses = []
         point_losses = []
-        tissue_mask_losses= []
+        tissue_mask_losses = []
 
         for batch in train_dataloader:
             if progress_logger is None:
@@ -470,7 +474,6 @@ def train(
             else:
                 tissue_masks = None
 
-            optimizer.zero_grad()
             with autocast_context:
                 with timed():
                     model_out = model(input_images)
@@ -490,20 +493,69 @@ def train(
                 else:
                     loss = point_loss
 
+                # Scale loss for gradient accumulation
+                loss = loss / gradient_accumulation_steps
+
+            loss.backward()
+            accumulation_step += 1
+
+            # Unscale for logging
             point_losses.append(point_loss.item())
             if predict_tissue_mask:
                 tissue_mask_losses.append(tissue_mask_loss.item())
-            losses.append(loss.item())
+            losses.append(loss.item() * gradient_accumulation_steps)
 
-            global_step += 1
+            # Only step optimizer after accumulating enough gradients
+            if accumulation_step % gradient_accumulation_steps == 0:
+                optimizer.step()
+                optimizer.zero_grad()
 
-            # Periodic evaluation
-            if global_step % eval_interval == 0:
-                logger.info(f"Evaluating at step {global_step}")
-                if is_debug:
-                    # evaluate train too
-                    _evaluate(
-                        dataloader=train_dataloader,
+                global_step += 1
+
+                if scheduler is not None:
+                    if lr_scheduler == LRScheduler.ReduceLROnPlateau:
+                        scheduler.step(metrics=point_loss.item())
+                    else:
+                        raise ValueError(f'{lr_scheduler} not supported')
+
+                train_metrics = {
+                    "train/loss": loss.item() * gradient_accumulation_steps,
+                    "train/point_loss": point_loss.item(),
+                    "train/learning_rate": optimizer.param_groups[0]['lr'],
+                }
+                if predict_tissue_mask:
+                    train_metrics['train/tissue_mask_loss'] = tissue_mask_loss.item()
+
+                mlflow.log_metrics(train_metrics, step=global_step)
+
+                log_msg = f'loss={loss.item() * gradient_accumulation_steps:.3f}'
+                if predict_tissue_mask:
+                    log_msg += f'; point_loss={point_loss.item():.3f}; tissue_mask_loss={tissue_mask_loss.item():.3f}'
+                progress_logger.log_progress(other=log_msg)
+
+                # Periodic evaluation
+                if global_step % eval_interval == 0:
+                    logger.info(f"Evaluating at step {global_step}")
+                    if is_debug:
+                        # evaluate train too
+                        _evaluate(
+                            dataloader=train_dataloader,
+                            model=model,
+                            device=device,
+                            autocast_context=autocast_context,
+                            max_iters=1 if is_debug else eval_iters,
+                            denormalize_pred_template_points=normalize_target_points,
+                            viz_sample_count=val_viz_samples,
+                            ls_template_parameters=ls_template_parameters,
+                            ccf_annotations=ccf_annotations,
+                            global_step=global_step,
+                            exclude_background_pixels=exclude_background_pixels,
+                            coord_loss=calc_coord_loss,
+                            is_debug=is_debug,
+                            predict_tissue_mask=predict_tissue_mask,
+                        )
+                    val_metrics = _evaluate(
+                        dataloader=val_dataloader,
                         model=model,
                         device=device,
                         autocast_context=autocast_context,
@@ -518,121 +570,81 @@ def train(
                         is_debug=is_debug,
                         predict_tissue_mask=predict_tissue_mask,
                     )
-                val_metrics = _evaluate(
-                    dataloader=val_dataloader,
-                    model=model,
-                    device=device,
-                    autocast_context=autocast_context,
-                    max_iters=1 if is_debug else eval_iters,
-                    denormalize_pred_template_points=normalize_target_points,
-                    viz_sample_count=val_viz_samples,
-                    ls_template_parameters=ls_template_parameters,
-                    ccf_annotations=ccf_annotations,
-                    global_step=global_step,
-                    exclude_background_pixels=exclude_background_pixels,
-                    coord_loss=calc_coord_loss,
-                    is_debug=is_debug,
-                    predict_tissue_mask=predict_tissue_mask,
-                )
 
-                current_lr = optimizer.param_groups[0]['lr']
+                    current_lr = optimizer.param_groups[0]['lr']
 
-                metrics = {
-                    "eval/loss": val_metrics["val_loss"],
-                    "eval/point_loss": val_metrics['val_point_loss'],
-                    "eval/val_rmse": val_metrics["val_rmse"],
-                    "eval/val_rmse_downsampled": val_metrics["val_rmse_downsampled"],
-                }
-                if predict_tissue_mask:
                     metrics = {
-                        **metrics,
-                        "eval/tissue_mask_loss": val_metrics['val_tissue_mask_loss'],
-                        "eval/tissue_mask_dice": val_metrics['val_tissue_mask_dice'],
-                        "eval/tissue_mask_dice_downsampled": val_metrics[
-                            'val_tissue_mask_dice_downsampled'],
+                        "eval/loss": val_metrics["val_loss"],
+                        "eval/point_loss": val_metrics['val_point_loss'],
+                        "eval/val_rmse": val_metrics["val_rmse"],
+                        "eval/val_rmse_downsampled": val_metrics["val_rmse_downsampled"],
                     }
-                mlflow.log_metrics(
-                    metrics=metrics,
-                    step=global_step
-                )
+                    if predict_tissue_mask:
+                        metrics = {
+                            **metrics,
+                            "eval/tissue_mask_loss": val_metrics['val_tissue_mask_loss'],
+                            "eval/tissue_mask_dice": val_metrics['val_tissue_mask_dice'],
+                            "eval/tissue_mask_dice_downsampled": val_metrics[
+                                'val_tissue_mask_dice_downsampled'],
+                        }
+                    mlflow.log_metrics(
+                        metrics=metrics,
+                        step=global_step
+                    )
 
-                log_msg =f"Step {global_step} | "
-                f"Train loss: {loss.item():.6f} | Val loss: {val_metrics['val_loss']:.6f} | "
-                f"Val RMSE (downsampled): {val_metrics['val_rmse_downsampled']:.6f} | Val RMSE (raw): {val_metrics['val_rmse']:.6f} | "
-                f"LR: {current_lr:.6e}"
+                    log_msg = f"Step {global_step} | " \
+                              f"Train loss: {loss.item() * gradient_accumulation_steps:.6f} | Val loss: {val_metrics['val_loss']:.6f} | " \
+                              f"Val RMSE (downsampled): {val_metrics['val_rmse_downsampled']:.6f} | Val RMSE (raw): {val_metrics['val_rmse']:.6f} | " \
+                              f"LR: {current_lr:.6e}"
 
-                if predict_tissue_mask:
-                    log_msg += f' | Train point loss: {point_loss.item():.6f} | val point loss: {val_metrics['val_point_loss']:.6f} | Val tissue mask dice: {val_metrics['val_tissue_mask_dice_downsampled']:.6f}'
+                    if predict_tissue_mask:
+                        log_msg += f' | Train point loss: {point_loss.item():.6f} | val point loss: {val_metrics["val_point_loss"]:.6f} | Val tissue mask dice: {val_metrics["val_tissue_mask_dice_downsampled"]:.6f}'
 
-                logger.info(log_msg)
+                    logger.info(log_msg)
 
-                checkpoint_path = Path(model_weights_out_dir) / f"{global_step}.pt"
-                torch.save(
-                    obj={
-                        'global_step': global_step,
-                        'model_state_dict': model.state_dict(),
-                        'optimizer_state_dict': optimizer.state_dict(),
-                        'val_rmse': val_metrics['val_rmse'],
-                        'val_rmse_downsampled': val_metrics['val_rmse_downsampled'],
-                        'lr': scheduler.get_last_lr() if scheduler is not None else learning_rate
-                    },
-                    f=checkpoint_path,
-                )
+                    checkpoint_path = Path(model_weights_out_dir) / f"{global_step}.pt"
+                    torch.save(
+                        obj={
+                            'global_step': global_step,
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'val_rmse': val_metrics['val_rmse'],
+                            'val_rmse_downsampled': val_metrics['val_rmse_downsampled'],
+                            'lr': scheduler.get_last_lr() if scheduler is not None else learning_rate
+                        },
+                        f=checkpoint_path,
+                    )
 
-                # Check for improvement
-                if val_metrics['val_loss'] < best_val_loss - min_delta:
-                    best_val_loss = val_metrics['val_loss']
-                    patience_counter = 0
+                    # Check for improvement
+                    if val_metrics['val_loss'] < best_val_loss - min_delta:
+                        best_val_loss = val_metrics['val_loss']
+                        patience_counter = 0
 
-                    mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
-                    mlflow.log_metric("best_val_loss", best_val_loss, step=global_step)
+                        mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
+                        mlflow.log_metric("best_val_loss", best_val_loss, step=global_step)
 
-                    logger.info(f"New best model saved! Val loss: {best_val_loss:.6f}")
-                else:
-                    patience_counter += 1
-                    logger.info(f"No improvement. Patience: {patience_counter}/{patience}")
+                        logger.info(f"New best model saved! Val loss: {best_val_loss:.6f}")
+                    else:
+                        patience_counter += 1
+                        logger.info(f"No improvement. Patience: {patience_counter}/{patience}")
 
-                # Early stopping
-                if patience_counter >= patience:
-                    logger.info(f"\nEarly stopping triggered after {global_step} steps")
-                    logger.info(f"Best validation RMSE: {best_val_loss:.6f}")
+                    # Early stopping
+                    if patience_counter >= patience:
+                        logger.info(f"\nEarly stopping triggered after {global_step} steps")
+                        logger.info(f"Best validation RMSE: {best_val_loss:.6f}")
+                        mlflow.log_metric("final_best_val_rmse", best_val_loss)
+
+                        return best_val_loss
+
+                    # Reset train losses for next eval period
+                    point_losses = []
+                    losses = []
+                    tissue_mask_losses = []
+                    model.train()
+
+                if global_step == max_iters:
+                    logger.info(
+                        f"\nTraining completed! Best validation RMSE: {best_val_loss:.6f}")
+
                     mlflow.log_metric("final_best_val_rmse", best_val_loss)
-
                     return best_val_loss
-
-                # Reset train losses for next eval period
-                point_losses = []
-                losses = []
-                tissue_mask_losses = []
-                model.train()
-
-            loss.backward()
-            optimizer.step()
-
-            if scheduler is not None:
-                if lr_scheduler == LRScheduler.ReduceLROnPlateau:
-                    scheduler.step(metrics=point_loss.item())
-                else:
-                    raise ValueError(f'{lr_scheduler} not supported')
-
-            train_metrics = {
-                "train/loss": loss.item(),
-                "train/point_loss": point_loss.item(),
-                "train/learning_rate": optimizer.param_groups[0]['lr'],
-            }
-            if predict_tissue_mask:
-                train_metrics['train/tissue_mask_loss']: tissue_mask_loss.item()
-
-            mlflow.log_metrics(train_metrics, step=global_step)
-
-            if global_step == max_iters:
-                logger.info(
-                    f"\nTraining completed! Best validation RMSE: {best_val_loss:.6f}")
-
-                mlflow.log_metric("final_best_val_rmse", best_val_loss)
-                return best_val_loss
-
-            log_msg = f'loss={loss.item():.3f}'
-            if predict_tissue_mask:
-                log_msg += f'; point_loss={point_loss.item():.3f}; tissue_mask_loss={tissue_mask_loss.item():.3f}'
-            progress_logger.log_progress(other=log_msg)

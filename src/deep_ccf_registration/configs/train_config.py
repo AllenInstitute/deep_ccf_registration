@@ -84,3 +84,4 @@ class TrainConfig(BaseModel):
 
     sample_oblique_slices: bool = False
     use_positional_encoding: bool = False
+    gradient_accumulation_steps: int = 1
