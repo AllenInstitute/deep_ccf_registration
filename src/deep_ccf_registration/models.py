@@ -3,6 +3,19 @@ import torch
 import torch.nn as nn
 from typing import Optional
 
+class CoordConv(nn.Module):
+    """from An Intriguing Failing of Convolutional Neural Networks and the CoordConv Solution, Liu et al"""
+    def __init__(self, H: int, W: int):
+        super().__init__()
+        coords = torch.stack(torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij'),
+                             dim=0).float()  # (2, H, W)
+        coords[0] /= (H - 1)
+        coords[1] /= (W - 1)
+        self.register_buffer('coords', coords)
+
+    def forward(self, batch_size: int):
+        return self.coords.unsqueeze(0).expand(batch_size, -1, -1, -1)
+
 
 class UNetWithRegressionHeads(nn.Module):
     """
@@ -68,23 +81,14 @@ class UNetWithRegressionHeads(nn.Module):
             strides=strides,
         )
 
-        # Positional encoding (learned embeddings for each spatial location)
-        if use_positional_encoding:
-            if image_height is None or image_width is None:
-                raise ValueError(
-                    "image_height and image_width must be specified when use_positional_encoding=True"
-                )
-            self.pos_embedding = nn.Parameter(
-                torch.randn(1, pos_encoding_channels, image_height, image_width)
-            )
-            input_channels = feature_channels + pos_encoding_channels
-        else:
-            input_channels = feature_channels
+        if self.use_positional_encoding:
+            self.positional_encoding = CoordConv(H=image_height, W=image_width)
+            feature_channels += 2
 
         # Coordinate regression head
         if head_size == "small":
             self.coord_head = nn.Sequential(
-                nn.Conv2d(input_channels, 32, kernel_size=1),
+                nn.Conv2d(feature_channels, 32, kernel_size=1),
                 nn.ReLU(inplace=True),
                 nn.Conv2d(32, 16, kernel_size=1),
                 nn.ReLU(inplace=True),
@@ -92,7 +96,7 @@ class UNetWithRegressionHeads(nn.Module):
             )
         elif head_size == "medium":
             self.coord_head = nn.Sequential(
-                nn.Conv2d(input_channels, 64, kernel_size=1),
+                nn.Conv2d(feature_channels, 64, kernel_size=1),
                 nn.ReLU(inplace=True),
                 nn.Conv2d(64, 48, kernel_size=1),
                 nn.ReLU(inplace=True),
@@ -102,7 +106,7 @@ class UNetWithRegressionHeads(nn.Module):
             )
         elif head_size == "large":
             self.coord_head = nn.Sequential(
-                nn.Conv2d(input_channels, 128, kernel_size=1),
+                nn.Conv2d(feature_channels, 128, kernel_size=1),
                 nn.ReLU(inplace=True),
                 nn.Conv2d(128, 96, kernel_size=1),
                 nn.ReLU(inplace=True),
@@ -141,7 +145,7 @@ class UNetWithRegressionHeads(nn.Module):
 
         # Concatenate with positional encoding if enabled
         if self.use_positional_encoding:
-            pos_encoding = self.pos_embedding.expand(B, -1, -1, -1)
+            pos_encoding = self.positional_encoding(batch_size=B)
             features = torch.cat([features, pos_encoding], dim=1)
 
         # Predict coordinates using regression head
