@@ -8,10 +8,13 @@ class CoordConv(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.coords = None
+        self.register_buffer('coords', None, persistent=False)
 
-    def forward(self, batch_size: int, H: int, W: int):
+    def forward(self, batch_size: int, H: int, W: int, device=None):
         if self.coords is None or self.coords.shape[-2:] != (H, W):
+            if device is None:
+                device = next(self.parameters(), torch.tensor(0)).device
+
             coords = torch.stack(
                 torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij'),
                 dim=0
@@ -19,7 +22,6 @@ class CoordConv(nn.Module):
             coords[0] /= (H - 1)
             coords[1] /= (W - 1)
 
-            device = next(self.parameters(), torch.tensor(0)).device
             self.coords = coords.to(device)
 
         return self.coords.unsqueeze(0).expand(batch_size, -1, -1, -1)
