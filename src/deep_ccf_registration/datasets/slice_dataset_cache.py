@@ -222,13 +222,21 @@ class SliceDatasetCache(IterableDataset):
         slice_axis = self._metadata.get_slice_axis(orientation=self._orientation)
         in_plane_axes = [i for i in range(3) if i != slice_axis.dimension]
 
+        # Clamp to max bounding box extent so patches stay within tissue
+        valid_bboxes = [b for b in self._tissue_bboxes if b is not None]
+        max_bbox_h = max(b.height for b in valid_bboxes)
+        max_bbox_w = max(b.width for b in valid_bboxes)
+
+        h_limit = min(vol_shape[in_plane_axes[0]], max_bbox_h)
+        w_limit = min(vol_shape[in_plane_axes[1]], max_bbox_w)
+
         if self._patch_size is not None:
             crop_size = (
-                min(self._patch_size, vol_shape[in_plane_axes[0]]),
-                min(self._patch_size, vol_shape[in_plane_axes[1]]),
+                min(self._patch_size, h_limit),
+                min(self._patch_size, w_limit),
             )
         else:
-            crop_size = vol_shape[in_plane_axes[0]], vol_shape[in_plane_axes[1]]
+            crop_size = (h_limit, w_limit)
 
         return crop_size
 
