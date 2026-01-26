@@ -85,3 +85,6 @@ class TrainConfig(BaseModel):
     sample_oblique_slices: bool = False
     use_positional_encoding: bool = False
     gradient_accumulation_steps: int = 1
+
+    # microns/px to resample to
+    resample_to_fixed_resolution: Optional[int] = None

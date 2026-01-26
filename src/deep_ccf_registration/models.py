@@ -1,19 +1,27 @@
 import monai.networks.nets
 import torch
 import torch.nn as nn
-from typing import Optional
+
 
 class CoordConv(nn.Module):
     """from An Intriguing Failing of Convolutional Neural Networks and the CoordConv Solution, Liu et al"""
-    def __init__(self, H: int, W: int):
-        super().__init__()
-        coords = torch.stack(torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij'),
-                             dim=0).float()  # (2, H, W)
-        coords[0] /= (H - 1)
-        coords[1] /= (W - 1)
-        self.register_buffer('coords', coords)
 
-    def forward(self, batch_size: int):
+    def __init__(self):
+        super().__init__()
+        self.coords = None
+
+    def forward(self, batch_size: int, H: int, W: int):
+        if self.coords is None or self.coords.shape[-2:] != (H, W):
+            coords = torch.stack(
+                torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij'),
+                dim=0
+            ).float()  # (2, H, W)
+            coords[0] /= (H - 1)
+            coords[1] /= (W - 1)
+
+            device = next(self.parameters(), torch.tensor(0)).device
+            self.coords = coords.to(device)
+
         return self.coords.unsqueeze(0).expand(batch_size, -1, -1, -1)
 
 
@@ -42,8 +50,6 @@ class UNetWithRegressionHeads(nn.Module):
         head_size: str = "small",
         use_positional_encoding: bool = False,
         pos_encoding_channels: int = 16,
-        image_height: Optional[int] = None,
-        image_width: Optional[int] = None,
     ):
         """
         Parameters
@@ -73,7 +79,7 @@ class UNetWithRegressionHeads(nn.Module):
         feature_channels = feature_channels + 1 if include_tissue_mask else feature_channels
 
         if self.use_positional_encoding:
-            self.positional_encoding = CoordConv(H=image_height, W=image_width)
+            self.positional_encoding = CoordConv()
             in_channels += 2
 
         # UNet backbone for feature extraction
@@ -134,7 +140,7 @@ class UNetWithRegressionHeads(nn.Module):
 
         # Concatenate with positional encoding if enabled
         if self.use_positional_encoding:
-            pos_encoding = self.positional_encoding(batch_size=B)
+            pos_encoding = self.positional_encoding(batch_size=B, H=H, W=W)
             x = torch.cat([x, pos_encoding], dim=1)
 
         # Extract features from UNet backbone

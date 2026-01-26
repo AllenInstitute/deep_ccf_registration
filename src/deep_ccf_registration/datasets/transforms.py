@@ -15,6 +15,49 @@ from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.metadata import SliceOrientation, AcquisitionAxis
 
 
+class Resample(albumentations.DualTransform):
+    """Resample to fixed resolution"""
+    def __init__(
+            self,
+            fixed_resolution: int = 48,
+            resize_target: bool = True,
+            resize_mask: bool = True
+
+    ):
+        super().__init__(p=1.0)
+        self._fixed_resolution = fixed_resolution
+        self._resize_target = resize_target
+        self._resize_mask = resize_mask
+
+    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "acquisition_axes": data["acquisition_axes"],
+            "slice_axis": data["slice_axis"],
+            "orientation": data["orientation"],
+        }
+
+    def apply(self, img: np.ndarray, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis, orientation: SliceOrientation,  **params: Any) -> np.ndarray:
+        return self._resample(x=img, acquisition_axes=acquisition_axes, slice_axis=slice_axis)
+
+    def apply_to_mask(self, mask: np.ndarray, *args: Any, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis, orientation: SliceOrientation,  **params: Any) -> np.ndarray:
+        if not self._resize_mask:
+            return mask
+        return self._resample(x=mask, acquisition_axes=acquisition_axes, slice_axis=slice_axis)
+
+    def apply_to_keypoints(self, keypoints: np.ndarray, *args: Any, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis, orientation: SliceOrientation,  **params: Any) -> np.ndarray:
+        if not self._resize_target:
+            return keypoints
+        return self._resample(x=keypoints, acquisition_axes=acquisition_axes, slice_axis=slice_axis)
+
+    def _resample(self, x: np.ndarray, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis):
+        axes = sorted(acquisition_axes, key=lambda x: x.dimension)
+        axes = [x for x in axes if x.dimension != slice_axis.dimension]
+        scale_y = axes[0].resolution * 2**3 / self._fixed_resolution
+        scale_x = axes[1].resolution * 2**3 / self._fixed_resolution
+
+        resampled = cv2.resize(x, None, fx=scale_x, fy=scale_y)
+        return resampled
+
 class LongestMaxSize(albumentations.DualTransform):
     """Resize so the longest side matches ``max_size`` while keeping aspect."""
 
@@ -191,11 +234,13 @@ def get_physical_extent(origin, scale, direction, shape):
 
     return extent_min, extent_max
 
-def build_transform(config: TrainConfig, is_train: bool, template_parameters: TemplateParameters):
+def build_transform(config: TrainConfig, template_parameters: TemplateParameters):
     transforms = []
 
     if config.longest_max_size is not None:
-        transforms.append(LongestMaxSize(max_size=config.longest_max_size, resize_target=is_train, resize_mask=is_train))
+        transforms.append(LongestMaxSize(max_size=config.longest_max_size))
+    if config.resample_to_fixed_resolution is not None:
+        transforms.append(Resample(fixed_resolution=config.resample_to_fixed_resolution))
 
     if config.normalize_input_image:
         transforms.append(ImageNormalization())

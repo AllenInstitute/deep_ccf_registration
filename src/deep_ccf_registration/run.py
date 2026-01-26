@@ -96,7 +96,7 @@ class RepeatSinglePatchIterator:
 class CollatedBatchIterator:
     """Wrap an iterator of PatchSample batches and emit collated tensors."""
 
-    def __init__(self, base_iterator, patch_size: int, is_train: bool):
+    def __init__(self, base_iterator, is_train: bool, patch_size: Optional[int] = None):
         self._base_iterator = base_iterator
         self._patch_size = patch_size
         self._is_train = is_train
@@ -105,7 +105,7 @@ class CollatedBatchIterator:
         for batch in self._base_iterator:
             if not batch:
                 continue
-            yield collate_patch_samples(batch, patch_size=self._patch_size, is_train=self._is_train)
+            yield collate_patch_samples(batch)
 
 
 def create_dataloader(
@@ -138,7 +138,6 @@ def create_dataloader(
         transform = build_transform(
             config=config,
             template_parameters=template_parameters,
-            is_train=is_train,
         )
         datasets.append(
             SliceDatasetCache(
@@ -148,7 +147,7 @@ def create_dataloader(
                 orientation=config.orientation,
                 tensorstore_aws_credentials_method=config.tensorstore_aws_credentials_method,
                 registration_downsample_factor=config.registration_downsample_factor,
-                patch_size=config.patch_size[0],
+                patch_size=config.patch_size[0] if config.patch_size is not None else None,
                 max_chunks_per_dataset=None if config.debug else 1,
                 transform=transform,
                 template_parameters=template_parameters,
@@ -182,7 +181,9 @@ def create_dataloader(
             RepeatSinglePatchIterator.shared_coords = forced_coords
         iterator = RepeatSinglePatchIterator(base_iterator=iterator, batch_size=batch_size, is_train=is_train)
 
-    return CollatedBatchIterator(iterator, patch_size=config.patch_size[0], is_train=is_train)
+    return CollatedBatchIterator(iterator,
+                                 patch_size=config.patch_size[0] if config.patch_size is not None else None,
+                                 is_train=is_train)
 
 logger.remove()
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -353,8 +354,6 @@ def main(config_path: Path):
         in_channels=1,
         channels=config.model.unet_channels,
         out_coords=3,
-        image_height=config.patch_size[0] if config.longest_max_size is None else config.longest_max_size,
-        image_width=config.patch_size[1] if config.longest_max_size is None else config.longest_max_size,
         include_tissue_mask=config.predict_tissue_mask,
         use_positional_encoding=config.use_positional_encoding,
         head_size=config.model.coord_regression_head_size,

@@ -222,10 +222,14 @@ class SliceDatasetCache(IterableDataset):
         slice_axis = self._metadata.get_slice_axis(orientation=self._orientation)
         in_plane_axes = [i for i in range(3) if i != slice_axis.dimension]
 
-        crop_size = (
-            min(self._patch_size, vol_shape[in_plane_axes[0]]),
-            min(self._patch_size, vol_shape[in_plane_axes[1]]),
-        )
+        if self._patch_size is not None:
+            crop_size = (
+                min(self._patch_size, vol_shape[in_plane_axes[0]]),
+                min(self._patch_size, vol_shape[in_plane_axes[1]]),
+            )
+        else:
+            crop_size = vol_shape[in_plane_axes[0]], vol_shape[in_plane_axes[1]]
+
         return crop_size
 
     def _get_oblique_rotation_ranges(self) -> ObliqueSliceRotationRanges:
@@ -325,7 +329,6 @@ class SliceDatasetCache(IterableDataset):
                 random.randint(start_x_min, max(start_x_min, start_x_max)),
             )
 
-        # Chunk bbox is just the crop region
         chunk_bbox = TissueBoundingBox(
             y=start_yx[0],
             x=start_yx[1],
@@ -604,10 +607,9 @@ class ShardedMultiDatasetCache(IterableDataset):
             yield from ds
 
 
-def collate_patch_samples(samples: list[PatchSample], patch_size: int, is_train: bool) -> dict:
+def collate_patch_samples(samples: list[PatchSample], pad_dim: int = 512) -> dict:
     """
     Collate a list of PatchSample into a batched dictionary.
-
     Returns a dict with:
         - input_images: (B, 1, H, W) tensor
         - dataset_indices: list of dataset identifiers (strings)
@@ -621,23 +623,15 @@ def collate_patch_samples(samples: list[PatchSample], patch_size: int, is_train:
         - pad_mask_widths: (B,) tensor of valid pixel counts along W
     """
     batch_size = len(samples)
-    heights = [s.data.shape[0] for s in samples]
-    widths = [s.data.shape[1] for s in samples]
-
-    target_h, target_w = (max(max(heights, widths)), max(max(heights, widths)))
-
     image_dtype = samples[0].data.dtype
     template_dtype = samples[0].template_points.dtype if samples[0].template_points is not None else np.float32
 
-    images = np.zeros((batch_size, 1, target_h, target_w), dtype=image_dtype)
-
-    # in train mode we resize the target. For inference we don't modify this size
-    template_points = np.zeros((batch_size, 3, target_h if is_train else patch_size, target_w if is_train else patch_size), dtype=template_dtype)
-    pad_masks = np.zeros((batch_size, target_h if is_train else patch_size, target_w if is_train else patch_size), dtype=np.uint8)
-    tissue_masks = np.zeros((batch_size, target_h if is_train else patch_size, target_w if is_train else patch_size), dtype=np.float32)
+    images = np.zeros((batch_size, 1, pad_dim, pad_dim), dtype=image_dtype)
+    template_points = np.zeros((batch_size, 3, pad_dim, pad_dim), dtype=template_dtype)
+    pad_masks = np.zeros((batch_size, pad_dim, pad_dim), dtype=np.uint8)
+    tissue_masks = np.zeros((batch_size, pad_dim, pad_dim), dtype=np.float32)
     pad_mask_heights = np.zeros(batch_size, dtype=np.int32)
     pad_mask_widths = np.zeros(batch_size, dtype=np.int32)
-
 
     for idx, sample in enumerate(samples):
         img = sample.data

@@ -95,22 +95,13 @@ def _evaluate(
     tissue_mask_weight: float = 0.1
 ) -> dict[str, Any]:
     """
-    Evaluate model and report losses/RMSEs at multiple resolutions.
-
-    Returns
-    -------
-    tuple[float, float, float]
-        Validation loss, RMSE at the prediction resolution, and RMSE after
-        upsampling predictions back to the raw template resolution.
+    Evaluate model and report losses/RMSEs.
     """
     model.eval()
     losses = []
     point_losses = []
     tissue_mask_losses = []
-    rmses_downsampled = []
-    rmses_raw = []
-    tissue_dice_scores_downsampled = []
-    tissue_dice_scores_raw = []
+    rmses = []
     collected_samples = []
     eval_records = []
     enable_viz = (
@@ -119,7 +110,6 @@ def _evaluate(
         and ccf_annotations is not None
     )
     tissue_mask_dice_metric = DiceMetric(num_classes=2, include_background=False)
-    tissue_mask_downsample_dice_metric = DiceMetric(num_classes=2, include_background=False)
 
     with torch.no_grad():
         for i, batch in enumerate(dataloader):
@@ -129,63 +119,31 @@ def _evaluate(
             input_images = batch["input_images"].to(device)
             target_template_points = batch["target_template_points"].to(device)
             pad_masks = batch["pad_masks"].to(device)
-            pad_mask_heights = batch["pad_mask_heights"].to(device)
-            pad_mask_widths = batch["pad_mask_widths"].to(device)
 
             if predict_tissue_mask:
                 tissue_masks = batch["tissue_masks"].to(device)
+            else:
+                tissue_masks = None
 
             with autocast_context:
                 pred = model(input_images)
                 if predict_tissue_mask:
                     pred_points, pred_tissue_mask_logits = pred[:, :-1], pred[:, -1]
                     pred_tissue_mask = F.sigmoid(pred_tissue_mask_logits) > 0.5
-                    pred_tissue_mask_logits_upsample = _resize_to_target(
-                        x=pred_tissue_mask_logits.unsqueeze(1),
-                        target_template_points=target_template_points).squeeze(1)
-                    pred_tissue_mask_upsample = F.sigmoid(pred_tissue_mask_logits_upsample) > 0.5
-
-
                 else:
                     pred_points = pred
-                if pred_points.shape != target_template_points.shape:
-                    # downsample the target to match the prediction resolution
-                    target_template_points_downsample = F.interpolate(
-                        target_template_points,
-                        size=pred_points.shape[-2:],
-                        mode="bilinear",
-                        align_corners=False,
-                    )
-                    pad_masks_downsample = _resize_pad_masks_from_sizes(
-                        valid_heights=pad_mask_heights,
-                        valid_widths=pad_mask_widths,
-                        original_size=pad_masks.shape[-2:],
-                        target_size=pred_points.shape[-2:],
-                    )
-                    if predict_tissue_mask:
-                        tissue_masks_downsample = F.interpolate(
-                            tissue_masks.unsqueeze(1),
-                            size=pred_points.shape[-2:],
-                            mode="bilinear",
-                            align_corners=False,
-                        ).squeeze(1)
-                    else:
-                        tissue_masks_downsample = None
-                else:
-                    target_template_points_downsample = target_template_points
-                    pad_masks_downsample = pad_masks
-                    if predict_tissue_mask:
-                        tissue_masks_downsample = tissue_masks
+                    pred_tissue_mask_logits = None
+                    pred_tissue_mask = None
 
                 if predict_tissue_mask:
-                    masks = tissue_masks_downsample
+                    masks = tissue_masks
                 else:
-                    masks = pad_masks_downsample
-                point_loss = coord_loss(pred=pred_points, target=target_template_points_downsample, mask=masks)
+                    masks = pad_masks
+
+                point_loss = coord_loss(pred=pred_points, target=target_template_points, mask=masks)
 
                 if predict_tissue_mask:
-                    tissue_mask_loss = F.binary_cross_entropy_with_logits(pred_tissue_mask_logits,
-                                                                          tissue_masks_downsample)
+                    tissue_mask_loss = F.binary_cross_entropy_with_logits(pred_tissue_mask_logits, tissue_masks)
                     loss = point_loss + tissue_mask_weight * tissue_mask_loss
                 else:
                     loss = point_loss
@@ -206,28 +164,13 @@ def _evaluate(
                     x=target_template_points,
                     template_parameters=ls_template_parameters,
                 )
-                target_template_points_downsample = get_template_point_normalization_inverse(
-                    x=target_template_points_downsample,
-                    template_parameters=ls_template_parameters,
-                )
 
-            pred_points_upsample = _resize_to_target(x=pred_points, target_template_points=target_template_points)
-            rmse_downsample = RMSE()(pred=pred_points, target=target_template_points_downsample, mask=tissue_masks_downsample if predict_tissue_mask else pad_masks_downsample)
-            rmse_raw = RMSE()(pred=pred_points_upsample, target=target_template_points, mask=tissue_masks if predict_tissue_mask else pad_masks)
+            rmse = RMSE()(pred=pred_points, target=target_template_points, mask=masks)
 
             if predict_tissue_mask:
-                tissue_dice_downsample = tissue_mask_downsample_dice_metric(y_pred=pred_tissue_mask.unsqueeze(1), y=tissue_masks_downsample.unsqueeze(1))
-                tissue_dice_raw = tissue_mask_dice_metric(y_pred=pred_tissue_mask_upsample.unsqueeze(1), y=tissue_masks.unsqueeze(1))
-            else:
-                tissue_dice_downsample = None
-                tissue_dice_raw = None
+                tissue_mask_dice_metric(y_pred=pred_tissue_mask.unsqueeze(1), y=tissue_masks.unsqueeze(1))
 
-            rmses_downsampled += rmse_downsample.cpu().tolist()
-            rmses_raw += rmse_raw.cpu().tolist()
-
-            if predict_tissue_mask:
-                tissue_dice_scores_downsampled += tissue_dice_downsample.cpu().tolist()
-                tissue_dice_scores_raw += tissue_dice_raw.cpu().tolist()
+            rmses += rmse.cpu().tolist()
 
             # Collect per-sample metrics for CSV logging
             batch_size = input_images.shape[0]
@@ -238,12 +181,11 @@ def _evaluate(
                     'slice_idx': int(batch["slice_indices"][sample_idx].item()),
                     'patch_y': int(batch["patch_ys"][sample_idx].item()),
                     'patch_x': int(batch["patch_xs"][sample_idx].item()),
-                    'rmse': rmses_raw[record_idx],
-                    'rmse_downsample': rmses_downsampled[record_idx]
+                    'rmse': rmses[record_idx],
                 })
 
             if enable_viz and len(collected_samples) < viz_sample_count:
-                errors = (pred_points_upsample - target_template_points) ** 2
+                errors = (pred_points - target_template_points) ** 2
                 slice_indices = batch["slice_indices"]
                 patch_ys = batch["patch_ys"]
                 patch_xs = batch["patch_xs"]
@@ -253,12 +195,12 @@ def _evaluate(
                 take = min(remaining, input_images.shape[0])
                 for sample_idx in range(take):
                     collected_samples.append({
-                        "input_image": _resize_to_target(x=input_images[sample_idx].unsqueeze(0), target_template_points=target_template_points[sample_idx]).squeeze(),
-                        "pred_coords": pred_points_upsample[sample_idx].detach().cpu(),
+                        "input_image": input_images[sample_idx].squeeze().detach().cpu(),
+                        "pred_coords": pred_points[sample_idx].detach().cpu(),
                         "gt_coords": target_template_points[sample_idx].detach().cpu(),
                         "pad_mask": pad_masks[sample_idx].detach().cpu(),
-                        "tissue_mask": tissue_masks[sample_idx].detach() if predict_tissue_mask else None,
-                        "pred_tissue_masks": F.sigmoid(pred_tissue_mask_logits_upsample[sample_idx]).detach() if predict_tissue_mask else None,
+                        "tissue_mask": tissue_masks[sample_idx].detach().cpu() if predict_tissue_mask else None,
+                        "pred_tissue_masks": F.sigmoid(pred_tissue_mask_logits[sample_idx]).detach().cpu() if predict_tissue_mask else None,
                         "errors": errors[sample_idx].detach().cpu().numpy(),
                         "slice_idx": int(slice_indices[sample_idx].item()),
                         "patch_y": int(patch_ys[sample_idx].item()),
@@ -269,18 +211,15 @@ def _evaluate(
                         break
 
     val_loss = np.mean(losses)
-    val_rmse_downsampled = np.mean(rmses_downsampled)
-    val_rmse_raw = np.mean(rmses_raw)
+    val_rmse = np.mean(rmses)
 
     if predict_tissue_mask:
         val_point_loss = np.mean(point_losses)
         val_tissue_mask_loss = np.mean(tissue_mask_losses)
-        val_tissue_mask_dice_downsampled = np.mean(tissue_mask_downsample_dice_metric.aggregate().item())
-        val_tissue_mask_dice_raw = np.mean(tissue_mask_dice_metric.aggregate().item())
+        val_tissue_mask_dice = np.mean(tissue_mask_dice_metric.aggregate().item())
     else:
         val_point_loss = val_loss
-        val_tissue_mask_dice_raw = None
-        val_tissue_mask_dice_downsampled = None
+        val_tissue_mask_dice = None
         val_tissue_mask_loss = None
 
     if enable_viz and collected_samples:
@@ -323,10 +262,8 @@ def _evaluate(
         "val_point_loss": val_point_loss,
         "val_tissue_mask_loss": val_tissue_mask_loss,
         "val_loss": val_loss,
-        "val_rmse_downsampled": val_rmse_downsampled,
-        "val_rmse": val_rmse_raw,
-        "val_tissue_mask_dice_downsampled": val_tissue_mask_dice_downsampled,
-        "val_tissue_mask_dice": val_tissue_mask_dice_raw
+        "val_rmse": val_rmse,
+        "val_tissue_mask_dice": val_tissue_mask_dice,
     }
 
 
@@ -577,15 +514,12 @@ def train(
                         "eval/loss": val_metrics["val_loss"],
                         "eval/point_loss": val_metrics['val_point_loss'],
                         "eval/val_rmse": val_metrics["val_rmse"],
-                        "eval/val_rmse_downsampled": val_metrics["val_rmse_downsampled"],
                     }
                     if predict_tissue_mask:
                         metrics = {
                             **metrics,
                             "eval/tissue_mask_loss": val_metrics['val_tissue_mask_loss'],
                             "eval/tissue_mask_dice": val_metrics['val_tissue_mask_dice'],
-                            "eval/tissue_mask_dice_downsampled": val_metrics[
-                                'val_tissue_mask_dice_downsampled'],
                         }
                     mlflow.log_metrics(
                         metrics=metrics,
@@ -594,11 +528,11 @@ def train(
 
                     log_msg = f"Step {global_step} | " \
                               f"Train loss: {loss.item() * gradient_accumulation_steps:.6f} | Val loss: {val_metrics['val_loss']:.6f} | " \
-                              f"Val RMSE (downsampled): {val_metrics['val_rmse_downsampled']:.6f} | Val RMSE (raw): {val_metrics['val_rmse']:.6f} | " \
+                              f"Val RMSE (raw): {val_metrics['val_rmse']:.6f} | " \
                               f"LR: {current_lr:.6e}"
 
                     if predict_tissue_mask:
-                        log_msg += f' | Train point loss: {point_loss.item():.6f} | val point loss: {val_metrics["val_point_loss"]:.6f} | Val tissue mask dice: {val_metrics["val_tissue_mask_dice_downsampled"]:.6f}'
+                        log_msg += f' | Train point loss: {point_loss.item():.6f} | val point loss: {val_metrics["val_point_loss"]:.6f} | Val tissue mask dice: {val_metrics["val_tissue_mask_dice"]:.6f}'
 
                     logger.info(log_msg)
 
@@ -609,7 +543,7 @@ def train(
                             'model_state_dict': model.state_dict(),
                             'optimizer_state_dict': optimizer.state_dict(),
                             'val_rmse': val_metrics['val_rmse'],
-                            'val_rmse_downsampled': val_metrics['val_rmse_downsampled'],
+                            'val_rmse': val_metrics['val_rmse'],
                             'lr': scheduler.get_last_lr() if scheduler is not None else learning_rate
                         },
                         f=checkpoint_path,
