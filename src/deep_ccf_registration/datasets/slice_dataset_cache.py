@@ -607,7 +607,7 @@ class ShardedMultiDatasetCache(IterableDataset):
             yield from ds
 
 
-def collate_patch_samples(samples: list[PatchSample], pad_dim: int = 512) -> dict:
+def collate_patch_samples(samples: list[PatchSample], pad_multiple: int = 32) -> dict:
     """
     Collate a list of PatchSample into a batched dictionary.
     Returns a dict with:
@@ -624,12 +624,22 @@ def collate_patch_samples(samples: list[PatchSample], pad_dim: int = 512) -> dic
     """
     batch_size = len(samples)
     image_dtype = samples[0].data.dtype
-    template_dtype = samples[0].template_points.dtype if samples[0].template_points is not None else np.float32
+    template_dtype = samples[0].template_points.dtype if samples[
+                                                             0].template_points is not None else np.float32
 
-    images = np.zeros((batch_size, 1, pad_dim, pad_dim), dtype=image_dtype)
-    template_points = np.zeros((batch_size, 3, pad_dim, pad_dim), dtype=template_dtype)
-    pad_masks = np.zeros((batch_size, pad_dim, pad_dim), dtype=np.uint8)
-    tissue_masks = np.zeros((batch_size, pad_dim, pad_dim), dtype=np.float32)
+    # Find max dimensions across batch
+    max_h = max(s.data.shape[0] for s in samples)
+    max_w = max(s.data.shape[1] for s in samples)
+
+    # Round up to nearest multiple of pad_multiple
+    # so that input divisible by downsampling in network
+    pad_h = ((max_h + pad_multiple - 1) // pad_multiple) * pad_multiple
+    pad_w = ((max_w + pad_multiple - 1) // pad_multiple) * pad_multiple
+
+    images = np.zeros((batch_size, 1, pad_h, pad_w), dtype=image_dtype)
+    template_points = np.zeros((batch_size, 3, pad_h, pad_w), dtype=template_dtype)
+    pad_masks = np.zeros((batch_size, pad_h, pad_w), dtype=np.uint8)
+    tissue_masks = np.zeros((batch_size, pad_h, pad_w), dtype=np.float32)
     pad_mask_heights = np.zeros(batch_size, dtype=np.int32)
     pad_mask_widths = np.zeros(batch_size, dtype=np.int32)
 
@@ -642,14 +652,16 @@ def collate_patch_samples(samples: list[PatchSample], pad_dim: int = 512) -> dic
         if sample.template_points is None:
             raise ValueError("PatchSample missing template_points; cannot collate")
         sample_template_points = np.transpose(sample.template_points, (2, 0, 1))
-        template_points[idx, :, :sample_template_points.shape[1], :sample_template_points.shape[2]] = sample_template_points
+        template_points[idx, :, :sample_template_points.shape[1],
+        :sample_template_points.shape[2]] = sample_template_points
 
         pad_masks[idx, :template_points_h, :template_points_w] = 1
         pad_mask_heights[idx] = template_points_h
         pad_mask_widths[idx] = template_points_w
 
         if sample.tissue_mask is not None:
-            tissue_masks[idx, :sample_template_points.shape[1], :sample_template_points.shape[2]] = sample.tissue_mask
+            tissue_masks[idx, :sample_template_points.shape[1],
+            :sample_template_points.shape[2]] = sample.tissue_mask
 
     return {
         "input_images": torch.from_numpy(images),

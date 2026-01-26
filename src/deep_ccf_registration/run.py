@@ -96,16 +96,17 @@ class RepeatSinglePatchIterator:
 class CollatedBatchIterator:
     """Wrap an iterator of PatchSample batches and emit collated tensors."""
 
-    def __init__(self, base_iterator, is_train: bool, patch_size: Optional[int] = None):
+    def __init__(self, base_iterator, is_train: bool, config: TrainConfig, patch_size: Optional[int] = None):
         self._base_iterator = base_iterator
         self._patch_size = patch_size
         self._is_train = is_train
+        self._config = config
 
     def __iter__(self):
         for batch in self._base_iterator:
             if not batch:
                 continue
-            yield collate_patch_samples(batch)
+            yield collate_patch_samples(batch, pad_multiple=2**(len(self._config.model.unet_channels)-1))
 
 
 def create_dataloader(
@@ -183,7 +184,8 @@ def create_dataloader(
 
     return CollatedBatchIterator(iterator,
                                  patch_size=config.patch_size[0] if config.patch_size is not None else None,
-                                 is_train=is_train)
+                                 is_train=is_train,
+                                 config=config)
 
 logger.remove()
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
