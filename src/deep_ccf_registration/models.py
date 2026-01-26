@@ -47,7 +47,6 @@ class UNetWithRegressionHeads(nn.Module):
         strides: tuple[int, ...] = (2, 2, 2, 2, 2, 2),
         out_coords: int = 3,
         include_tissue_mask: bool = False,
-        head_size: str = "small",
         use_positional_encoding: bool = False,
         pos_encoding_channels: int = 16,
     ):
@@ -92,35 +91,13 @@ class UNetWithRegressionHeads(nn.Module):
             strides=strides,
         )
 
-        # Coordinate regression head
-        if head_size == "small":
-            self.coord_head = nn.Sequential(
-                nn.Conv2d(coord_feature_dim, 16, kernel_size=1),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(16, 16, kernel_size=1),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(16, out_coords, kernel_size=1),
-            )
-        elif head_size == "medium":
-            self.coord_head = nn.Sequential(
-                nn.Conv2d(coord_feature_dim, 32, kernel_size=1),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(32, 32, kernel_size=1),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(32, 32, kernel_size=1),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(32, out_coords, kernel_size=1),
-            )
-        elif head_size == "large":
-            self.coord_head = nn.Sequential(
-                nn.Conv2d(coord_feature_dim, 256, kernel_size=1),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(256, 256, kernel_size=1),
-                nn.ReLU(inplace=True),
-                nn.Conv2d(256, out_channels=out_coords, kernel_size=1),
-            )
-        else:
-            raise ValueError(f"Unknown head_size: {head_size}")
+        self.coord_head = nn.Sequential(
+            nn.Conv2d(coord_feature_dim, coord_feature_dim, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(coord_feature_dim, coord_feature_dim, kernel_size=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(coord_feature_dim, out_coords, kernel_size=1),
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

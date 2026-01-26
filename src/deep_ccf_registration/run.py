@@ -356,7 +356,6 @@ def main(config_path: Path):
         out_coords=3,
         include_tissue_mask=config.predict_tissue_mask,
         use_positional_encoding=config.use_positional_encoding,
-        head_size=config.model.coord_regression_head_size,
         feature_channels=config.model.feature_channels
     )
 
