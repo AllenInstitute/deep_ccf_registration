@@ -607,7 +607,7 @@ class ShardedMultiDatasetCache(IterableDataset):
             yield from ds
 
 
-def collate_patch_samples(samples: list[PatchSample], pad_multiple: int = 32) -> dict:
+def collate_patch_samples(samples: list[PatchSample], pad_dim: int = 512) -> dict:
     """
     Collate a list of PatchSample into a batched dictionary.
     Returns a dict with:
@@ -627,19 +627,10 @@ def collate_patch_samples(samples: list[PatchSample], pad_multiple: int = 32) ->
     template_dtype = samples[0].template_points.dtype if samples[
                                                              0].template_points is not None else np.float32
 
-    # Find max dimensions across batch
-    max_h = max(s.data.shape[0] for s in samples)
-    max_w = max(s.data.shape[1] for s in samples)
-
-    # Round up to nearest multiple of pad_multiple
-    # so that input divisible by downsampling in network
-    pad_h = ((max_h + pad_multiple - 1) // pad_multiple) * pad_multiple
-    pad_w = ((max_w + pad_multiple - 1) // pad_multiple) * pad_multiple
-
-    images = np.zeros((batch_size, 1, pad_h, pad_w), dtype=image_dtype)
-    template_points = np.zeros((batch_size, 3, pad_h, pad_w), dtype=template_dtype)
-    pad_masks = np.zeros((batch_size, pad_h, pad_w), dtype=np.uint8)
-    tissue_masks = np.zeros((batch_size, pad_h, pad_w), dtype=np.float32)
+    images = np.zeros((batch_size, 1, pad_dim, pad_dim), dtype=image_dtype)
+    template_points = np.zeros((batch_size, 3, pad_dim, pad_dim), dtype=template_dtype)
+    pad_masks = np.zeros((batch_size, pad_dim, pad_dim), dtype=np.uint8)
+    tissue_masks = np.zeros((batch_size, pad_dim, pad_dim), dtype=np.float32)
     pad_mask_heights = np.zeros(batch_size, dtype=np.int32)
     pad_mask_widths = np.zeros(batch_size, dtype=np.int32)
 

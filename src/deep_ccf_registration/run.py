@@ -106,7 +106,7 @@ class CollatedBatchIterator:
         for batch in self._base_iterator:
             if not batch:
                 continue
-            yield collate_patch_samples(batch, pad_multiple=2**(len(self._config.model.unet_channels)-1))
+            yield collate_patch_samples(batch, pad_dim=self._config.pad_dim)
 
 
 def create_dataloader(
