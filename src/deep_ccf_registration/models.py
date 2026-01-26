@@ -12,9 +12,6 @@ class CoordConv(nn.Module):
 
     def forward(self, batch_size: int, H: int, W: int, device=None):
         if self.coords is None or self.coords.shape[-2:] != (H, W):
-            if device is None:
-                device = next(self.parameters(), torch.tensor(0)).device
-
             coords = torch.stack(
                 torch.meshgrid(torch.arange(H), torch.arange(W), indexing='ij'),
                 dim=0
@@ -119,7 +116,7 @@ class UNetWithRegressionHeads(nn.Module):
 
         # Concatenate with positional encoding if enabled
         if self.use_positional_encoding:
-            pos_encoding = self.positional_encoding(batch_size=B, H=H, W=W)
+            pos_encoding = self.positional_encoding(batch_size=B, H=H, W=W, device=x.device)
             x = torch.cat([x, pos_encoding], dim=1)
 
         # Extract features from UNet backbone
