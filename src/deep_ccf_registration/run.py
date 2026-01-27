@@ -139,6 +139,7 @@ def create_dataloader(
         transform = build_transform(
             config=config,
             template_parameters=template_parameters,
+            is_train=is_train,
         )
         datasets.append(
             SliceDatasetCache(

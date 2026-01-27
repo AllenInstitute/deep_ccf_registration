@@ -174,6 +174,68 @@ class OrientationNormalization(albumentations.DualTransform):
         return x
 
 
+class PadRotateCrop(albumentations.DualTransform):
+    """Pad so that the full image is visible after rotation, rotate, then crop back to original size.
+    This is applied after sampling a slice so that we can keep the whole image inside the frame"""
+
+    def __init__(
+            self,
+            # obtained from the smartSPIM data as a representative range
+            rotation_range: tuple[float, float] = (-20, 20)):
+        super().__init__(p=1.0)
+        self._rotation_range = rotation_range
+
+    def _compute_pad(self, h: int, w: int, angle_deg: float) -> tuple[int, int]:
+        theta = np.radians(abs(angle_deg))
+        padded_h = h * np.cos(theta) + w * np.sin(theta)
+        padded_w = w * np.cos(theta) + h * np.sin(theta)
+        pad_y = int(np.ceil((padded_h - h) / 2))
+        pad_x = int(np.ceil((padded_w - w) / 2))
+        return pad_y, pad_x
+
+    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+        angle = float(np.random.uniform(*self._rotation_range))
+        img = data["image"]
+        h, w = img.shape[:2]
+        pad_y, pad_x = self._compute_pad(h, w, angle)
+        return {"angle": angle, "pad_y": pad_y, "pad_x": pad_x, "orig_h": h, "orig_w": w}
+
+    def apply(self, img: np.ndarray, angle: float, pad_y: int, pad_x: int, orig_h: int, orig_w: int, **params: Any) -> np.ndarray:
+        padded = np.pad(img, ((pad_y, pad_y), (pad_x, pad_x)), mode='constant', constant_values=0)
+        center = (padded.shape[1] / 2, padded.shape[0] / 2)
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        rotated = cv2.warpAffine(padded, M, (padded.shape[1], padded.shape[0]),
+                                 flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        cy, cx = rotated.shape[0] // 2, rotated.shape[1] // 2
+        return rotated[cy - orig_h // 2: cy - orig_h // 2 + orig_h,
+                       cx - orig_w // 2: cx - orig_w // 2 + orig_w]
+
+    def apply_to_mask(self, mask: np.ndarray, angle: float, pad_y: int, pad_x: int, orig_h: int, orig_w: int, **params: Any) -> np.ndarray:
+        padded = np.pad(mask, ((pad_y, pad_y), (pad_x, pad_x)), mode='constant', constant_values=0)
+        center = (padded.shape[1] / 2, padded.shape[0] / 2)
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        rotated = cv2.warpAffine(padded, M, (padded.shape[1], padded.shape[0]),
+                                 flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+        cy, cx = rotated.shape[0] // 2, rotated.shape[1] // 2
+        return rotated[cy - orig_h // 2: cy - orig_h // 2 + orig_h,
+                       cx - orig_w // 2: cx - orig_w // 2 + orig_w]
+
+    def apply_to_keypoints(self, keypoints: np.ndarray, angle: float, pad_y: int, pad_x: int, orig_h: int, orig_w: int, **params: Any) -> np.ndarray:
+        h, w = keypoints.shape[:2]
+        padded = np.pad(keypoints, ((pad_y, pad_y), (pad_x, pad_x), (0, 0)), mode='edge')
+        channels = []
+        for i in range(padded.shape[2]):
+            center = (padded.shape[1] / 2, padded.shape[0] / 2)
+            M = cv2.getRotationMatrix2D(center, angle, 1.0)
+            rotated = cv2.warpAffine(padded[..., i], M, (padded.shape[1], padded.shape[0]),
+                                     flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+            channels.append(rotated)
+        rotated = np.stack(channels, axis=-1)
+        cy, cx = rotated.shape[0] // 2, rotated.shape[1] // 2
+        return rotated[cy - h // 2: cy - h // 2 + h,
+                       cx - w // 2: cx - w // 2 + w]
+
+
 class TemplatePointsNormalization(albumentations.DualTransform):
     """
     Normalizes template points to [-1,1] (background points will be outside this range)
@@ -234,7 +296,7 @@ def get_physical_extent(origin, scale, direction, shape):
 
     return extent_min, extent_max
 
-def build_transform(config: TrainConfig, template_parameters: TemplateParameters):
+def build_transform(config: TrainConfig, template_parameters: TemplateParameters, is_train: bool):
     transforms = []
 
     if config.longest_max_size is not None:
@@ -246,6 +308,8 @@ def build_transform(config: TrainConfig, template_parameters: TemplateParameters
         transforms.append(ImageNormalization())
     if config.normalize_orientation:
         transforms.append(OrientationNormalization())
+    if config.sample_oblique_slices and is_train:
+        transforms.append(PadRotateCrop(rotation_range=(-20, 20)))
     if config.normalize_template_points:
         transforms.append(TemplatePointsNormalization(
             origin=template_parameters.origin,

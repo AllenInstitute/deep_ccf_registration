@@ -244,7 +244,6 @@ class SliceDatasetCache(IterableDataset):
         # these were obtained from the data as typical ranges
         AP_rot_range = (-20, 20)
         SI_rot_range = (-10, 10)
-        ML_rot_range = (-20, 20)
 
         axes = sorted(self._metadata.axes, key=lambda x: x.dimension)
         slice_axis = self._metadata.get_slice_axis(orientation=self._orientation)
@@ -265,14 +264,14 @@ class SliceDatasetCache(IterableDataset):
 
             y_rot_range = direction_to_range[y_axis.direction]
             x_rot_range = direction_to_range[x_axis.direction]
-            z_rot_range = ML_rot_range
         else:
             raise NotImplementedError(f'{self._orientation} not supported')
 
         return ObliqueSliceRotationRanges(
             x=x_rot_range,
             y=y_rot_range,
-            z=z_rot_range,
+            # applied after sampling since it is an in-plane rotation
+            z=(0, 0),
         )
 
     def load_chunk_region(self) -> CachedRegion:
