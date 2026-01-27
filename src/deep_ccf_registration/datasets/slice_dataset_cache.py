@@ -326,16 +326,21 @@ class SliceDatasetCache(IterableDataset):
             union_x_min = min(bbox.x for bbox in slice_bboxes.values())
             union_x_max = max(bbox.x + bbox.width for bbox in slice_bboxes.values())
 
-            # Valid start positions within union
-            start_y_min = union_y_min
-            start_y_max = max(union_y_min, union_y_max - crop_size[0])
-            start_x_min = union_x_min
-            start_x_max = max(union_x_min, union_x_max - crop_size[1])
+            if self._patch_size is None:
+                # Cache the full union bbox so every per-slice bbox fits
+                start_yx = (union_y_min, union_x_min)
+                crop_size = (union_y_max - union_y_min, union_x_max - union_x_min)
+            else:
+                # Valid start positions within union
+                start_y_min = union_y_min
+                start_y_max = max(union_y_min, union_y_max - crop_size[0])
+                start_x_min = union_x_min
+                start_x_max = max(union_x_min, union_x_max - crop_size[1])
 
-            start_yx = (
-                random.randint(start_y_min, max(start_y_min, start_y_max)),
-                random.randint(start_x_min, max(start_x_min, start_x_max)),
-            )
+                start_yx = (
+                    random.randint(start_y_min, max(start_y_min, start_y_max)),
+                    random.randint(start_x_min, max(start_x_min, start_x_max)),
+                )
 
         chunk_bbox = TissueBoundingBox(
             y=start_yx[0],
