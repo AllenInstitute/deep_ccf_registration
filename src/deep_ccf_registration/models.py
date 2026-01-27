@@ -89,11 +89,11 @@ class UNetWithRegressionHeads(nn.Module):
         )
 
         self.coord_head = nn.Sequential(
-            nn.Conv2d(coord_feature_dim, 128, kernel_size=1),
+            nn.Conv2d(coord_feature_dim, int(coord_feature_dim/2), kernel_size=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(128, 64, kernel_size=1),
+            nn.Conv2d(int(coord_feature_dim/2), int(coord_feature_dim/4), kernel_size=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(64, out_coords, kernel_size=1),
+            nn.Conv2d(int(coord_feature_dim/4), out_coords, kernel_size=1),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
