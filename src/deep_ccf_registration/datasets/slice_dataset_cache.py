@@ -320,17 +320,17 @@ class SliceDatasetCache(IterableDataset):
 
             slice_bboxes = {idx: bbox for idx, bbox in slices_in_chunk}
 
-            # Compute intersection of all bboxes
-            intersect_y_min = max(bbox.y for bbox in slice_bboxes.values())
-            intersect_y_max = min(bbox.y + bbox.height for bbox in slice_bboxes.values())
-            intersect_x_min = max(bbox.x for bbox in slice_bboxes.values())
-            intersect_x_max = min(bbox.x + bbox.width for bbox in slice_bboxes.values())
+            # Compute union of all bboxes
+            union_y_min = min(bbox.y for bbox in slice_bboxes.values())
+            union_y_max = max(bbox.y + bbox.height for bbox in slice_bboxes.values())
+            union_x_min = min(bbox.x for bbox in slice_bboxes.values())
+            union_x_max = max(bbox.x + bbox.width for bbox in slice_bboxes.values())
 
-            # Valid start positions within intersection
-            start_y_min = intersect_y_min
-            start_y_max = max(intersect_y_min, intersect_y_max - crop_size[0])
-            start_x_min = intersect_x_min
-            start_x_max = max(intersect_x_min, intersect_x_max - crop_size[1])
+            # Valid start positions within union
+            start_y_min = union_y_min
+            start_y_max = max(union_y_min, union_y_max - crop_size[0])
+            start_x_min = union_x_min
+            start_x_max = max(union_x_min, union_x_max - crop_size[1])
 
             start_yx = (
                 random.randint(start_y_min, max(start_y_min, start_y_max)),
@@ -408,14 +408,21 @@ class SliceDatasetCache(IterableDataset):
             random.shuffle(shuffled_slices)
             target_slices_global = shuffled_slices[:target_samples]
 
-        # All patches use the same start_yx
-        start_yx = region.start_yx
 
         patches: list[PatchSample] = []
         for global_slice_idx in target_slices_global:
+            if self._patch_size is None:
+                bbox = self._tissue_bboxes[global_slice_idx]
+                start_yx = bbox.y, bbox.x
+                height, width = bbox.height, bbox.width
+            else:
+                start_yx = region.start_yx
+                height, width = None, None
             coords = oblique_sampler.extract_oblique_coords(
                 slice_idx=global_slice_idx,
                 start_yx=start_yx,
+                height=height,
+                width=width
             )
             coords_local = [c - chunk_slices[i].start for i, c in enumerate(coords)]
 

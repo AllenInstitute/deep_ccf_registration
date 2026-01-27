@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional
 
 import numpy as np
 
@@ -98,7 +99,7 @@ class ObliqueSliceSampler:
 
         return tuple(slices)
 
-    def extract_oblique_coords(self, slice_idx: int, start_yx: tuple[int, int]):
+    def extract_oblique_coords(self, slice_idx: int, start_yx: tuple[int, int], width: Optional[int] = None, height: Optional[int] = None):
         """
         Extract coordinates for a single oblique slice.
 
@@ -109,7 +110,10 @@ class ObliqueSliceSampler:
         Returns:
             List of coordinate arrays [coords_0, coords_1, coords_2] in VOLUME coordinates.
         """
-        crop_h, crop_w = self._crop_size
+        if width is None and height is None:
+            crop_h, crop_w = self._crop_size
+        else:
+            crop_h, crop_w = height, width
         in_plane_axes = [i for i in range(3) if i != self._slice_axis]
 
         crop_center_yx = (
