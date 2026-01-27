@@ -399,6 +399,10 @@ class SliceDatasetCache(IterableDataset):
         chunk_slices = oblique_sampler.chunk_slices
 
         slice_range_global = oblique_sampler.slice_range
+        valid_indices_in_chunk = [
+            idx for idx in slice_range_global
+            if idx < len(self._tissue_bboxes) and self._tissue_bboxes[idx] is not None
+        ]
 
         if self._forced_coords is not None and self._forced_coords[0] == self._dataset_idx:
             target_slice_global = self._forced_coords[1]
@@ -406,10 +410,10 @@ class SliceDatasetCache(IterableDataset):
                 return []
             target_slices_global = [target_slice_global]
         else:
-            target_samples = max(1, int(len(slice_range_global) * self._sample_fraction))
-            target_samples = min(target_samples, len(slice_range_global))
+            target_samples = max(1, int(len(valid_indices_in_chunk) * self._sample_fraction))
+            target_samples = min(target_samples, len(valid_indices_in_chunk))
 
-            shuffled_slices = list(slice_range_global)
+            shuffled_slices = list(valid_indices_in_chunk)
             random.shuffle(shuffled_slices)
             target_slices_global = shuffled_slices[:target_samples]
 
