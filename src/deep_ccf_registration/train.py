@@ -102,6 +102,7 @@ def _evaluate(
     point_losses = []
     tissue_mask_losses = []
     rmses = []
+    registration_res_rmses = []
     collected_samples = []
     eval_records = []
     enable_viz = (
@@ -167,6 +168,40 @@ def _evaluate(
 
             rmse = RMSE()(pred=pred_points, target=target_template_points, mask=masks)
 
+            if "eval_target_template_points" in batch:
+                eval_target = batch["eval_target_template_points"].to(device)
+                eval_pad_masks = batch["eval_pad_masks"].to(device)
+                if predict_tissue_mask:
+                    eval_tissue_masks = batch["eval_tissue_masks"].to(device)
+                heights = batch["pad_mask_heights"]
+                widths = batch["pad_mask_widths"]
+
+                for si in range(pred_points.shape[0]):
+                    # Crop pred to content region (remove pad_dim padding)
+                    h, w = int(heights[si]), int(widths[si])
+                    pred_crop = pred_points[si:si+1, :, :h, :w]
+
+                    # Find eval content extent from eval_pad_masks
+                    eval_mask_i = eval_pad_masks[si]
+                    eval_h = int(eval_mask_i.any(dim=1).sum())
+                    eval_w = int(eval_mask_i.any(dim=0).sum())
+                    eval_target_crop = eval_target[si:si+1, :, :eval_h, :eval_w]
+
+                    # Upsample cropped pred to eval content size
+                    pred_up = F.interpolate(
+                        pred_crop, size=(eval_h, eval_w),
+                        mode="bilinear", align_corners=False
+                    )
+
+                    # Select mask
+                    if predict_tissue_mask:
+                        mask_crop = eval_tissue_masks[si:si+1, :eval_h, :eval_w]
+                    else:
+                        mask_crop = eval_pad_masks[si:si+1, :eval_h, :eval_w]
+
+                    rmse_val = RMSE()(pred=pred_up, target=eval_target_crop, mask=mask_crop)
+                    registration_res_rmses += rmse_val.cpu().tolist()
+
             if predict_tissue_mask:
                 tissue_mask_dice_metric(y_pred=pred_tissue_mask.unsqueeze(1), y=tissue_masks.unsqueeze(1))
 
@@ -212,6 +247,7 @@ def _evaluate(
 
     val_loss = np.mean(losses)
     val_rmse = np.mean(rmses)
+    val_rmse_registration_res = np.mean(registration_res_rmses) if registration_res_rmses else None
 
     if predict_tissue_mask:
         val_point_loss = np.mean(point_losses)
@@ -263,6 +299,7 @@ def _evaluate(
         "val_tissue_mask_loss": val_tissue_mask_loss,
         "val_loss": val_loss,
         "val_rmse": val_rmse,
+        "val_rmse_registration_res": val_rmse_registration_res,
         "val_tissue_mask_dice": val_tissue_mask_dice,
     }
 
@@ -514,6 +551,7 @@ def train(
                         "eval/loss": val_metrics["val_loss"],
                         "eval/point_loss": val_metrics['val_point_loss'],
                         "eval/val_rmse": val_metrics["val_rmse"],
+                        "eval/val_rmse_registration_res": val_metrics["val_rmse_registration_res"]
                     }
                     if predict_tissue_mask:
                         metrics = {
@@ -528,7 +566,7 @@ def train(
 
                     log_msg = f"Step {global_step} | " \
                               f"Train loss: {loss.item() * gradient_accumulation_steps:.6f} | Val loss: {val_metrics['val_loss']:.6f} | " \
-                              f"Val RMSE (raw): {val_metrics['val_rmse']:.6f} | " \
+                              f"Val RMSE (downsampled): {val_metrics['val_rmse']:.6f} | Val RMSE (raw): {val_metrics['val_rmse_registration_res']:.6f}| " \
                               f"LR: {current_lr:.6e}"
 
                     if predict_tissue_mask:

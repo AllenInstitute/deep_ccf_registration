@@ -296,6 +296,16 @@ def get_physical_extent(origin, scale, direction, shape):
 
     return extent_min, extent_max
 
+def build_target_eval_transform(config: TrainConfig):
+    """Build a transform for eval template points: only orientation normalization, no resampling or point normalization."""
+    transforms = []
+    if config.normalize_orientation:
+        transforms.append(OrientationNormalization())
+    if transforms:
+        return albumentations.Compose(transforms)
+    return None
+
+
 def build_transform(config: TrainConfig, template_parameters: TemplateParameters, is_train: bool):
     transforms = []
 

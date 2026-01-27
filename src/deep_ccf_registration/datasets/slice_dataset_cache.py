@@ -61,6 +61,8 @@ class PatchSample:
     orientation: str = ""
     subject_id: str = ""
     tissue_mask: Optional[np.ndarray] = None
+    eval_template_points: Optional[np.ndarray] = None
+    eval_tissue_mask: Optional[np.ndarray] = None
 
     def to_dict(self) -> dict:
         """Convert to dictionary for batch collation."""
@@ -116,7 +118,8 @@ class SliceDatasetCache(IterableDataset):
         max_chunks_per_dataset: Optional[int] = 1,
         forced_coords: Optional[tuple[str, int, str, int, int]] = None,
         sample_oblique_slices: bool = True,
-        include_tissue_mask: bool = False
+        include_tissue_mask: bool = False,
+        target_eval_transform: Optional[Callable] = None,
     ):
         super().__init__()
 
@@ -157,6 +160,7 @@ class SliceDatasetCache(IterableDataset):
         self._patch_buffer: list[PatchSample] = []
         self._chunk_counter = 0
         self._transform = transform
+        self._target_eval_transform = target_eval_transform
         if max_chunks_per_dataset is not None and max_chunks_per_dataset < 1:
             raise ValueError("max_chunks_per_dataset must be >= 1 or None")
         self._max_chunks_per_dataset = max_chunks_per_dataset
@@ -470,6 +474,28 @@ class SliceDatasetCache(IterableDataset):
             else:
                 tissue_mask = None
 
+            if self._target_eval_transform is not None:
+                eval_template_patch = template_patch.copy()
+                eval_result = self._target_eval_transform(
+                    image=patch, keypoints=eval_template_patch,
+                    mask=tissue_mask, slice_axis=slice_axis,
+                    acquisition_axes=self._metadata.axes,
+                    orientation=self._orientation)
+                eval_template_patch = eval_result['keypoints']
+                eval_tissue_mask = (map_coordinates(
+                    self._ccf_annotations,
+                    convert_from_ants_space_tensor(
+                        template_parameters=self._template_parameters,
+                        physical_pts=torch.from_numpy(
+                            eval_template_patch).view(-1, 3)).T,
+                    order=0,
+                    mode='constant',
+                    cval=0
+                ) != 0).astype('uint8').reshape(eval_template_patch.shape[:-1])
+            else:
+                eval_template_patch = None
+                eval_tissue_mask = None
+
             if self._transform is not None:
                 transforms = self._transform(image=patch, keypoints=template_patch,
                                              mask=tissue_mask, slice_axis=slice_axis,
@@ -491,6 +517,8 @@ class SliceDatasetCache(IterableDataset):
                     orientation=self._orientation.value,
                     subject_id=self._metadata.subject_id,
                     tissue_mask=tissue_mask,
+                    eval_template_points=eval_template_patch,
+                    eval_tissue_mask=eval_tissue_mask,
                 )
             )
 
@@ -540,6 +568,14 @@ class SliceDatasetCache(IterableDataset):
                 orientation=patch.orientation,
                 subject_id=patch.subject_id,
                 tissue_mask=patch.tissue_mask,
+                eval_template_points=
+                    np.array(patch.eval_template_points, copy=True)
+                    if patch.eval_template_points is not None
+                    else None,
+                eval_tissue_mask=
+                    np.array(patch.eval_tissue_mask, copy=True)
+                    if patch.eval_tissue_mask is not None
+                    else None,
             )
             self._patch_buffer.append(copied)
 
@@ -677,7 +713,7 @@ def collate_patch_samples(samples: list[PatchSample], pad_dim: int = 512) -> dic
             tissue_masks[idx, :sample_template_points.shape[1],
             :sample_template_points.shape[2]] = sample.tissue_mask
 
-    return {
+    result = {
         "input_images": torch.from_numpy(images),
         "target_template_points": torch.from_numpy(template_points),
         "tissue_masks": torch.from_numpy(tissue_masks),
@@ -691,6 +727,29 @@ def collate_patch_samples(samples: list[PatchSample], pad_dim: int = 512) -> dic
         "orientations": [s.orientation for s in samples],
         "subject_ids": [s.subject_id for s in samples],
     }
+
+    has_eval_points = any(s.eval_template_points is not None for s in samples)
+    if has_eval_points:
+        max_eval_h = max(s.eval_template_points.shape[0] for s in samples if s.eval_template_points is not None)
+        max_eval_w = max(s.eval_template_points.shape[1] for s in samples if s.eval_template_points is not None)
+        eval_template_points = np.zeros((batch_size, 3, max_eval_h, max_eval_w), dtype=template_dtype)
+        eval_pad_masks = np.zeros((batch_size, max_eval_h, max_eval_w), dtype=np.uint8)
+        eval_tissue_masks = np.zeros((batch_size, max_eval_h, max_eval_w), dtype=np.float32)
+
+        for idx, sample in enumerate(samples):
+            if sample.eval_template_points is None:
+                continue
+            etp = np.transpose(sample.eval_template_points, (2, 0, 1))
+            eval_template_points[idx, :, :etp.shape[1], :etp.shape[2]] = etp
+            eval_pad_masks[idx, :sample.eval_template_points.shape[0], :sample.eval_template_points.shape[1]] = 1
+            if sample.eval_tissue_mask is not None:
+                eval_tissue_masks[idx, :sample.eval_tissue_mask.shape[0], :sample.eval_tissue_mask.shape[1]] = sample.eval_tissue_mask
+
+        result["eval_target_template_points"] = torch.from_numpy(eval_template_points)
+        result["eval_pad_masks"] = torch.from_numpy(eval_pad_masks.astype(bool))
+        result["eval_tissue_masks"] = torch.from_numpy(eval_tissue_masks)
+
+    return result
 
 
 class ShuffledBatchIterator:

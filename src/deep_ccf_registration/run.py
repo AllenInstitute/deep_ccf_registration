@@ -26,7 +26,7 @@ from deep_ccf_registration.datasets.slice_dataset_cache import (
     ShardedMultiDatasetCache,
     ShuffledBatchIterator,
     collate_patch_samples, )
-from deep_ccf_registration.datasets.transforms import build_transform, TemplatePointsNormalization
+from deep_ccf_registration.datasets.transforms import build_transform, build_target_eval_transform, TemplatePointsNormalization
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.metadata import SubjectMetadata, TissueBoundingBoxes
 from deep_ccf_registration.models import UNetWithRegressionHeads
@@ -121,6 +121,7 @@ def create_dataloader(
     include_tissue_mask: bool = False,
     buffer_batches: int = 8,
     forced_coords: Optional[tuple[str, int, str, int, int]] = None,
+    target_eval_transform: Optional[callable] = None,
 ):
     """
     Create a dataloader using SliceDatasetCache with worker sharding and batch shuffling.
@@ -158,6 +159,7 @@ def create_dataloader(
                 sample_oblique_slices=is_train and config.sample_oblique_slices,
                 ccf_annotations=ccf_annotations,
                 include_tissue_mask=include_tissue_mask,
+                target_eval_transform=target_eval_transform,
             )
         )
 
@@ -335,6 +337,7 @@ def main(config_path: Path):
         ccf_annotations=ccf_annotations,
         include_tissue_mask=config.predict_tissue_mask,
     )
+    target_eval_transform = build_target_eval_transform(config=config)
     val_dataloader = create_dataloader(
         metadata=val_metadata,
         tissue_bboxes=tissue_bboxes,
@@ -347,6 +350,7 @@ def main(config_path: Path):
         forced_coords=forced_coords,
         ccf_annotations=ccf_annotations,
         include_tissue_mask=config.predict_tissue_mask,
+        target_eval_transform=target_eval_transform,
     )
 
     logger.info(f"Train subjects: {len(train_metadata)}")
