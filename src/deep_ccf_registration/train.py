@@ -16,30 +16,19 @@ import torch.nn.functional as F
 
 from loguru import logger
 
-from deep_ccf_registration.configs.train_config import LRScheduler
-from deep_ccf_registration.datasets.slice_dataset_cache import ShuffledBatchIterator
+from deep_ccf_registration.configs.train_config import LRScheduler, TrainConfig
 from deep_ccf_registration.datasets.transforms import get_template_point_normalization_inverse
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.utils.logging_utils import timed, ProgressLogger
 from deep_ccf_registration.utils.visualization import viz_sample
 
 
-class MaskedCoordLoss(nn.Module):
-    def forward(self, pred: torch.Tensor, target: torch.Tensor,
-                mask: torch.Tensor) -> torch.Tensor:
-        # Handle mask shape: if pred is (B, C, H, W) and mask is (B, H, W), 
-        # unsqueeze to (B, 1, H, W) before expanding to (B, C, H, W)
-        if mask.dim() == pred.dim() - 1:
-            mask = mask.unsqueeze(1)
-        mask = mask.expand_as(pred).bool()
-        return F.smooth_l1_loss(pred[mask], target[mask])
-
-class RMSE(nn.Module):
+class MSE(nn.Module):
     """
     Computes root mean squared Euclidean distance between predicted and target points.
     """
 
-    def __init__(self, coordinate_dim: int = 1):
+    def __init__(self, coordinate_dim: int = 1, reduction: Optional[str] = None):
         """
         Parameters
         ----------
@@ -48,6 +37,7 @@ class RMSE(nn.Module):
         """
         super().__init__()
         self.coordinate_dim = coordinate_dim
+        self._reduction = reduction
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         """
@@ -74,13 +64,15 @@ class RMSE(nn.Module):
         else:
             mse = per_point_squared_distance.mean(dim=(1, 2))
 
-        return mse.sqrt()
+        if self._reduction == 'mean':
+            mse = mse.mean()
+        return mse
 
 
 def _evaluate(
     dataloader: Iterator,
     model: torch.nn.Module,
-    coord_loss: MaskedCoordLoss,
+    coord_loss: MSE,
     device: str,
     autocast_context: ContextManager,
     max_iters: int,
@@ -166,7 +158,7 @@ def _evaluate(
                     template_parameters=ls_template_parameters,
                 )
 
-            rmse = RMSE()(pred=pred_points, target=target_template_points, mask=masks)
+            rmse = MSE()(pred=pred_points, target=target_template_points, mask=masks).sqrt()
 
             if "eval_target_template_points" in batch:
                 eval_target = batch["eval_target_template_points"].to(device)
@@ -199,7 +191,7 @@ def _evaluate(
                     else:
                         mask_crop = eval_pad_masks[si:si+1, :eval_h, :eval_w]
 
-                    rmse_val = RMSE()(pred=pred_up, target=eval_target_crop, mask=mask_crop)
+                    rmse_val = MSE()(pred=pred_up, target=eval_target_crop, mask=mask_crop).sqrt()
                     registration_res_rmses += rmse_val.cpu().tolist()
 
             if predict_tissue_mask:
@@ -353,12 +345,13 @@ def _resize_pad_masks_from_sizes(
 
 
 def train(
-        train_dataloader: ShuffledBatchIterator,
-        val_dataloader: ShuffledBatchIterator,
+        train_dataloader: Iterator,
+        val_dataloader: Iterator,
         model: UNet,
         optimizer,
         max_iters: int,
         model_weights_out_dir: Path,
+        config: TrainConfig,
         ls_template_parameters: TemplateParameters,
         normalize_target_points: bool = True,
         learning_rate: float = 0.0001,
@@ -410,7 +403,7 @@ def train(
     """
     os.makedirs(model_weights_out_dir, exist_ok=True)
 
-    calc_coord_loss = MaskedCoordLoss()
+    calc_coord_loss = MSE(reduction='mean')
     best_val_loss = float("inf")
     patience_counter = 0
     global_step = 0

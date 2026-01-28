@@ -88,3 +88,4 @@ class TrainConfig(BaseModel):
     # microns/px to resample to
     resample_to_fixed_resolution: Optional[int] = None
     pad_dim: int = 512
+    epoch_subject_slice_fraction: float = 1.0
