@@ -18,12 +18,11 @@ from torch.utils.data import IterableDataset, get_worker_info
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.datasets.transforms import map_points_to_right_hemisphere
 from deep_ccf_registration.datasets.utils.template_points import create_coordinate_grid, \
-    transform_points_to_template_space, apply_transforms_to_points
+    transform_points_to_template_space, apply_transforms_to_points, CachedAffine
 from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, TissueBoundingBoxes, \
     AcquisitionAxis
-from deep_ccf_registration.utils.logging_utils import timed
+from deep_ccf_registration.utils.logging_utils import timed, timed_func
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
-from deep_ccf_registration.utils.transforms import transform_points_to_template_ants_space
 
 
 @dataclass(frozen=True)
@@ -98,7 +97,7 @@ class IterableSubjectSliceDataset(IterableDataset):
 
         self._loaded_subject_id: Optional[str] = None
         self._volume: Optional[np.ndarray] = None
-        self._warp: Optional[np.ndarray] = None
+        self._warp: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]] = None
         self._warp_ants_image: Optional[ANTsImage] = None
         self._tissue_bboxes = tissue_bboxes.bounding_boxes
         self._crop_size = crop_size
@@ -212,6 +211,7 @@ class IterableSubjectSliceDataset(IterableDataset):
             eval_tissue_mask=eval_tissue_mask,
         )
 
+    @timed_func
     def _get_template_points(
         self,
         patch_height: int,
@@ -223,33 +223,36 @@ class IterableSubjectSliceDataset(IterableDataset):
         experiment_meta: SubjectMetadata,
     ) -> np.ndarray:
 
-        point_grid = create_coordinate_grid(
-            patch_height=patch_height,
-            patch_width=patch_width,
-            start_x=start_x,
-            start_y=start_y,
-            fixed_index_value=fixed_index_value,
-            axes=experiment_meta.axes,
-            slice_axis=slice_axis
-        )
+        with timed():
+            point_grid = create_coordinate_grid(
+                patch_height=patch_height,
+                patch_width=patch_width,
+                start_x=start_x,
+                start_y=start_y,
+                fixed_index_value=fixed_index_value,
+                axes=experiment_meta.axes,
+                slice_axis=slice_axis
+            )
 
-        points = transform_points_to_template_space(
-            points=point_grid,
-            input_volume_shape=self._volume.shape[2:],
-            acquisition_axes=experiment_meta.axes,
-            ls_template_info=AntsImageParameters.from_ants_image(image=self._warp_ants_image),
-            registration_downsample=experiment_meta.registration_downsample
-        )
+        with timed():
+            points = transform_points_to_template_space(
+                points=point_grid,
+                input_volume_shape=self._volume.shape[2:],
+                acquisition_axes=experiment_meta.axes,
+                ls_template_info=AntsImageParameters.from_ants_image(image=self._warp_ants_image),
+                registration_downsample=experiment_meta.registration_downsample
+            )
 
         with timed():
             template_points = apply_transforms_to_points(
                 points=points,
                 template_parameters=self._template_parameters,
-                affine_path=experiment_meta.ls_to_template_affine_matrix_path,
-                warp=self._warp,
+                cached_affine=self._cached_affine,
+                warp=self._warp_components,
             )
 
-        template_points = template_points.reshape((patch_height, patch_width, 3))
+        with timed():
+            template_points = template_points.reshape((patch_height, patch_width, 3))
 
         return template_points
 
@@ -276,7 +279,15 @@ class IterableSubjectSliceDataset(IterableDataset):
         self._volume = self._load_full_volume(metadata)
         logger.info(f"Loading warp for subject {subject_id}")
         self._warp_ants_image = self._load_warp(metadata)
-        self._warp = self._warp_ants_image.numpy()
+        warp = self._warp_ants_image.numpy()
+        # Pre-split warp into separate contiguous arrays for each component
+        # This improves cache locality in map_coordinates
+        self._warp_components = tuple(
+            np.ascontiguousarray(warp[..., i]) for i in range(3)
+        )
+        # Cache the affine transform for fast numpy application
+        logger.info(f"Loading affine for subject {subject_id}")
+        self._cached_affine = CachedAffine.from_ants_file(metadata.ls_to_template_affine_matrix_path)
         self._loaded_subject_id = subject_id
 
     def _load_full_volume(self, metadata: SubjectMetadata) -> np.ndarray:

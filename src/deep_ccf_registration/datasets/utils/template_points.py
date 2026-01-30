@@ -1,15 +1,50 @@
 import json
+from dataclasses import dataclass
 from pathlib import Path
 
+import ants
 import aind_smartspim_transform_utils
 import numpy as np
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from aind_smartspim_transform_utils.utils.utils import get_orientation, \
     convert_to_ants_space, convert_from_ants_space
+from concurrent.futures import ThreadPoolExecutor
 from scipy.ndimage import map_coordinates
 
-from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.metadata import AcquisitionAxis
+from deep_ccf_registration.utils.logging_utils import timed
+
+
+@dataclass
+class CachedAffine:
+    """Pre-computed inverse affine transform for fast numpy application."""
+    rotation_inv: np.ndarray  # (3, 3) inverse rotation matrix
+    pre_offset: np.ndarray  # (3,) = -(center + translation)
+    post_offset: np.ndarray  # (3,) = center - R_inv @ (center + translation) simplifies to just center
+
+    @classmethod
+    def from_ants_file(cls, affine_path: Path) -> "CachedAffine":
+        """Load ANTs affine and precompute inverse for fast application."""
+        tx = ants.read_transform(str(affine_path))
+        params = np.array(tx.parameters)
+        rotation = params[:9].reshape(3, 3)
+        translation = params[9:12]
+        center = np.array(tx.fixed_parameters)
+        rotation_inv = np.linalg.inv(rotation)
+        # Precompute: output = (points + pre_offset) @ R_inv.T + post_offset
+        # where pre_offset = -(center + translation), post_offset = center
+        pre_offset = -(center + translation)
+        post_offset = center
+        return cls(rotation_inv=rotation_inv, pre_offset=pre_offset, post_offset=post_offset)
+
+    def apply_inverse(self, points: np.ndarray) -> np.ndarray:
+        """Apply inverse affine transform to points.
+
+        ANTs forward: output = R @ (input - center) + center + translation
+        ANTs inverse: output = R_inv @ (input - center - translation) + center
+        Simplified: output = (input + pre_offset) @ R_inv.T + post_offset
+        """
+        return (points + self.pre_offset) @ self.rotation_inv.T + self.post_offset
 
 
 def create_coordinate_grid(
@@ -140,12 +175,12 @@ def scale_points(points: np.ndarray, scaling: list[float]) -> np.ndarray:
 
 def apply_transforms_to_points(
     points: np.ndarray,
-    affine_path: Path,
-    warp: np.ndarray,
+    cached_affine: CachedAffine,
+    warp: tuple[np.ndarray, np.ndarray, np.ndarray],
     template_parameters: AntsImageParameters,
 ) -> np.ndarray:
     """
-    Apply affine and non-linear transformations to points in input space.
+    Apply affine and non-linear transformations to points
 
     Transforms points from input space to template space by applying inverse affine
     transformation followed by displacement field warping.
@@ -154,10 +189,10 @@ def apply_transforms_to_points(
     ----------
     points : np.ndarray
         Points in physical input space to be transformed.
-    affine_path:
-        Affine path
-    warp : tensorstore.TensorStore or np.ndarray
-        Displacement field for non-linear transformation.
+    cached_affine : CachedAffine
+        Pre-computed inverse affine transform.
+    warp : tuple of 3 np.ndarray
+        Pre-split displacement field components, each C-contiguous.
     template_parameters : AntsImageParameters
         Template image parameters.
 
@@ -168,31 +203,33 @@ def apply_transforms_to_points(
     """
     # apply inverse affine to points in input space
     # this returns points in physical space
-    affine_transformed_points = aind_smartspim_transform_utils.utils.utils.apply_transforms_to_points(
-        ants_pts=points,
-        transforms=[str(affine_path)],
-        invert=(True,)
-    )
+
+    with timed():
+        affine_transformed_points = cached_affine.apply_inverse(points)
 
     # convert physical points to voxels,
     # so we can index into the displacement field
-    affine_transformed_voxels = convert_from_ants_space(
-        template_parameters=template_parameters,
-        physical_pts=affine_transformed_points
-    )
-
-    displacements = np.empty(affine_transformed_voxels.shape)
-
-    for i in range(3):
-        displacements[..., i] = map_coordinates(
-            input=warp[..., i],
-            coordinates=affine_transformed_voxels.T,
-            order=1,
-            mode="constant",
-            cval=0,
+    with timed():
+        affine_transformed_voxels = convert_from_ants_space(
+            template_parameters=template_parameters,
+            physical_pts=affine_transformed_points
         )
 
-    # apply displacement vector to affine transformed points
-    transformed_points = affine_transformed_points + displacements
+    with timed():
+        coords = affine_transformed_voxels.T
+        # Parallel interpolation - map_coordinates releases the GIL
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = [
+                executor.submit(
+                    map_coordinates, warp[i], coords,
+                    order=1, mode="constant", cval=0
+                )
+                for i in range(3)
+            ]
+            displacements = np.stack([f.result() for f in futures], axis=-1)
+
+    with timed():
+        # apply displacement vector to affine transformed points
+        transformed_points = affine_transformed_points + displacements
 
     return transformed_points
