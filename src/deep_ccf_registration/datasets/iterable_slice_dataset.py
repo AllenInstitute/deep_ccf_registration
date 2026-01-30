@@ -18,7 +18,7 @@ from torch.utils.data import IterableDataset, get_worker_info
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.datasets.transforms import map_points_to_right_hemisphere
 from deep_ccf_registration.datasets.utils.template_points import create_coordinate_grid, \
-    transform_points_to_template_space, apply_transforms_to_points, CachedAffine
+    transform_points_to_template_space, apply_transforms_to_points, Affine
 from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, TissueBoundingBoxes, \
     AcquisitionAxis
 from deep_ccf_registration.utils.logging_utils import timed, timed_func
@@ -287,7 +287,7 @@ class IterableSubjectSliceDataset(IterableDataset):
         )
         # Cache the affine transform for fast numpy application
         logger.info(f"Loading affine for subject {subject_id}")
-        self._cached_affine = CachedAffine.from_ants_file(metadata.ls_to_template_affine_matrix_path)
+        self._cached_affine = Affine.from_ants_file(metadata.ls_to_template_affine_matrix_path)
         self._loaded_subject_id = subject_id
 
     def _load_full_volume(self, metadata: SubjectMetadata) -> np.ndarray:
