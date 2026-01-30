@@ -1,17 +1,29 @@
+import os
 import random
+import shutil
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence
 
+import ants
+import boto3
 import numpy as np
 import tensorstore
+from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
+from ants import ANTsImage
 from loguru import logger
 from scipy.ndimage import map_coordinates
 from torch.utils.data import IterableDataset, get_worker_info
 
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.datasets.transforms import map_points_to_right_hemisphere
-from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, TissueBoundingBoxes
+from deep_ccf_registration.datasets.utils.template_points import create_coordinate_grid, \
+    transform_points_to_template_space, apply_transforms_to_points
+from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, TissueBoundingBoxes, \
+    AcquisitionAxis
+from deep_ccf_registration.utils.logging_utils import timed
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
+from deep_ccf_registration.utils.transforms import transform_points_to_template_ants_space
 
 
 @dataclass(frozen=True)
@@ -70,6 +82,7 @@ class IterableSubjectSliceDataset(IterableDataset):
         target_eval_transform: Optional[callable] = None,
         include_tissue_mask: bool = False,
         ccf_annotations: Optional[np.ndarray] = None,
+        scratch_path: Path = Path('/tmp')
     ):
         if include_tissue_mask and ccf_annotations is None:
             raise ValueError("include_tissue_mask=True requires ccf_annotations")
@@ -84,11 +97,13 @@ class IterableSubjectSliceDataset(IterableDataset):
         self._ccf_annotations = ccf_annotations
 
         self._loaded_subject_id: Optional[str] = None
-        self._loaded_volume: Optional[np.ndarray] = None
-        self._loaded_template: Optional[np.ndarray] = None
+        self._volume: Optional[np.ndarray] = None
+        self._warp: Optional[np.ndarray] = None
+        self._warp_ants_image: Optional[ANTsImage] = None
         self._tissue_bboxes = tissue_bboxes.bounding_boxes
         self._crop_size = crop_size
         self._is_train = is_train
+        self._scratch_path = scratch_path
 
     def __iter__(self) -> Iterator[PatchSample]:
         for spec in self._slice_generator():
@@ -97,8 +112,6 @@ class IterableSubjectSliceDataset(IterableDataset):
 
     def _load_slice(self, spec: SliceSampleSpec) -> PatchSample:
         metadata = spec.metadata
-        volume = self._get_volume(metadata.subject_id)
-        template_volume = self._get_template_points_volume(metadata.subject_id)
         slice_axis = metadata.get_slice_axis(spec.orientation)
         axes = sorted(metadata.axes, key=lambda axis: axis.dimension)
         in_plane_axes = [ax for ax in axes if ax.dimension != slice_axis.dimension]
@@ -126,8 +139,16 @@ class IterableSubjectSliceDataset(IterableDataset):
         spatial_slices[2 + y_axis.dimension] = slice(start_y, start_y + patch_height)
         spatial_slices[2 + x_axis.dimension] = slice(start_x, start_x + patch_width)
 
-        data_patch = volume[tuple(spatial_slices)].astype("float32")
-        template_patch = template_volume[tuple(spatial_slices)].astype("float32")
+        data_patch = self._volume[tuple(spatial_slices)].astype("float32")
+        template_patch = self._get_template_points(
+            patch_height=patch_height,
+            patch_width=patch_width,
+            start_x=start_x,
+            start_y=start_y,
+            slice_axis=slice_axis,
+            fixed_index_value=spec.slice_idx,
+            experiment_meta=metadata,
+        )
         template_patch = map_points_to_right_hemisphere(
             template_points=template_patch,
             template_parameters=self._template_parameters,
@@ -191,6 +212,48 @@ class IterableSubjectSliceDataset(IterableDataset):
             eval_tissue_mask=eval_tissue_mask,
         )
 
+    def _get_template_points(
+        self,
+        patch_height: int,
+        patch_width: int,
+        start_x: int,
+        start_y: int,
+        fixed_index_value: int,
+        slice_axis: AcquisitionAxis,
+        experiment_meta: SubjectMetadata,
+    ) -> np.ndarray:
+
+        point_grid = create_coordinate_grid(
+            patch_height=patch_height,
+            patch_width=patch_width,
+            start_x=start_x,
+            start_y=start_y,
+            fixed_index_value=fixed_index_value,
+            axes=experiment_meta.axes,
+            slice_axis=slice_axis
+        )
+
+        points = transform_points_to_template_space(
+            points=point_grid,
+            input_volume_shape=self._volume.shape[2:],
+            acquisition_axes=experiment_meta.axes,
+            ls_template_info=AntsImageParameters.from_ants_image(image=self._warp_ants_image),
+            registration_downsample=experiment_meta.registration_downsample
+        )
+
+        with timed():
+            template_points = apply_transforms_to_points(
+                points=points,
+                template_parameters=self._template_parameters,
+                affine_path=experiment_meta.ls_to_template_affine_matrix_path,
+                warp=self._warp,
+            )
+
+        template_points = template_points.reshape((patch_height, patch_width, 3))
+
+        return template_points
+
+
     @dataclass(frozen=True)
     class _WorkerContext:
         worker_id: int
@@ -210,9 +273,10 @@ class IterableSubjectSliceDataset(IterableDataset):
         if self._loaded_subject_id == subject_id:
             return
         logger.info(f"Loading full volume for subject {subject_id}")
-        self._loaded_volume = self._load_full_volume(metadata)
-        logger.info(f"Loading full template points for subject {subject_id}")
-        self._loaded_template = self._load_full_template(metadata)
+        self._volume = self._load_full_volume(metadata)
+        logger.info(f"Loading warp for subject {subject_id}")
+        self._warp_ants_image = self._load_warp(metadata)
+        self._warp = self._warp_ants_image.numpy()
         self._loaded_subject_id = subject_id
 
     def _load_full_volume(self, metadata: SubjectMetadata) -> np.ndarray:
@@ -229,29 +293,26 @@ class IterableSubjectSliceDataset(IterableDataset):
         data = store[...].read().result()
         return np.array(data)
 
-    def _load_full_template(self, metadata: SubjectMetadata) -> np.ndarray:
-        store = tensorstore.open(
-            spec={
-                "driver": "auto",
-                "kvstore": create_kvstore(
-                    path=str(metadata.get_template_points_path()),
-                    aws_credentials_method=self._aws_credentials_method,
-                ),
-            },
-            read=True,
-        ).result()
-        data = store[...].read().result()
-        return np.array(data)
+    def _load_warp(self, metadata: SubjectMetadata) -> ANTsImage:
+        warp_dir = self._scratch_path / 'warps'
+        os.makedirs(warp_dir, exist_ok=True)
 
-    def _get_volume(self, subject_id: str) -> np.ndarray:
-        if self._loaded_subject_id != subject_id or self._loaded_volume is None:
-            raise RuntimeError("Volume data not loaded for requested subject")
-        return self._loaded_volume
+        warp_local_path = warp_dir / f'{metadata.subject_id}_{metadata.ls_to_template_inverse_warp_path_original.name}'
+        if warp_local_path.exists():
+            return ants.image_read(str(warp_local_path))
 
-    def _get_template_points_volume(self, subject_id: str) -> np.ndarray:
-        if self._loaded_subject_id != subject_id or self._loaded_template is None:
-            raise RuntimeError("Template data not loaded for requested subject")
-        return self._loaded_template
+        logger.info(
+            f'Copying {metadata.ls_to_template_inverse_warp_path_original} to {warp_local_path}')
+        if str(metadata.ls_to_template_inverse_warp_path_original).startswith('/data/aind_open_data'):
+            s3 = boto3.client('s3')
+            s3.download_file('aind-open-data',
+                             metadata.ls_to_template_inverse_warp_path_original.relative_to('/data/aind_open_data'),
+                             warp_local_path)
+        else:
+            shutil.copy(metadata.ls_to_template_inverse_warp_path_original, warp_local_path)
+
+        warp = ants.image_read(str(warp_local_path))
+        return warp
 
 def _get_tissue_mask(
     annotations: np.ndarray,
@@ -271,8 +332,8 @@ def _get_tissue_mask(
 
     tissue_mask = (
         map_coordinates(
-            annotations,
-            template_points.reshape(-1, C).T,
+            input=annotations,
+            coordinates=template_points.reshape(-1, C).T,
             order=0,
             mode="constant",
             cval=0,

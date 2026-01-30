@@ -351,7 +351,6 @@ def train(
         optimizer,
         max_iters: int,
         model_weights_out_dir: Path,
-        config: TrainConfig,
         ls_template_parameters: TemplateParameters,
         normalize_target_points: bool = True,
         learning_rate: float = 0.0001,
