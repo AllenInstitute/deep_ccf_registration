@@ -89,3 +89,6 @@ class TrainConfig(BaseModel):
     resample_to_fixed_resolution: Optional[int] = None
     pad_dim: int = 512
     epoch_subject_slice_fraction: float = 1.0
+    debug_start_y: Optional[int] = 0
+    debug_start_x: Optional[int] = 0
+    debug_slice_idx: Optional[int] = None

@@ -109,7 +109,7 @@ class SubjectSliceSampler:
             if self.shuffle_slices_within_subject:
                 rng.shuffle(slice_orientation_pairs)
             else:
-                # Sort by slice_idx first, then orientation (deterministic order)
+                # Sort by slice_idx first, then orientation
                 slice_orientation_pairs.sort(key=lambda x: (x[0], x[1].value))
             
             # Generate specs for each (slice, orientation) pair

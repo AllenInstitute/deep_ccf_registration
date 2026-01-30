@@ -70,7 +70,10 @@ def create_dataloader(
         shuffle_slices_within_subject=is_train,
         seed=config.seed,
         tissue_bboxes=tissue_bboxes,
-        is_debug=config.debug
+        is_debug=config.debug,
+        debug_start_y=config.debug_start_y,
+        debug_start_x=config.debug_start_x,
+        debug_slice_idx=config.debug_slice_idx,
     )
 
     dataset = IterableSubjectSliceDataset(
