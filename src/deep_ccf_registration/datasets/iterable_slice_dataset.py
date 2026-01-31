@@ -282,7 +282,6 @@ class IterableSubjectSliceDataset(IterableDataset):
         warp = self._warp_ants_image.numpy()
         # This apparently improves efficiency when map_coordinates is called on each x,y,z offset dimension
         self._warp = np.ascontiguousarray(warp.transpose(3, 0, 1, 2))
-        logger.info(f"Loading affine for subject {subject_id}")
         self._cached_affine = Affine.from_ants_file(metadata.ls_to_template_affine_matrix_path)
         self._loaded_subject_id = subject_id
 
@@ -313,8 +312,8 @@ class IterableSubjectSliceDataset(IterableDataset):
         if str(metadata.ls_to_template_inverse_warp_path_original).startswith('/data/aind_open_data'):
             s3 = boto3.client('s3')
             s3.download_file('aind-open-data',
-                             metadata.ls_to_template_inverse_warp_path_original.relative_to('/data/aind_open_data'),
-                             warp_local_path)
+                             str(metadata.ls_to_template_inverse_warp_path_original.relative_to('/data/aind_open_data')),
+                             str(warp_local_path))
         else:
             shutil.copy(metadata.ls_to_template_inverse_warp_path_original, warp_local_path)
 
