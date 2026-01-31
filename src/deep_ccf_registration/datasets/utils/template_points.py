@@ -17,30 +17,45 @@ from deep_ccf_registration.utils.logging_utils import timed
 
 @dataclass
 class Affine:
-    """Pre-computed inverse affine transform from the ANTs .mat file."""
-    rotation_inv: np.ndarray  # (3, 3) inverse rotation matrix
-    center: np.ndarray  # (3,) center of rotation
-    translation: np.ndarray  # (3,) translation vector
+    """Pre-computed inverse affine transform from the ANTs .mat file.
+
+    ANTs affine transform: y = A @ (x - c) + c + t
+    where A is the matrix, t is translation, c is center.
+
+    See: https://github.com/ANTsX/ANTsPy/wiki/ANTs-transform-concepts-and-file-formats
+    """
+    A_inv: np.ndarray  # (3, 3) inverse of matrix A
+    c: np.ndarray  # (3,) center of rotation
+    t: np.ndarray  # (3,) translation vector
 
     @classmethod
     def from_ants_file(cls, affine_path: Path) -> "Affine":
         """Load ANTs affine and precompute inverse."""
         tx = ants.read_transform(str(affine_path))
         params = np.array(tx.parameters)
-        rotation = params[:9].reshape(3, 3)
-        translation = params[9:12]
-        center = np.array(tx.fixed_parameters)
-        rotation_inv = np.linalg.inv(rotation)
-        return cls(rotation_inv=rotation_inv, center=center, translation=translation)
+        A = params[:9].reshape(3, 3)
+        t = params[9:12]
+        c = np.array(tx.fixed_parameters)
+        A_inv = np.linalg.inv(A)
+        return cls(A_inv=A_inv, c=c, t=t)
 
-    def apply_inverse(self, points: np.ndarray) -> np.ndarray:
+    def apply_inverse(self, x: np.ndarray) -> np.ndarray:
         """Apply inverse affine transform to points.
 
-        ANTs forward: output = R @ (input - center) + center + translation
-        ANTs inverse: output = R_inv @ (input - center - translation) + center
+        ANTs forward:
+        --------------
+        y = A@x + t + c - A@c
+        y = A@x - A@c + c + t
+        y = A@(x-c) + c + t
+
+        ANTs inverse:
+        --------------
+        y = A@(x - c) + c + t
+        y - c - t = A@(x - c)
+        A_inv @ (y - c - t) = x - c
+        x = A_inv @ (y - c - t) + c
         """
-        shifted = points - self.center - self.translation
-        return shifted @ self.rotation_inv.T + self.center
+        return (x - self.c - self.t) @ self.A_inv.T + self.c
 
 
 def create_coordinate_grid(
@@ -172,7 +187,7 @@ def scale_points(points: np.ndarray, scaling: list[float]) -> np.ndarray:
 def apply_transforms_to_points(
     points: np.ndarray,
     cached_affine: Affine,
-    warp: tuple[np.ndarray, np.ndarray, np.ndarray],
+    warp: np.ndarray,
     template_parameters: AntsImageParameters,
 ) -> np.ndarray:
     """
@@ -187,8 +202,7 @@ def apply_transforms_to_points(
         Points in physical input space to be transformed.
     cached_affine : Affine
         Pre-computed inverse affine transform.
-    warp : tuple of 3 np.ndarray
-        Pre-split displacement field components, each C-contiguous.
+    warp : CxHxWxD displacement vector for each voxel in HxWxD template
     template_parameters : AntsImageParameters
         Template image parameters.
 

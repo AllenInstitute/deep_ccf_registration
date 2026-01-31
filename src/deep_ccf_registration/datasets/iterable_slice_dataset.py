@@ -97,7 +97,7 @@ class IterableSubjectSliceDataset(IterableDataset):
 
         self._loaded_subject_id: Optional[str] = None
         self._volume: Optional[np.ndarray] = None
-        self._warp: Optional[tuple[np.ndarray, np.ndarray, np.ndarray]] = None
+        self._warp: Optional[np.ndarray] = None
         self._warp_ants_image: Optional[ANTsImage] = None
         self._tissue_bboxes = tissue_bboxes.bounding_boxes
         self._crop_size = crop_size
@@ -248,7 +248,7 @@ class IterableSubjectSliceDataset(IterableDataset):
                 points=points,
                 template_parameters=self._template_parameters,
                 cached_affine=self._cached_affine,
-                warp=self._warp_components,
+                warp=self._warp,
             )
 
         with timed():
@@ -280,12 +280,8 @@ class IterableSubjectSliceDataset(IterableDataset):
         logger.info(f"Loading warp for subject {subject_id}")
         self._warp_ants_image = self._load_warp(metadata)
         warp = self._warp_ants_image.numpy()
-        # Pre-split warp into separate contiguous arrays for each component
-        # This improves cache locality in map_coordinates
-        self._warp_components = tuple(
-            np.ascontiguousarray(warp[..., i]) for i in range(3)
-        )
-        # Cache the affine transform for fast numpy application
+        # This apparently improves efficiency when map_coordinates is called on each x,y,z offset dimension
+        self._warp = np.ascontiguousarray(warp.transpose(3, 0, 1, 2))
         logger.info(f"Loading affine for subject {subject_id}")
         self._cached_affine = Affine.from_ants_file(metadata.ls_to_template_affine_matrix_path)
         self._loaded_subject_id = subject_id
