@@ -11,6 +11,8 @@ import numpy as np
 import tensorstore
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from ants import ANTsImage
+from botocore import UNSIGNED
+from botocore.config import Config
 from loguru import logger
 from scipy.ndimage import map_coordinates
 from torch.utils.data import IterableDataset, get_worker_info
@@ -310,7 +312,10 @@ class IterableSubjectSliceDataset(IterableDataset):
         logger.info(
             f'Copying {metadata.ls_to_template_inverse_warp_path_original} to {warp_local_path}')
         if str(metadata.ls_to_template_inverse_warp_path_original).startswith('/data/aind_open_data'):
-            s3 = boto3.client('s3')
+            s3 = boto3.client(
+                's3',
+                config=Config(signature_version=UNSIGNED),
+                region_name='us-west-2')
             s3.download_file('aind-open-data',
                              str(metadata.ls_to_template_inverse_warp_path_original.relative_to('/data/aind_open_data')),
                              str(warp_local_path))
