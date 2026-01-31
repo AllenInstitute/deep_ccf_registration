@@ -132,8 +132,8 @@ class IterableSubjectSliceDataset(IterableDataset):
             else:
                 start_y = random.randint(bbox.y, max(bbox.y, bbox.y + bbox.height - self._crop_size[0]))
                 start_x = random.randint(bbox.x, max(bbox.x, bbox.x + bbox.width - self._crop_size[1]))
-            patch_height = min(self._crop_size[0], bbox.height - start_y)
-            patch_width = min(self._crop_size[1], bbox.width - start_x)
+            patch_height = min(self._crop_size[0], bbox.y + bbox.height - start_y)
+            patch_width = min(self._crop_size[1], bbox.x + bbox.width - start_x)
         
         spatial_slices = [0, 0, slice(None), slice(None), slice(None)]
         spatial_slices[2 + slice_axis.dimension] = spec.slice_idx
