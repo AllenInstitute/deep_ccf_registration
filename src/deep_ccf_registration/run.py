@@ -88,6 +88,7 @@ def create_dataloader(
         target_eval_transform=target_eval_transform,
         include_tissue_mask=include_tissue_mask,
         ccf_annotations=ccf_annotations,
+        scratch_path=config.warp_scratch_path,
     )
 
     dataloader = DataLoader(
