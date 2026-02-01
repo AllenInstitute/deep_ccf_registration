@@ -5,6 +5,7 @@ from typing import Optional, Literal
 from pathlib import Path
 
 from deep_ccf_registration.metadata import SliceOrientation
+from deep_ccf_registration.models import PositionalEmbeddingType, PositionalEmbeddingPlacement
 
 
 class LRScheduler(Enum):
@@ -17,6 +18,9 @@ class ModelConfig(BaseModel):
     unet_channels: tuple[int, ...]
     unet_stride: tuple[int, ...]
     feature_channels: int = 64
+    pos_encoding_channels: int = 16
+    positional_embedding_type: PositionalEmbeddingType
+    positional_embedding_placement: PositionalEmbeddingPlacement
 
 class TrainConfig(BaseModel):
     model_config = ConfigDict(extra='forbid')

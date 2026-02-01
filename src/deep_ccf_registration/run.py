@@ -99,7 +99,7 @@ def create_dataloader(
         # using 0 workers (main process) for eval,
         # to keep mem usage lower
         num_workers=num_workers if is_train else 0,
-        collate_fn=collate_patch_samples,
+        collate_fn=lambda x: collate_patch_samples(samples=x, pad_dim=config.pad_dim),
         pin_memory=device == 'gpu',
         persistent_workers=is_train and num_workers > 0
     )
@@ -300,10 +300,15 @@ def main(config_path: Path):
         spatial_dims=2,
         in_channels=1,
         channels=config.model.unet_channels,
+        strides=config.model.unet_stride,
         out_coords=3,
         include_tissue_mask=config.predict_tissue_mask,
         use_positional_encoding=config.use_positional_encoding,
-        feature_channels=config.model.feature_channels
+        feature_channels=config.model.feature_channels,
+        input_dims=(config.pad_dim, config.pad_dim),
+        pos_encoding_channels=config.model.pos_encoding_channels,
+        positional_embedding_type=config.model.positional_embedding_type,
+        positional_embedding_placement=config.model.positional_embedding_placement,
     )
 
     if is_main_process():
