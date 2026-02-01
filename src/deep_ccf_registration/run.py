@@ -312,8 +312,19 @@ def main(config_path: Path):
             logger.info(f"Loading checkpoint from: {config.load_checkpoint}")
         checkpoint = torch.load(f=config.load_checkpoint, map_location=device)
         model.load_state_dict(state_dict=checkpoint['model_state_dict'])
+        # Extract resume state from checkpoint
+        start_step = checkpoint.get('global_step', 0)
+        start_best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        start_patience_counter = checkpoint.get('patience_counter', 0)
+        scheduler_state_dict = checkpoint.get('scheduler_state_dict', None)
+        if is_main_process():
+            logger.info(f"Resuming from step {start_step}, best_val_loss={start_best_val_loss:.6f}")
     else:
         checkpoint = None
+        start_step = 0
+        start_best_val_loss = float('inf')
+        start_patience_counter = 0
+        scheduler_state_dict = None
 
     # Move model to device before wrapping with DDP
     model.to(device)
@@ -365,12 +376,18 @@ def main(config_path: Path):
 
     # Only main process creates mlflow run
     if is_main_process() and config.use_mlflow:
-        mlflow_run = mlflow.start_run()
+        if config.resume_mlflow_run_id:
+            mlflow_run = mlflow.start_run(run_id=config.resume_mlflow_run_id)
+            logger.info(f"Resuming MLflow run: {config.resume_mlflow_run_id}")
+        else:
+            mlflow_run = mlflow.start_run()
+            logger.info(f"Started new MLflow run: {mlflow_run.info.run_id}")
     else:
         mlflow_run = nullcontext()
 
     with mlflow_run:
-        if is_main_process():
+        if is_main_process() and not config.resume_mlflow_run_id:
+            # Only log params on new runs (not resume)
             mlflow.log_params(params=config.model_dump())
             try:
                 commit, repo_url = _get_git_commit_from_package()
@@ -405,6 +422,11 @@ def main(config_path: Path):
             normalize_target_points=config.normalize_template_points,
             predict_tissue_mask=config.predict_tissue_mask,
             gradient_accumulation_steps=config.gradient_accumulation_steps,
+            # Resume state from checkpoint
+            start_step=start_step,
+            start_best_val_loss=start_best_val_loss,
+            start_patience_counter=start_patience_counter,
+            scheduler_state_dict=scheduler_state_dict,
         )
 
     if is_main_process():

@@ -375,6 +375,11 @@ def train(
         lr_scheduler: Optional[LRScheduler] = None,
         tissue_mask_loss_weight: float = 0.1,
         gradient_accumulation_steps: int = 1,
+        # Resume parameters for checkpoint recovery
+        start_step: int = 0,
+        start_best_val_loss: float = float("inf"),
+        start_patience_counter: int = 0,
+        scheduler_state_dict: Optional[dict] = None,
 ):
     """
     Train slice registration model
@@ -409,19 +414,25 @@ def train(
     os.makedirs(model_weights_out_dir, exist_ok=True)
 
     calc_coord_loss = MSE(reduction='mean')
-    best_val_loss = float("inf")
-    patience_counter = 0
-    global_step = 0
+    best_val_loss = start_best_val_loss
+    patience_counter = start_patience_counter
+    global_step = start_step
     accumulation_step = 0
 
     model.to(device)
 
-    logger.info(f"Starting training for {max_iters} iters")
+    if start_step > 0:
+        logger.info(f"Resuming training from step {start_step}")
+        logger.info(f"Best val loss so far: {start_best_val_loss:.6f}, patience: {start_patience_counter}")
+    logger.info(f"Training for {max_iters} iters total")
     logger.info(f"Device: {device}")
     logger.info(f"Gradient accumulation steps: {gradient_accumulation_steps}")
 
     if lr_scheduler == LRScheduler.ReduceLROnPlateau:
         scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer, patience=100)
+        if scheduler_state_dict is not None:
+            scheduler.load_state_dict(scheduler_state_dict)
+            logger.info("Restored scheduler state from checkpoint")
     else:
         scheduler = None
 
@@ -581,7 +592,9 @@ def train(
                             'global_step': global_step,
                             'model_state_dict': model.state_dict(),
                             'optimizer_state_dict': optimizer.state_dict(),
-                            'val_rmse': val_metrics['val_rmse'],
+                            'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+                            'best_val_loss': best_val_loss,
+                            'patience_counter': patience_counter,
                             'val_rmse': val_metrics['val_rmse'],
                             'lr': scheduler.get_last_lr() if scheduler is not None else learning_rate
                         },
