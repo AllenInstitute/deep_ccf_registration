@@ -10,6 +10,7 @@ import click
 import mlflow
 import numpy as np
 import torch
+import torch.distributed as dist
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 
 from torch.utils.data import DataLoader
@@ -108,6 +109,44 @@ log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logger.add(sys.stderr, level=log_level)
 
 
+def is_main_process() -> bool:
+    """Check if this is the main process (rank 0) for logging/mlflow."""
+    return int(os.environ.get('RANK', 0)) == 0
+
+
+def get_world_size() -> int:
+    """Get the total number of DDP processes."""
+    return int(os.environ.get('WORLD_SIZE', 1))
+
+
+def get_local_rank() -> int:
+    """Get the local rank (GPU index on this node)."""
+    return int(os.environ.get('LOCAL_RANK', 0))
+
+
+def setup_ddp() -> tuple[str, int]:
+    """
+    Initialize DDP if running in distributed mode.
+
+    Returns:
+        tuple: (device string, world_size)
+    """
+    world_size = get_world_size()
+    local_rank = get_local_rank()
+
+    if world_size > 1:
+        # Initialize the process group
+        dist.init_process_group(backend='nccl')
+        device = f'cuda:{local_rank}'
+        torch.cuda.set_device(local_rank)
+        if is_main_process():
+            logger.info(f"DDP initialized: world_size={world_size}, local_rank={local_rank}")
+    else:
+        device = None  # Will be set by config
+
+    return device, world_size
+
+
 def _get_git_commit_from_package(package_name="deep-ccf-registration"):
     """Extract git commit from installed package"""
     dist = distribution(package_name)
@@ -147,14 +186,24 @@ def main(config_path: Path):
         torch.cuda.manual_seed_all(seed=config.seed)
     logger.info(f"Random seed set to: {config.seed}")
 
-    if config.device == "auto":
+    # Setup DDP if running in distributed mode
+    ddp_device, world_size = setup_ddp()
+
+    if ddp_device is not None:
+        # DDP mode - use the assigned device
+        device = ddp_device
+    elif config.device == "auto":
         if torch.cuda.is_available():
             device = "cuda"
         else:
             device = "cpu"
     else:
         device = config.device
-    logger.info(f"Using device: {config.device}")
+
+    if is_main_process():
+        logger.info(f"Using device: {device}")
+        if world_size > 1:
+            logger.info(f"DDP training with {world_size} GPUs")
 
     # Setup mixed precision
     if config.mixed_precision and device == "cuda":
@@ -255,20 +304,37 @@ def main(config_path: Path):
         feature_channels=config.model.feature_channels
     )
 
-    logger.info(model)
+    if is_main_process():
+        logger.info(model)
 
     if config.load_checkpoint:
-        logger.info(f"Loading checkpoint from: {config.load_checkpoint}")
+        if is_main_process():
+            logger.info(f"Loading checkpoint from: {config.load_checkpoint}")
         checkpoint = torch.load(f=config.load_checkpoint, map_location=device)
         model.load_state_dict(state_dict=checkpoint['model_state_dict'])
     else:
         checkpoint = None
 
+    # Move model to device before wrapping with DDP
+    model.to(device)
+
+    # Wrap model with DDP if in distributed mode
+    if world_size > 1:
+        local_rank = get_local_rank()
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+        )
+        if is_main_process():
+            logger.info("Model wrapped with DistributedDataParallel")
+
     # Log model info
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"Total parameters: {total_params:,}")
-    logger.info(f"Trainable parameters: {trainable_params:,}")
+    if is_main_process():
+        logger.info(f"Total parameters: {total_params:,}")
+        logger.info(f"Trainable parameters: {trainable_params:,}")
 
     # Create optimizer
     opt = torch.optim.AdamW(
@@ -279,29 +345,39 @@ def main(config_path: Path):
 
     if config.load_checkpoint and 'optimizer_state_dict' in checkpoint:
         opt.load_state_dict(state_dict=checkpoint['optimizer_state_dict'])
-        logger.info("Loaded optimizer state from checkpoint")
+        if is_main_process():
+            logger.info("Loaded optimizer state from checkpoint")
 
-    logger.info(config)
+    if is_main_process():
+        logger.info(config)
 
-    if config.mlflow_tracking_uri:
-        mlflow.set_tracking_uri(config.mlflow_tracking_uri)
+    # mlflow setup - only on main process to avoid conflicts
+    if is_main_process():
+        if config.mlflow_tracking_uri:
+            mlflow.set_tracking_uri(config.mlflow_tracking_uri)
 
-    mlflow.set_experiment(config.mlflow_experiment_name)
-    mlflow.enable_system_metrics_logging()
+        mlflow.set_experiment(config.mlflow_experiment_name)
+        mlflow.enable_system_metrics_logging()
 
     # disable seeding so mlflow run name can be unique
     state = random.getstate()
     random.seed()
 
-    mlflow_run = mlflow.start_run() if config.use_mlflow else nullcontext()
+    # Only main process creates mlflow run
+    if is_main_process() and config.use_mlflow:
+        mlflow_run = mlflow.start_run()
+    else:
+        mlflow_run = nullcontext()
+
     with mlflow_run:
-        mlflow.log_params(params=config.model_dump())
-        try:
-            commit, repo_url = _get_git_commit_from_package()
-            mlflow.set_tag("mlflow.source.git.commit", commit)
-            mlflow.set_tag("mlflow.source.git.repoURL", repo_url)
-        except:
-            logger.warning('Could not parse git commit')
+        if is_main_process():
+            mlflow.log_params(params=config.model_dump())
+            try:
+                commit, repo_url = _get_git_commit_from_package()
+                mlflow.set_tag("mlflow.source.git.commit", commit)
+                mlflow.set_tag("mlflow.source.git.repoURL", repo_url)
+            except:
+                logger.warning('Could not parse git commit')
 
         # Restore original seeded state
         random.setstate(state)
@@ -331,11 +407,16 @@ def main(config_path: Path):
             gradient_accumulation_steps=config.gradient_accumulation_steps,
         )
 
-    logger.info("=" * 60)
-    logger.info(f"Training completed! Best validation loss: {best_val_loss:.6f}")
-    logger.info("=" * 60)
+    if is_main_process():
+        logger.info("=" * 60)
+        logger.info(f"Training completed! Best validation loss: {best_val_loss:.6f}")
+        logger.info("=" * 60)
 
     os.remove(ccf_annotations_path)
+
+    # Cleanup DDP
+    if world_size > 1:
+        dist.destroy_process_group()
 
 
 def split_train_val_test(

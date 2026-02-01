@@ -1,5 +1,6 @@
 """Sampler for generating slice specs with contiguous subject assignment across workers."""
 import math
+import os
 import random
 from typing import Iterator, Optional, Sequence
 
@@ -54,7 +55,12 @@ class SubjectSliceSampler:
         self._epoch = epoch
 
     def __call__(self) -> Iterator[SliceSampleSpec]:
-        """Generate slice specs, handling worker distribution."""
+        """Generate slice specs, handling DDP rank and worker distribution."""
+        # Get DDP rank info from environment (set by torchrun/torch.distributed.launch)
+        rank = int(os.environ.get('RANK', 0))
+        world_size = int(os.environ.get('WORLD_SIZE', 1))
+
+        # Get DataLoader worker info
         worker_info = get_worker_info()
         if worker_info is None:
             worker_id = 0
@@ -63,19 +69,26 @@ class SubjectSliceSampler:
             worker_id = worker_info.id
             num_workers = worker_info.num_workers
 
-        # Determine subject order
+        # Determine subject order (same shuffle across all ranks for consistent sharding)
         rng = random.Random(self.seed + self._epoch if self.seed is not None else None)
         subject_list = list(self.subjects)
         if self.shuffle_subjects:
             rng.shuffle(subject_list)
 
-        # Calculate which subjects this worker handles
+        # First: shard subjects across DDP ranks
         total_subjects = len(subject_list)
-        subjects_per_worker = math.ceil(total_subjects / num_workers)
-        start_subject = worker_id * subjects_per_worker
-        end_subject = min(start_subject + subjects_per_worker, total_subjects)
+        subjects_per_rank = math.ceil(total_subjects / world_size)
+        rank_start = rank * subjects_per_rank
+        rank_end = min(rank_start + subjects_per_rank, total_subjects)
+        rank_subjects = subject_list[rank_start:rank_end]
 
-        worker_subjects = subject_list[start_subject:end_subject]
+        # Then: shard rank's subjects across DataLoader workers
+        num_rank_subjects = len(rank_subjects)
+        subjects_per_worker = math.ceil(num_rank_subjects / num_workers) if num_rank_subjects > 0 else 0
+        start_subject = worker_id * subjects_per_worker
+        end_subject = min(start_subject + subjects_per_worker, num_rank_subjects)
+
+        worker_subjects = rank_subjects[start_subject:end_subject]
 
         # Generate specs for this worker's subjects
         for metadata in worker_subjects:

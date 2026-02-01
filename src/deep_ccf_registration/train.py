@@ -16,6 +16,11 @@ import torch.nn.functional as F
 
 from loguru import logger
 
+
+def is_main_process() -> bool:
+    """Check if this is the main process (rank 0) for logging/mlflow."""
+    return int(os.environ.get('RANK', 0)) == 0
+
 from deep_ccf_registration.configs.train_config import LRScheduler, TrainConfig
 from deep_ccf_registration.datasets.transforms import get_template_point_normalization_inverse
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
@@ -270,19 +275,20 @@ def _evaluate(
             )
             if is_debug:
                 plt.show()
-            mlflow.log_figure(
-                fig,
-                f"validation_samples/step_{iteration}/{fig_filename}"
-            )
+            if is_main_process():
+                mlflow.log_figure(
+                    fig,
+                    f"validation_samples/step_{iteration}/{fig_filename}"
+                )
             plt.close(fig)
 
-    # Log per-sample metrics as CSV
-    metrics_df = pd.DataFrame(eval_records)
-    with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
-        metrics_df.to_csv(f.name, index=False)
-        csv_path = f.name
-
-        mlflow.log_artifact(csv_path, artifact_path=f"eval_metrics/step_{global_step}")
+    # Log per-sample metrics as CSV (only on main process)
+    if is_main_process():
+        metrics_df = pd.DataFrame(eval_records)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
+            metrics_df.to_csv(f.name, index=False)
+            csv_path = f.name
+            mlflow.log_artifact(csv_path, artifact_path=f"eval_metrics/step_{global_step}")
 
     model.train()
 
@@ -428,7 +434,7 @@ def train(
         tissue_mask_losses = []
 
         for batch in train_dataloader:
-            if progress_logger is None:
+            if progress_logger is None and is_main_process():
                 progress_logger = ProgressLogger(desc='Training', total=max_iters, log_every=log_interval)
 
             input_images = batch["input_images"].to(device)
@@ -492,12 +498,14 @@ def train(
                 if predict_tissue_mask:
                     train_metrics['train/tissue_mask_loss'] = tissue_mask_loss.item()
 
-                mlflow.log_metrics(train_metrics, step=global_step)
+                if is_main_process():
+                    mlflow.log_metrics(train_metrics, step=global_step)
 
-                log_msg = f'loss={loss.item() * gradient_accumulation_steps:.3f}'
-                if predict_tissue_mask:
-                    log_msg += f'; point_loss={point_loss.item():.3f}; tissue_mask_loss={tissue_mask_loss.item():.3f}'
-                progress_logger.log_progress(other=log_msg)
+                if is_main_process():
+                    log_msg = f'loss={loss.item() * gradient_accumulation_steps:.3f}'
+                    if predict_tissue_mask:
+                        log_msg += f'; point_loss={point_loss.item():.3f}; tissue_mask_loss={tissue_mask_loss.item():.3f}'
+                    progress_logger.log_progress(other=log_msg)
 
                 # Periodic evaluation
                 if global_step % eval_interval == 0:
@@ -551,10 +559,11 @@ def train(
                             "eval/tissue_mask_loss": val_metrics['val_tissue_mask_loss'],
                             "eval/tissue_mask_dice": val_metrics['val_tissue_mask_dice'],
                         }
-                    mlflow.log_metrics(
-                        metrics=metrics,
-                        step=global_step
-                    )
+                    if is_main_process():
+                        mlflow.log_metrics(
+                            metrics=metrics,
+                            step=global_step
+                        )
 
                     log_msg = f"Step {global_step} | " \
                               f"Train loss: {loss.item() * gradient_accumulation_steps:.6f} | Val loss: {val_metrics['val_loss']:.6f} | " \
@@ -584,8 +593,9 @@ def train(
                         best_val_loss = val_metrics['val_loss']
                         patience_counter = 0
 
-                        mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
-                        mlflow.log_metric("best_val_loss", best_val_loss, step=global_step)
+                        if is_main_process():
+                            mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
+                            mlflow.log_metric("best_val_loss", best_val_loss, step=global_step)
 
                         logger.info(f"New best model saved! Val loss: {best_val_loss:.6f}")
                     else:
@@ -596,7 +606,8 @@ def train(
                     if patience_counter >= patience:
                         logger.info(f"\nEarly stopping triggered after {global_step} steps")
                         logger.info(f"Best validation RMSE: {best_val_loss:.6f}")
-                        mlflow.log_metric("final_best_val_rmse", best_val_loss)
+                        if is_main_process():
+                            mlflow.log_metric("final_best_val_rmse", best_val_loss)
 
                         return best_val_loss
 
@@ -610,5 +621,6 @@ def train(
                     logger.info(
                         f"\nTraining completed! Best validation RMSE: {best_val_loss:.6f}")
 
-                    mlflow.log_metric("final_best_val_rmse", best_val_loss)
+                    if is_main_process():
+                        mlflow.log_metric("final_best_val_rmse", best_val_loss)
                     return best_val_loss
