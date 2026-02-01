@@ -5,12 +5,12 @@ from pathlib import Path
 import ants
 import aind_smartspim_transform_utils
 import numpy as np
-from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from aind_smartspim_transform_utils.utils.utils import get_orientation, \
     convert_to_ants_space, convert_from_ants_space
 from concurrent.futures import ThreadPoolExecutor
 from scipy.ndimage import map_coordinates
 
+from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.metadata import AcquisitionAxis
 from deep_ccf_registration.utils.logging_utils import timed
 
@@ -117,7 +117,7 @@ def create_coordinate_grid(
 
 def transform_points_to_template_space(
     acquisition_axes: list[AcquisitionAxis],
-    ls_template_info: AntsImageParameters,
+    ls_template_info: TemplateParameters,
     points: np.ndarray,
     input_volume_shape: tuple[int, int, int],
     template_resolution: int = 25,
@@ -188,7 +188,7 @@ def apply_transforms_to_points(
     points: np.ndarray,
     cached_affine: Affine,
     warp: np.ndarray,
-    template_parameters: AntsImageParameters,
+    template_parameters: TemplateParameters,
 ) -> np.ndarray:
     """
     Apply affine and non-linear transformations to points

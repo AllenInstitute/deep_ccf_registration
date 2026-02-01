@@ -1,18 +1,11 @@
-import os
 import random
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence
 
 import ants
-import boto3
 import numpy as np
 import tensorstore
-from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
-from ants import ANTsImage
-from botocore import UNSIGNED
-from botocore.config import Config
 from loguru import logger
 from scipy.ndimage import map_coordinates
 from torch.utils.data import IterableDataset, get_worker_info
@@ -100,7 +93,6 @@ class IterableSubjectSliceDataset(IterableDataset):
         self._loaded_subject_id: Optional[str] = None
         self._volume: Optional[np.ndarray] = None
         self._warp: Optional[np.ndarray] = None
-        self._warp_ants_image: Optional[ANTsImage] = None
         self._tissue_bboxes = tissue_bboxes.bounding_boxes
         self._crop_size = crop_size
         self._is_train = is_train
@@ -241,7 +233,7 @@ class IterableSubjectSliceDataset(IterableDataset):
                 points=point_grid,
                 input_volume_shape=self._volume.shape[2:],
                 acquisition_axes=experiment_meta.axes,
-                ls_template_info=AntsImageParameters.from_ants_image(image=self._warp_ants_image),
+                ls_template_info=self._template_parameters,
                 registration_downsample=experiment_meta.registration_downsample
             )
 
@@ -300,12 +292,6 @@ class IterableSubjectSliceDataset(IterableDataset):
         ).result()
         data = store[...].read().result()
         return np.array(data)
-
-    def _load_warp(self, metadata: SubjectMetadata) -> ANTsImage:
-        if warp_local_path.exists():
-            return ants.image_read(str(warp_local_path))
-        warp = ants.image_read(str(warp_local_path))
-        return warp
 
 def _get_tissue_mask(
     annotations: np.ndarray,

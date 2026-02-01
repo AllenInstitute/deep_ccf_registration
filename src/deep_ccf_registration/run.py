@@ -53,7 +53,8 @@ def create_dataloader(
         origin=ls_template_parameters.origin,
         scale=ls_template_parameters.scale,
         direction=ls_template_parameters.direction,
-        shape=ls_template_parameters.shape
+        shape=ls_template_parameters.shape,
+        orientation=ls_template_parameters.orientation,
     )
 
     transform = build_transform(
