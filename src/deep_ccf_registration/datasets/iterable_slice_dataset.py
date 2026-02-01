@@ -303,7 +303,7 @@ class IterableSubjectSliceDataset(IterableDataset):
 
         warp_local_path = warp_dir / f'{metadata.subject_id}_{metadata.ls_to_template_inverse_warp_path_original.name}'
         if warp_local_path.exists():
-            return ants.image_read(str(warp_local_path))
+            return ants.image_read(str(warp_local_path)).numpy()
 
         logger.info(
             f'Copying {metadata.ls_to_template_inverse_warp_path_original} to {warp_local_path}')
