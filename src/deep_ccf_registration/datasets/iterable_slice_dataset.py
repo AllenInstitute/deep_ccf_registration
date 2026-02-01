@@ -1,11 +1,16 @@
+import os
 import random
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Iterator, Optional, Sequence
 
 import ants
+import boto3
 import numpy as np
 import tensorstore
+from botocore import UNSIGNED
+from botocore.config import Config
 from loguru import logger
 from scipy.ndimage import map_coordinates
 from torch.utils.data import IterableDataset, get_worker_info
@@ -272,7 +277,7 @@ class IterableSubjectSliceDataset(IterableDataset):
         logger.info(f"Loading full volume for subject {subject_id}")
         self._volume = self._load_full_volume(metadata)
         logger.info(f"Loading warp for subject {subject_id}")
-        warp = ants.image_read(str(metadata.ls_to_template_inverse_warp_path_original)).numpy()
+        warp = self._load_warp(metadata=metadata)
         # This apparently improves efficiency when map_coordinates is called on each x,y,z offset dimension
         self._warp = np.ascontiguousarray(warp.transpose(3, 0, 1, 2))
         self._cached_affine = Affine.from_ants_file(metadata.ls_to_template_affine_matrix_path)
@@ -291,6 +296,29 @@ class IterableSubjectSliceDataset(IterableDataset):
         ).result()
         data = store[...].read().result()
         return np.array(data)
+
+    def _load_warp(self, metadata: SubjectMetadata) -> np.ndarray:
+        warp_dir = self._scratch_path / 'warps'
+        os.makedirs(warp_dir, exist_ok=True)
+
+        warp_local_path = warp_dir / f'{metadata.subject_id}_{metadata.ls_to_template_inverse_warp_path_original.name}'
+        if warp_local_path.exists():
+            return ants.image_read(str(warp_local_path))
+
+        logger.info(
+            f'Copying {metadata.ls_to_template_inverse_warp_path_original} to {warp_local_path}')
+        if str(metadata.ls_to_template_inverse_warp_path_original).startswith('/data/aind_open_data'):
+            s3 = boto3.client(
+                's3',
+                config=Config(signature_version=UNSIGNED),
+                region_name='us-west-2')
+            s3.download_file('aind-open-data',
+                             str(metadata.ls_to_template_inverse_warp_path_original.relative_to('/data/aind_open_data')),
+                             str(warp_local_path))
+        else:
+            shutil.copy(metadata.ls_to_template_inverse_warp_path_original, warp_local_path)
+
+        return ants.image_read(str(warp_local_path)).numpy()
 
 def _get_tissue_mask(
     annotations: np.ndarray,
