@@ -101,7 +101,7 @@ def create_dataloader(
         num_workers=num_workers if is_train else 0,
         collate_fn=collate_patch_samples,
         pin_memory=device == 'gpu',
-        persistent_workers=is_train,
+        persistent_workers=is_train and num_workers > 0
     )
 
     return dataloader

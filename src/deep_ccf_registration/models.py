@@ -1,3 +1,6 @@
+from enum import Enum
+from typing import Optional
+
 import monai.networks.nets
 import torch
 import torch.nn as nn
@@ -22,6 +25,14 @@ class CoordConv(nn.Module):
         return coords.unsqueeze(0).expand(batch_size, -1, -1, -1)
 
 
+class PositionalEmbeddingType(Enum):
+    LEARNED = 0
+    COORD_CONV = 1
+
+class PositionalEmbeddingPlacement(Enum):
+    EARLY = 0
+    LATE = 1
+
 class UNetWithRegressionHeads(nn.Module):
     """
     UNet backbone with separate regression heads for coordinates and classification head for tissue mask.
@@ -36,6 +47,7 @@ class UNetWithRegressionHeads(nn.Module):
 
     def __init__(
         self,
+        input_dims: tuple[int, int],
         spatial_dims: int = 2,
         in_channels: int = 1,
         feature_channels: int = 64,
@@ -45,7 +57,9 @@ class UNetWithRegressionHeads(nn.Module):
         out_coords: int = 3,
         include_tissue_mask: bool = False,
         use_positional_encoding: bool = False,
-        pos_encoding_channels: int = 16,
+        pos_encoding_channels: Optional[int] = None,
+        positional_embedding_type: Optional[PositionalEmbeddingType] = None,
+        positional_embedding_placement: Optional[PositionalEmbeddingPlacement] = None
     ):
         """
         Parameters
@@ -66,34 +80,56 @@ class UNetWithRegressionHeads(nn.Module):
         """
         super().__init__()
 
+        if use_positional_encoding and positional_embedding_type is None:
+            raise ValueError('provide positional_embedding_type')
+        if use_positional_encoding and positional_embedding_placement is None:
+            raise ValueError('provide positional_embedding_placement')
         self.out_coords = out_coords
         self.include_tissue_mask = include_tissue_mask
         self.use_positional_encoding = use_positional_encoding
         self.pos_encoding_channels = pos_encoding_channels
+        self._positional_encoding_type = positional_embedding_type
+        self._positional_embedding_placement = positional_embedding_placement
 
-        coord_feature_dim = feature_channels
-        feature_channels = feature_channels + 1 if include_tissue_mask else feature_channels
+        coord_feature_channels = feature_channels
+        tissue_mask_channels = 1 if include_tissue_mask else 0
+        coord_head_input_channels = coord_feature_channels
 
         if self.use_positional_encoding:
-            self.positional_encoding = CoordConv()
-            in_channels += 2
+            if positional_embedding_type == PositionalEmbeddingType.COORD_CONV:
+                self._coord_conv_positional_encoding = CoordConv()
+
+                if positional_embedding_placement == PositionalEmbeddingPlacement.EARLY:
+                    in_channels += 2
+                else:
+                    coord_head_input_channels += 2
+            else:
+                if pos_encoding_channels is None:
+                    raise ValueError('provide pos_encoding_channels')
+                self._positional_embedding = nn.Parameter(
+                    torch.randn(1, pos_encoding_channels, input_dims[0], input_dims[1])
+                )
+                if positional_embedding_placement == PositionalEmbeddingPlacement.EARLY:
+                    in_channels += pos_encoding_channels
+                else:
+                    coord_head_input_channels += pos_encoding_channels
 
         # UNet backbone for feature extraction
         self.unet_backbone = monai.networks.nets.UNet(
             spatial_dims=spatial_dims,
             in_channels=in_channels,
-            out_channels=feature_channels,
+            out_channels=coord_feature_channels+tissue_mask_channels,
             dropout=dropout,
             channels=channels,
             strides=strides,
         )
 
         self.coord_head = nn.Sequential(
-            nn.Conv2d(coord_feature_dim, int(coord_feature_dim/2), kernel_size=1),
+            nn.Conv2d(coord_head_input_channels, int(coord_head_input_channels/2), kernel_size=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(int(coord_feature_dim/2), int(coord_feature_dim/4), kernel_size=1),
+            nn.Conv2d(int(coord_head_input_channels/2), int(coord_head_input_channels/4), kernel_size=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(int(coord_feature_dim/4), out_coords, kernel_size=1),
+            nn.Conv2d(int(coord_head_input_channels/4), out_coords, kernel_size=1),
         )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -112,10 +148,17 @@ class UNetWithRegressionHeads(nn.Module):
         """
         B, C, H, W = x.shape
 
-        # Concatenate with positional encoding if enabled
         if self.use_positional_encoding:
-            pos_encoding = self.positional_encoding(batch_size=B, H=H, W=W, device=x.device)
-            x = torch.cat([x, pos_encoding], dim=1)
+            if self._positional_encoding_type == PositionalEmbeddingType.COORD_CONV:
+                pos_encoding = self._coord_conv_positional_encoding(batch_size=B, H=H, W=W,
+                                                                    device=x.device)
+            else:
+                pos_encoding = self._positional_embedding.expand(B, -1, -1, -1)
+
+            if self._positional_embedding_placement == PositionalEmbeddingPlacement.EARLY:
+                x = torch.cat([x, pos_encoding], dim=1)
+        else:
+            pos_encoding = None
 
         # Extract features from UNet backbone
         features = self.unet_backbone(x)
@@ -124,6 +167,9 @@ class UNetWithRegressionHeads(nn.Module):
             coord_features, mask_logits = features[:, :-1], features[:, -1].unsqueeze(1)
         else:
             coord_features, mask_logits = features, None
+
+        if self.use_positional_encoding and self._positional_embedding_placement == PositionalEmbeddingPlacement.LATE:
+            coord_features = torch.cat([coord_features, pos_encoding], dim=1)
 
         # Predict coordinates using regression head
         coords = self.coord_head(coord_features)
