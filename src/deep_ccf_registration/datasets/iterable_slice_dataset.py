@@ -272,8 +272,7 @@ class IterableSubjectSliceDataset(IterableDataset):
         logger.info(f"Loading full volume for subject {subject_id}")
         self._volume = self._load_full_volume(metadata)
         logger.info(f"Loading warp for subject {subject_id}")
-        self._warp_ants_image = ants.image_read(str(metadata.ls_to_template_inverse_warp_path_original))
-        warp = self._warp_ants_image.numpy()
+        warp = ants.image_read(str(metadata.ls_to_template_inverse_warp_path_original)).numpy()
         # This apparently improves efficiency when map_coordinates is called on each x,y,z offset dimension
         self._warp = np.ascontiguousarray(warp.transpose(3, 0, 1, 2))
         self._cached_affine = Affine.from_ants_file(metadata.ls_to_template_affine_matrix_path)
