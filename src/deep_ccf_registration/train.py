@@ -100,7 +100,8 @@ def _evaluate(
     tissue_mask_losses = []
     rmses = []
     registration_res_rmses = []
-    collected_samples = []
+    viz_samples = []
+    total_viz_candidates = 0  # Track total samples seen for reservoir sampling
     eval_records = []
     enable_viz = (
         viz_sample_count > 0
@@ -216,17 +217,17 @@ def _evaluate(
                     'rmse': rmses[record_idx],
                 })
 
-            if enable_viz and len(collected_samples) < viz_sample_count:
+            if enable_viz:
                 errors = (pred_points - target_template_points) ** 2
                 slice_indices = batch["slice_indices"]
                 patch_ys = batch["patch_ys"]
                 patch_xs = batch["patch_xs"]
                 subject_ids = batch["subject_ids"]
 
-                remaining = viz_sample_count - len(collected_samples)
-                take = min(remaining, input_images.shape[0])
-                for sample_idx in range(take):
-                    collected_samples.append({
+                # Reservoir sampling to randomly select viz_sample_count samples
+                for sample_idx in range(input_images.shape[0]):
+                    total_viz_candidates += 1
+                    sample_data = {
                         "input_image": input_images[sample_idx].squeeze().detach().cpu(),
                         "pred_coords": pred_points[sample_idx].detach().cpu(),
                         "gt_coords": target_template_points[sample_idx].detach().cpu(),
@@ -238,9 +239,15 @@ def _evaluate(
                         "patch_y": int(patch_ys[sample_idx].item()),
                         "patch_x": int(patch_xs[sample_idx].item()),
                         "subject_id": subject_ids[sample_idx],
-                    })
-                    if len(collected_samples) >= viz_sample_count:
-                        break
+                    }
+
+                    if len(viz_samples) < viz_sample_count:
+                        viz_samples.append(sample_data)
+                    else:
+                        # Replace with probability viz_sample_count / total_viz_candidates
+                        j = np.random.randint(0, total_viz_candidates)
+                        if j < viz_sample_count:
+                            viz_samples[j] = sample_data
 
     val_loss = np.mean(losses)
     val_rmse = np.mean(rmses)
@@ -255,9 +262,9 @@ def _evaluate(
         val_tissue_mask_dice = None
         val_tissue_mask_loss = None
 
-    if enable_viz and collected_samples:
+    if enable_viz and viz_samples:
         iteration = global_step or 0
-        for idx, sample in enumerate(collected_samples):
+        for idx, sample in enumerate(viz_samples):
             fig = viz_sample(
                 predicted_template_points=sample["pred_coords"].moveaxis(0, -1).view(-1, 3).cpu().numpy(),
                 predicted_tissue_masks=sample['pred_tissue_masks'].cpu().numpy() if predict_tissue_mask else None,
