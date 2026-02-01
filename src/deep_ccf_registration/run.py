@@ -2,6 +2,7 @@ import multiprocessing
 import os
 import sys
 import tempfile
+from functools import partial
 from importlib.metadata import distribution
 from pathlib import Path
 from typing import Optional
@@ -99,7 +100,7 @@ def create_dataloader(
         # using 0 workers (main process) for eval,
         # to keep mem usage lower
         num_workers=num_workers if is_train else 0,
-        collate_fn=lambda x: collate_patch_samples(samples=x, pad_dim=config.pad_dim),
+        collate_fn=partial(collate_patch_samples, pad_dim=config.pad_dim),
         pin_memory=device == 'gpu',
         persistent_workers=is_train and num_workers > 0
     )
