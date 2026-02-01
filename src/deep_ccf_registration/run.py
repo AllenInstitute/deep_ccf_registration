@@ -89,7 +89,7 @@ def create_dataloader(
         target_eval_transform=target_eval_transform,
         include_tissue_mask=include_tissue_mask,
         ccf_annotations=ccf_annotations,
-        scratch_path=config.warp_scratch_path,
+        scratch_path=config.tmp_path,
     )
 
     dataloader = DataLoader(
@@ -204,7 +204,7 @@ def main(config_path: Path):
 
     # write ccf_annotations to memmap. this avoids RAM overhead of multiple workers
     # spawning with a copy of this data
-    ccf_annotations_path = Path(tempfile.mktemp(suffix='.npy'))
+    ccf_annotations_path = Path(tempfile.mktemp(suffix='.npy', dir=config.tmp_path))
     np.save(ccf_annotations_path, ccf_annotations)
     del ccf_annotations
     ccf_annotations = np.load(ccf_annotations_path, mmap_mode='r')

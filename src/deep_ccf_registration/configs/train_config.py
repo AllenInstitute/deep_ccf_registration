@@ -93,4 +93,4 @@ class TrainConfig(BaseModel):
     debug_start_x: Optional[int] = 0
     debug_slice_idx: Optional[int] = None
 
-    warp_scratch_path: Path = Path('/tmp')
+    tmp_path: Path = Path('/tmp')
