@@ -96,7 +96,9 @@ def create_dataloader(
     dataloader = DataLoader(
         dataset=dataset,
         batch_size=batch_size,
-        num_workers=num_workers,
+        # using 0 workers (main process) for eval,
+        # to keep mem usage lower
+        num_workers=num_workers if is_train else 0,
         collate_fn=collate_patch_samples,
         pin_memory=device == 'gpu',
         persistent_workers=True,
