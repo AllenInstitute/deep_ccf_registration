@@ -173,6 +173,7 @@ def main(config_path: Path):
         scale=ls_template_ants_parameters.scale,
         direction=ls_template_ants_parameters.direction,
         shape=ls_template.shape,
+        orientation=ls_template_ants_parameters.orientation,
     )
     del ls_template
 
