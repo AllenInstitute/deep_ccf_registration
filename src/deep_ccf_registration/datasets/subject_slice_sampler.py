@@ -103,12 +103,11 @@ class SubjectSliceSampler:
                 else:
                     slice_indices = [slices[int(len(slices)/2)]]
             else:
-                # Sample slice indices
-                num_slices = int(total_slices * self.slice_fraction)
-                slice_indices = list(range(slices[0], slices[-1] + 1))
-                
+                slice_indices = slices.copy()
+
                 if self.slice_fraction < 1.0:
                     # Sample a subset
+                    num_slices = int(total_slices * self.slice_fraction)
                     slice_indices = rng.sample(slice_indices, num_slices)
             
             # Create all (slice_idx, orientation) pairs
