@@ -98,6 +98,7 @@ def create_dataloader(
         num_workers=num_workers,
         collate_fn=collate_patch_samples,
         pin_memory=device == 'gpu',
+        persistent_workers=True,
     )
 
     return dataloader
