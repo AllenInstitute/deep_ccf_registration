@@ -280,7 +280,7 @@ class IterableSubjectSliceDataset(IterableDataset):
         logger.info(f"Loading full volume for subject {subject_id}")
         self._volume = self._load_full_volume(metadata)
         logger.info(f"Loading warp for subject {subject_id}")
-        self._warp_ants_image = self._load_warp(metadata)
+        self._warp_ants_image = ants.image_read(str(metadata.ls_to_template_inverse_warp_path_original))
         warp = self._warp_ants_image.numpy()
         # This apparently improves efficiency when map_coordinates is called on each x,y,z offset dimension
         self._warp = np.ascontiguousarray(warp.transpose(3, 0, 1, 2))
@@ -302,26 +302,8 @@ class IterableSubjectSliceDataset(IterableDataset):
         return np.array(data)
 
     def _load_warp(self, metadata: SubjectMetadata) -> ANTsImage:
-        warp_dir = self._scratch_path / 'warps'
-        os.makedirs(warp_dir, exist_ok=True)
-
-        warp_local_path = warp_dir / f'{metadata.subject_id}_{metadata.ls_to_template_inverse_warp_path_original.name}'
         if warp_local_path.exists():
             return ants.image_read(str(warp_local_path))
-
-        logger.info(
-            f'Copying {metadata.ls_to_template_inverse_warp_path_original} to {warp_local_path}')
-        if str(metadata.ls_to_template_inverse_warp_path_original).startswith('/data/aind_open_data'):
-            s3 = boto3.client(
-                's3',
-                config=Config(signature_version=UNSIGNED),
-                region_name='us-west-2')
-            s3.download_file('aind-open-data',
-                             str(metadata.ls_to_template_inverse_warp_path_original.relative_to('/data/aind_open_data')),
-                             str(warp_local_path))
-        else:
-            shutil.copy(metadata.ls_to_template_inverse_warp_path_original, warp_local_path)
-
         warp = ants.image_read(str(warp_local_path))
         return warp
 
