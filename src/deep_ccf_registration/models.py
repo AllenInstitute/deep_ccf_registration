@@ -26,12 +26,12 @@ class CoordConv(nn.Module):
 
 
 class PositionalEmbeddingType(Enum):
-    LEARNED = 0
-    COORD_CONV = 1
+    LEARNED = 'LEARNED'
+    COORD_CONV = 'COORD_CONV'
 
 class PositionalEmbeddingPlacement(Enum):
-    EARLY = 0
-    LATE = 1
+    EARLY = 'EARLY'
+    LATE = 'LATE'
 
 class UNetWithRegressionHeads(nn.Module):
     """
