@@ -430,6 +430,8 @@ def main(config_path: Path):
             normalize_target_points=config.normalize_template_points,
             predict_tissue_mask=config.predict_tissue_mask,
             gradient_accumulation_steps=config.gradient_accumulation_steps,
+            grad_clip_max_norm=config.grad_clip_max_norm,
+            warmup_steps=config.warmup_steps,
             # Resume state from checkpoint
             start_step=start_step,
             start_best_val_loss=start_best_val_loss,

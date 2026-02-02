@@ -382,6 +382,8 @@ def train(
         lr_scheduler: Optional[LRScheduler] = None,
         tissue_mask_loss_weight: float = 0.1,
         gradient_accumulation_steps: int = 1,
+        grad_clip_max_norm: Optional[float] = 1.0,
+        warmup_steps: int = 0,
         # Resume parameters for checkpoint recovery
         start_step: int = 0,
         start_best_val_loss: float = float("inf"),
@@ -413,6 +415,8 @@ def train(
     val_viz_samples: number of validation samples to visualize each evaluation
     exclude_background_pixels: whether to zero-out background pixels in visualizations
     gradient_accumulation_steps: Number of steps to accumulate gradients before optimizer step
+    grad_clip_max_norm: Maximum gradient norm for clipping. Set to None to disable.
+    warmup_steps: Number of steps to linearly warmup learning rate from 0 to learning_rate.
 
     Returns
     -------
@@ -434,14 +438,52 @@ def train(
     logger.info(f"Training for {max_iters} iters total")
     logger.info(f"Device: {device}")
     logger.info(f"Gradient accumulation steps: {gradient_accumulation_steps}")
+    logger.info(f"Gradient clipping max norm: {grad_clip_max_norm}")
+    logger.info(f"Warmup steps: {warmup_steps}")
 
+    # Setup learning rate scheduler
     if lr_scheduler == LRScheduler.ReduceLROnPlateau:
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer, patience=100)
+        main_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer, patience=100)
         if scheduler_state_dict is not None:
-            scheduler.load_state_dict(scheduler_state_dict)
+            main_scheduler.load_state_dict(scheduler_state_dict)
             logger.info("Restored scheduler state from checkpoint")
+    elif lr_scheduler == LRScheduler.CosineAnnealingWarmRestarts:
+        main_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer=optimizer,
+            T_0=max(1, max_iters // 4),  # Restart every 1/4 of training
+            T_mult=2,
+        )
+        if scheduler_state_dict is not None:
+            main_scheduler.load_state_dict(scheduler_state_dict)
+            logger.info("Restored scheduler state from checkpoint")
+    elif lr_scheduler == LRScheduler.CosineAnnealingLR:
+        # T_max is remaining steps after warmup
+        t_max = max(1, max_iters - warmup_steps)
+        main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer=optimizer,
+            T_max=t_max,
+            eta_min=learning_rate/10,
+        )
+        if scheduler_state_dict is not None:
+            main_scheduler.load_state_dict(scheduler_state_dict)
+            logger.info("Restored scheduler state from checkpoint")
+        logger.info(f"Using CosineAnnealingLR with T_max={t_max}")
     else:
-        scheduler = None
+        main_scheduler = None
+
+    # Setup warmup scheduler
+    if warmup_steps > 0:
+        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+            optimizer=optimizer,
+            start_factor=1e-6,  # Start from near-zero LR
+            end_factor=1.0,
+            total_iters=warmup_steps,
+        )
+        logger.info(f"Using linear warmup for {warmup_steps} steps")
+    else:
+        warmup_scheduler = None
+
+    scheduler = main_scheduler  # Keep reference for checkpoint saving
 
     progress_logger = None
 
@@ -497,22 +539,37 @@ def train(
 
             # Only step optimizer after accumulating enough gradients
             if accumulation_step % gradient_accumulation_steps == 0:
+                # Gradient clipping before optimizer step
+                if grad_clip_max_norm is not None:
+                    grad_norm = torch.nn.utils.clip_grad_norm_(
+                        model.parameters(),
+                        max_norm=grad_clip_max_norm
+                    )
+                else:
+                    grad_norm = None
+
                 optimizer.step()
                 optimizer.zero_grad()
 
                 global_step += 1
 
-                if scheduler is not None:
+                # Step warmup scheduler during warmup phase
+                if warmup_scheduler is not None and global_step <= warmup_steps:
+                    warmup_scheduler.step()
+                # Step main scheduler after warmup
+                elif main_scheduler is not None:
                     if lr_scheduler == LRScheduler.ReduceLROnPlateau:
-                        scheduler.step(metrics=point_loss.item())
-                    else:
-                        raise ValueError(f'{lr_scheduler} not supported')
+                        main_scheduler.step(metrics=point_loss.item())
+                    elif lr_scheduler in (LRScheduler.CosineAnnealingWarmRestarts, LRScheduler.CosineAnnealingLR):
+                        main_scheduler.step()
 
                 train_metrics = {
                     "train/loss": loss.item() * gradient_accumulation_steps,
                     "train/point_loss": point_loss.item(),
                     "train/learning_rate": optimizer.param_groups[0]['lr'],
                 }
+                if grad_norm is not None:
+                    train_metrics["train/grad_norm"] = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
                 if predict_tissue_mask:
                     train_metrics['train/tissue_mask_loss'] = tissue_mask_loss.item()
 

@@ -10,6 +10,8 @@ from deep_ccf_registration.models import PositionalEmbeddingType, PositionalEmbe
 
 class LRScheduler(Enum):
     ReduceLROnPlateau = "ReduceLROnPlateau"
+    CosineAnnealingWarmRestarts = "CosineAnnealingWarmRestarts"
+    CosineAnnealingLR = "CosineAnnealingLR"
 
 class ModelConfig(BaseModel):
     model_config = ConfigDict(extra='forbid')
@@ -86,6 +88,12 @@ class TrainConfig(BaseModel):
     model: ModelConfig
 
     lr_scheduler: Optional[LRScheduler] = None
+
+    # Gradient clipping (max gradient norm). Set to None to disable.
+    grad_clip_max_norm: Optional[float] = 1.0
+
+    # Learning rate warmup steps. Linearly ramps LR from 0 to learning_rate over this many steps.
+    warmup_steps: int = 0
 
     sample_oblique_slices: bool = False
     use_positional_encoding: bool = False
