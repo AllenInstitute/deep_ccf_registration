@@ -318,7 +318,8 @@ def build_transform(config: TrainConfig, template_parameters: TemplateParameters
         transforms.append(ImageNormalization())
     if config.normalize_orientation:
         transforms.append(OrientationNormalization())
-    if config.sample_oblique_slices and is_train:
+    if config.rotate_slices and is_train:
+        # range obtained from smartSPIM data
         transforms.append(PadRotateCrop(rotation_range=(-20, 20)))
     if config.normalize_template_points:
         transforms.append(TemplatePointsNormalization(

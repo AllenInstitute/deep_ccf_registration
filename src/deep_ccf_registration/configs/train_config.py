@@ -96,7 +96,9 @@ class TrainConfig(BaseModel):
     # Learning rate warmup steps. Linearly ramps LR from 0 to learning_rate over this many steps.
     warmup_steps: int = 0
 
-    sample_oblique_slices: bool = False
+    # extract rotated slices
+    rotate_slices: bool = False
+
     use_positional_encoding: bool = False
     gradient_accumulation_steps: int = 1
 

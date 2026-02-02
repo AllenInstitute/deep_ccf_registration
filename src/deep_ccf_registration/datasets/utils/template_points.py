@@ -58,63 +58,6 @@ class Affine:
         return (x - self.c - self.t) @ self.A_inv.T + self.c
 
 
-def create_coordinate_grid(
-        patch_height: int,
-        patch_width: int,
-        start_x: int,
-        start_y: int,
-        fixed_index_value: int,
-        slice_axis: AcquisitionAxis,
-        axes: list[AcquisitionAxis]
-) -> np.ndarray:
-    """
-    Create coordinate grid for a patch at specific position.
-
-    Parameters
-    ----------
-    patch_height : int
-        Height of the patch in pixels.
-    patch_width : int
-        Width of the patch in pixels.
-    start_x : int
-        Starting x coordinate of the patch.
-    start_y : int
-        Starting y coordinate of the patch.
-    fixed_index_value : int
-        Index value for the fixed slice dimension.
-    slice_axis : AcquisitionAxis
-        Axis along which slicing occurs.
-    axes : list[AcquisitionAxis]
-        List of all acquisition axes.
-
-    Returns
-    -------
-    pd.DataFrame
-        DataFrame containing coordinate points for the patch.
-    """
-    # Create meshgrid with actual coordinates
-    axis1_coords, axis2_coords = np.meshgrid(
-        np.arange(start_y, start_y + patch_height),
-        np.arange(start_x, start_x + patch_width),
-        indexing='ij'
-    )
-
-    axis1_flat = axis1_coords.flatten()
-    axis2_flat = axis2_coords.flatten()
-
-    n_points = len(axis1_flat)
-
-    slice_index = np.full(n_points, fixed_index_value)
-
-    axes = sorted(axes, key=lambda x: x.dimension)
-
-    points = np.zeros((n_points, 3))
-
-    points[:, slice_axis.dimension] = slice_index
-    points[:, [x for x in axes if x != slice_axis][0].dimension] = axis1_flat
-    points[:, [x for x in axes if x != slice_axis][1].dimension] = axis2_flat
-    return points
-
 def transform_points_to_template_space(
     acquisition_axes: list[AcquisitionAxis],
     ls_template_info: TemplateParameters,

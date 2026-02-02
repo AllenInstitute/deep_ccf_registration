@@ -3,7 +3,7 @@ import random
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator, Optional, Sequence
+from typing import Callable, Iterator, Optional
 
 import ants
 import boto3
@@ -15,10 +15,10 @@ from loguru import logger
 from scipy.ndimage import map_coordinates
 from torch.utils.data import IterableDataset, get_worker_info
 
+from deep_ccf_registration.datasets.aquisition_meta import AcquisitionDirection
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.datasets.transforms import map_points_to_right_hemisphere
-from deep_ccf_registration.datasets.utils.template_points import create_coordinate_grid, \
-    transform_points_to_template_space, apply_transforms_to_points, Affine
+from deep_ccf_registration.datasets.utils.template_points import transform_points_to_template_space, apply_transforms_to_points, Affine
 from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, TissueBoundingBoxes, \
     AcquisitionAxis
 from deep_ccf_registration.utils.logging_utils import timed, timed_func
@@ -81,7 +81,8 @@ class IterableSubjectSliceDataset(IterableDataset):
         target_eval_transform: Optional[callable] = None,
         include_tissue_mask: bool = False,
         ccf_annotations: Optional[np.ndarray] = None,
-        scratch_path: Path = Path('/tmp')
+        scratch_path: Path = Path('/tmp'),
+        rotate_slices: bool = False
     ):
         if include_tissue_mask and ccf_annotations is None:
             raise ValueError("include_tissue_mask=True requires ccf_annotations")
@@ -102,6 +103,7 @@ class IterableSubjectSliceDataset(IterableDataset):
         self._crop_size = crop_size
         self._is_train = is_train
         self._scratch_path = scratch_path
+        self._rotate_slices = rotate_slices
 
     def __iter__(self) -> Iterator[PatchSample]:
         for spec in self._slice_generator():
@@ -131,20 +133,44 @@ class IterableSubjectSliceDataset(IterableDataset):
                 start_x = random.randint(bbox.x, max(bbox.x, bbox.x + bbox.width - self._crop_size[1]))
             patch_height = min(self._crop_size[0], bbox.y + bbox.height - start_y)
             patch_width = min(self._crop_size[1], bbox.x + bbox.width - start_x)
-        
-        spatial_slices = [0, 0, slice(None), slice(None), slice(None)]
-        spatial_slices[2 + slice_axis.dimension] = spec.slice_idx
-        spatial_slices[2 + y_axis.dimension] = slice(start_y, start_y + patch_height)
-        spatial_slices[2 + x_axis.dimension] = slice(start_x, start_x + patch_width)
 
-        data_patch = self._volume[tuple(spatial_slices)].astype("float32")
-        template_patch = self._get_template_points(
-            patch_height=patch_height,
-            patch_width=patch_width,
-            start_x=start_x,
+        coordinate_grid = self._get_coordinate_grid(
+            experiment_meta=metadata,
             start_y=start_y,
+            start_x=start_x,
+            height=patch_height,
+            width=patch_width,
             slice_axis=slice_axis,
             fixed_index_value=spec.slice_idx,
+            orientation=spec.orientation,
+        )
+
+        if self._rotate_slices:
+            # Interpolate volume at rotated coordinate locations
+            # coordinate_grid: (n_points, 3), map_coordinates needs (3, n_points)
+            coords_for_interp = coordinate_grid.T
+            # Volume shape: (C, T, D0, D1, D2) - sample from spatial dims
+            volume_3d = self._volume[0, 0]
+
+            interpolated_flat = map_coordinates(
+                input=volume_3d,
+                coordinates=coords_for_interp,
+                order=1,  # linear interpolation
+                mode='constant',
+                cval=0.0
+            )
+            data_patch = interpolated_flat.reshape(patch_height, patch_width).astype("float32")
+        else:
+            spatial_slices = [0, 0, slice(None), slice(None), slice(None)]
+            spatial_slices[2 + slice_axis.dimension] = spec.slice_idx
+            spatial_slices[2 + y_axis.dimension] = slice(start_y, start_y + patch_height)
+            spatial_slices[2 + x_axis.dimension] = slice(start_x, start_x + patch_width)
+            data_patch = self._volume[tuple(spatial_slices)].astype("float32")
+
+        template_patch = self._get_template_points(
+            point_grid=coordinate_grid,
+            patch_height=patch_height,
+            patch_width=patch_width,
             experiment_meta=metadata,
         )
         template_patch = map_points_to_right_hemisphere(
@@ -213,25 +239,11 @@ class IterableSubjectSliceDataset(IterableDataset):
     @timed_func
     def _get_template_points(
         self,
+        point_grid: np.ndarray,
         patch_height: int,
         patch_width: int,
-        start_x: int,
-        start_y: int,
-        fixed_index_value: int,
-        slice_axis: AcquisitionAxis,
         experiment_meta: SubjectMetadata,
     ) -> np.ndarray:
-
-        with timed():
-            point_grid = create_coordinate_grid(
-                patch_height=patch_height,
-                patch_width=patch_width,
-                start_x=start_x,
-                start_y=start_y,
-                fixed_index_value=fixed_index_value,
-                axes=experiment_meta.axes,
-                slice_axis=slice_axis
-            )
 
         with timed():
             points = transform_points_to_template_space(
@@ -320,6 +332,77 @@ class IterableSubjectSliceDataset(IterableDataset):
 
         return ants.image_read(str(warp_local_path)).numpy()
 
+    def _get_coordinate_grid(
+        self,
+        experiment_meta: SubjectMetadata,
+        start_x: int,
+        start_y: int,
+        height: int,
+        width: int,
+        fixed_index_value: int,
+        slice_axis: AcquisitionAxis,
+        orientation: Optional[SliceOrientation] = None
+
+    ):
+        if self._rotate_slices:
+            if orientation is None:
+                raise ValueError('provide orientation')
+            slice_rotation_ranges = get_slice_rotation_ranges(
+                metadata=experiment_meta,
+                orientation=orientation
+            )
+
+            # Get volume depth and compute bounded rotation ranges
+            volume_depth = self._volume.shape[2 + slice_axis.dimension]
+            bounded_x_range, bounded_y_range = compute_bounded_rotation_ranges(
+                slice_idx=fixed_index_value,
+                patch_height=height,
+                patch_width=width,
+                volume_depth=volume_depth,
+                desired_x_rot_range=slice_rotation_ranges.x,
+                desired_y_rot_range=slice_rotation_ranges.y,
+            )
+
+            y_rot = np.random.uniform(*bounded_y_range)
+            x_rot = np.random.uniform(*bounded_x_range)
+        else:
+            y_rot = 0.0
+            x_rot = 0.0
+
+        axis1_coords, axis2_coords = np.meshgrid(
+            np.arange(start_y, start_y + height),
+            np.arange(start_x, start_x + width),
+            indexing='ij'
+        )
+
+        axis1_flat = axis1_coords.flatten()
+        axis2_flat = axis2_coords.flatten()
+
+        n_points = len(axis1_flat)
+
+        slice_index = np.full(n_points, fixed_index_value)
+
+        axes = sorted(experiment_meta.axes, key=lambda x: x.dimension)
+
+        points = np.zeros((n_points, 3))
+
+        points[:, slice_axis.dimension] = slice_index
+        points[:, [x for x in axes if x != slice_axis][0].dimension] = axis1_flat
+        points[:, [x for x in axes if x != slice_axis][1].dimension] = axis2_flat
+
+        if x_rot != 0 or y_rot != 0:
+            points = _extract_rotated_coords(
+                start_yx=(start_y, start_x),
+                x_rot=x_rot,
+                y_rot=y_rot,
+                width=width,
+                height=height,
+                slice_idx=fixed_index_value,
+                slice_axis=slice_axis,
+            )
+        return points
+
+
 def _get_tissue_mask(
     annotations: np.ndarray,
     template_patch: np.ndarray,
@@ -346,3 +429,159 @@ def _get_tissue_mask(
         ) != 0
     ).astype("uint8")
     return tissue_mask.reshape(template_patch.shape[:-1])
+
+
+def _extract_rotated_coords(
+        slice_axis: AcquisitionAxis,
+        start_yx: tuple[int, int],
+        x_rot: float,
+        y_rot: float,
+        slice_idx: int,
+        width: int,
+        height: int,
+):
+    """
+    Extract coordinates for a rotated (oblique) slice.
+
+    X/Y rotations tilt the slice plane, causing sampling across multiple
+    slice indices. Returns coordinates in volume space.
+
+    Args:
+        slice_axis: The axis perpendicular to the slice plane
+        start_yx: (y, x) top-left corner of crop
+        x_rot: Rotation angle around x-axis in degrees
+        y_rot: Rotation angle around y-axis in degrees
+        slice_idx: Slice index in volume coordinates
+        width: Patch width
+        height: Patch height
+
+    Returns:
+        Coordinate array of shape (n_points, 3) in volume coordinates.
+    """
+    center_of_rotation = (
+        start_yx[0] + height / 2,
+        start_yx[1] + width / 2,
+    )
+
+    # Build output grid centered at origin
+    grid_0 = np.arange(height) - (height - 1) / 2.0
+    grid_1 = np.arange(width) - (width - 1) / 2.0
+    centered_0, centered_1 = np.meshgrid(grid_0, grid_1, indexing='ij')
+
+    # Compute slice offset from x/y rotation (tilt angles)
+    slice_offset = centered_0 * np.tan(np.radians(y_rot)) \
+                   + centered_1 * np.tan(np.radians(x_rot))
+
+    # Map to volume coordinates with shape (n_points, 3)
+    in_plane_axes = [i for i in range(3) if i != slice_axis.dimension]
+
+    slice_coords = (slice_idx + slice_offset).flatten()
+    inplane_0_coords = (center_of_rotation[0] + centered_0).flatten()
+    inplane_1_coords = (center_of_rotation[1] + centered_1).flatten()
+
+    n_points = len(slice_coords)
+    coords = np.zeros((n_points, 3))
+    coords[:, slice_axis.dimension] = slice_coords
+    coords[:, in_plane_axes[0]] = inplane_0_coords
+    coords[:, in_plane_axes[1]] = inplane_1_coords
+
+    return coords
+
+@dataclass
+class SliceRotationRanges:
+    x: tuple[int, int] = (0, 0)
+    y: tuple[int, int] = (0, 0)
+    z: tuple[int, int] = (0, 0)
+
+
+def compute_bounded_rotation_ranges(
+    slice_idx: int,
+    patch_height: int,
+    patch_width: int,
+    volume_depth: int,
+    desired_x_rot_range: tuple[float, float],
+    desired_y_rot_range: tuple[float, float],
+) -> tuple[tuple[float, float], tuple[float, float]]:
+    """
+    Compute rotation ranges bounded to keep sampled coordinates within volume.
+
+    When tilted by angle θ, points at patch edge have slice offset:
+        offset = (height/2) * tan(y_rot) + (width/2) * tan(x_rot)
+
+    Returns (bounded_x_range, bounded_y_range) in degrees.
+    """
+    headroom_low = slice_idx
+    headroom_high = volume_depth - 1 - slice_idx
+
+    half_height = patch_height / 2.0
+    half_width = patch_width / 2.0
+
+    max_abs_y_desired = max(abs(desired_y_rot_range[0]), abs(desired_y_rot_range[1]))
+    max_abs_x_desired = max(abs(desired_x_rot_range[0]), abs(desired_x_rot_range[1]))
+
+    tan_y_desired = np.tan(np.radians(max_abs_y_desired))
+    tan_x_desired = np.tan(np.radians(max_abs_x_desired))
+
+    max_offset_desired = half_height * tan_y_desired + half_width * tan_x_desired
+    max_allowable_offset = min(headroom_low, headroom_high)
+
+    if max_offset_desired <= max_allowable_offset or max_offset_desired == 0:
+        return desired_x_rot_range, desired_y_rot_range
+
+    # Scale down proportionally
+    scale_factor = max_allowable_offset / max_offset_desired
+
+    tan_y_bounded = tan_y_desired * scale_factor
+    tan_x_bounded = tan_x_desired * scale_factor
+
+    max_abs_y_bounded = np.degrees(np.arctan(tan_y_bounded))
+    max_abs_x_bounded = np.degrees(np.arctan(tan_x_bounded))
+
+    # Scale original ranges proportionally
+    def scale_range(orig_range, max_abs):
+        orig_max_abs = max(abs(orig_range[0]), abs(orig_range[1]))
+        if orig_max_abs == 0:
+            return 0.0, 0.0
+        ratio = max_abs / orig_max_abs
+        return orig_range[0] * ratio, orig_range[1] * ratio
+
+    bounded_x = scale_range(desired_x_rot_range, max_abs_x_bounded)
+    bounded_y = scale_range(desired_y_rot_range, max_abs_y_bounded)
+
+    return bounded_x, bounded_y
+
+
+def get_slice_rotation_ranges(metadata: SubjectMetadata, orientation: SliceOrientation) -> SliceRotationRanges:
+        # these were obtained from the data as typical ranges
+        AP_rot_range = (-20, 20)
+        SI_rot_range = (-10, 10)
+        ML_rot_range = (-20, 20)
+
+        axes = sorted(metadata.axes, key=lambda x: x.dimension)
+        slice_axis = metadata.get_slice_axis(orientation=orientation)
+        y_axis, x_axis = [axes[i] for i in range(3) if i != slice_axis.dimension]
+
+        if orientation == SliceOrientation.SAGITTAL:
+            direction_to_range = {
+                AcquisitionDirection.SUPERIOR_TO_INFERIOR: SI_rot_range,
+                AcquisitionDirection.INFERIOR_TO_SUPERIOR: SI_rot_range,
+                AcquisitionDirection.ANTERIOR_TO_POSTERIOR: AP_rot_range,
+                AcquisitionDirection.POSTERIOR_TO_ANTERIOR: AP_rot_range,
+            }
+
+            if y_axis.direction not in direction_to_range:
+                raise ValueError(f'unexpected direction for y axis {y_axis.direction}')
+            if x_axis.direction not in direction_to_range:
+                raise ValueError(f'unexpected direction for x axis {x_axis.direction}')
+
+            y_rot_range = direction_to_range[y_axis.direction]
+            x_rot_range = direction_to_range[x_axis.direction]
+            z_rot_range = ML_rot_range
+        else:
+            raise NotImplementedError(f'{orientation} not supported')
+
+        return SliceRotationRanges(
+            x=x_rot_range,
+            y=y_rot_range,
+            z=z_rot_range,
+        )

@@ -92,6 +92,7 @@ def create_dataloader(
         include_tissue_mask=include_tissue_mask,
         ccf_annotations=ccf_annotations,
         scratch_path=config.tmp_path,
+        rotate_slices=config.rotate_slices,
     )
 
     dataloader = DataLoader(

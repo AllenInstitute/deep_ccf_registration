@@ -351,6 +351,7 @@ def viz_sample(
         # Difference visualization in input space
         ax = fig.add_subplot(2, 5, 9)
         diff = pred_mask_2d.astype(float) - gt_mask_2d.astype(float)
+        diff[~pad_mask] = np.nan
         im = ax.imshow(diff, cmap='RdBu_r', vmin=-1, vmax=1)
         ax.imshow(input_image, cmap='gray', alpha=0.3)
         ax.set_title(f'Mask Diff (IoU={iou:.3f}, Dice={dice:.3f})')
