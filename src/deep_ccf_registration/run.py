@@ -310,6 +310,7 @@ def main(config_path: Path):
         pos_encoding_channels=config.model.pos_encoding_channels,
         positional_embedding_type=config.model.positional_embedding_type,
         positional_embedding_placement=config.model.positional_embedding_placement,
+        coord_head_channels=config.model.coord_head_channels,
     )
 
     if is_main_process():

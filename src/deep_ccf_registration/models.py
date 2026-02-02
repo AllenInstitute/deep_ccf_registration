@@ -48,6 +48,7 @@ class UNetWithRegressionHeads(nn.Module):
     def __init__(
         self,
         input_dims: tuple[int, int],
+        coord_head_channels: tuple[int, ...],
         spatial_dims: int = 2,
         in_channels: int = 1,
         feature_channels: int = 64,
@@ -59,7 +60,7 @@ class UNetWithRegressionHeads(nn.Module):
         use_positional_encoding: bool = False,
         pos_encoding_channels: Optional[int] = None,
         positional_embedding_type: Optional[PositionalEmbeddingType] = None,
-        positional_embedding_placement: Optional[PositionalEmbeddingPlacement] = None
+        positional_embedding_placement: Optional[PositionalEmbeddingPlacement] = None,
     ):
         """
         Parameters
@@ -124,13 +125,14 @@ class UNetWithRegressionHeads(nn.Module):
             strides=strides,
         )
 
-        self.coord_head = nn.Sequential(
-            nn.Conv2d(coord_head_input_channels, int(coord_head_input_channels/2), kernel_size=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(int(coord_head_input_channels/2), int(coord_head_input_channels/4), kernel_size=1),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(int(coord_head_input_channels/4), out_coords, kernel_size=1),
-        )
+        layers = []
+        in_ch = coord_head_input_channels
+        for out_ch in coord_head_channels:
+            layers.append(nn.Conv2d(in_ch, out_ch, kernel_size=1))
+            layers.append(nn.ReLU(inplace=True))
+            in_ch = out_ch
+        layers.append(nn.Conv2d(in_ch, out_coords, kernel_size=1))
+        self.coord_head = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

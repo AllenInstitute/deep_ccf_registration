@@ -21,8 +21,9 @@ class ModelConfig(BaseModel):
     unet_stride: tuple[int, ...]
     feature_channels: int = 64
     pos_encoding_channels: int = 16
-    positional_embedding_type: PositionalEmbeddingType
-    positional_embedding_placement: PositionalEmbeddingPlacement
+    positional_embedding_type: Optional[PositionalEmbeddingType] = None
+    positional_embedding_placement: Optional[PositionalEmbeddingPlacement] = None
+    coord_head_channels: tuple[int, ...]
 
 class TrainConfig(BaseModel):
     model_config = ConfigDict(extra='forbid')
