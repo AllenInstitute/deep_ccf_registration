@@ -377,6 +377,7 @@ def train(
         patience: int = 10,
         min_delta: float = 1e-4,
         autocast_context: ContextManager = nullcontext(),
+        scaler: Optional[torch.cuda.amp.GradScaler] = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         is_debug: bool = False,
         log_interval: int = 20,
@@ -537,7 +538,11 @@ def train(
                 # Scale loss for gradient accumulation
                 loss = loss / gradient_accumulation_steps
 
-            loss.backward()
+            # Backward pass with optional gradient scaling for mixed precision
+            if scaler is not None:
+                scaler.scale(loss).backward()
+            else:
+                loss.backward()
             accumulation_step += 1
 
             # Unscale for logging
@@ -548,6 +553,10 @@ def train(
 
             # Only step optimizer after accumulating enough gradients
             if accumulation_step % gradient_accumulation_steps == 0:
+                if scaler is not None:
+                    # Unscale gradients before clipping (required for accurate clipping)
+                    scaler.unscale_(optimizer)
+
                 # Gradient clipping before optimizer step
                 if grad_clip_max_norm is not None:
                     grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -557,7 +566,11 @@ def train(
                 else:
                     grad_norm = None
 
-                optimizer.step()
+                if scaler is not None:
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    optimizer.step()
                 optimizer.zero_grad()
 
                 global_step += 1

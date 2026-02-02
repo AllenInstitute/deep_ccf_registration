@@ -102,7 +102,7 @@ def create_dataloader(
         # to keep mem usage lower
         num_workers=num_workers if is_train else 0,
         collate_fn=partial(collate_patch_samples, pad_dim=config.pad_dim),
-        pin_memory=device == 'gpu',
+        pin_memory=device == 'cuda',
         persistent_workers=is_train and num_workers > 0
     )
 
@@ -212,9 +212,11 @@ def main(config_path: Path):
     # Setup mixed precision
     if config.mixed_precision and device == "cuda":
         autocast_context = torch.cuda.amp.autocast()
-        logger.info("Mixed precision training enabled")
+        scaler = torch.cuda.amp.GradScaler()
+        logger.info("Mixed precision training enabled with GradScaler")
     else:
         autocast_context = nullcontext()
+        scaler = None
         if config.mixed_precision and device != "cuda":
             logger.warning("Mixed precision only supported on CUDA, disabling")
 
@@ -421,6 +423,7 @@ def main(config_path: Path):
             patience=config.patience,
             min_delta=config.min_delta,
             autocast_context=autocast_context,
+            scaler=scaler,
             device=device,
             eval_iters=config.eval_iters,
             is_debug=config.debug,
