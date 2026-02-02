@@ -142,7 +142,12 @@ def _evaluate(
                 point_loss = coord_loss(pred=pred_points, target=target_template_points, mask=masks)
 
                 if predict_tissue_mask:
-                    tissue_mask_loss = F.binary_cross_entropy_with_logits(pred_tissue_mask_logits, tissue_masks)
+                    # Mask out padded pixels from tissue mask loss
+                    bce_per_pixel = F.binary_cross_entropy_with_logits(
+                        pred_tissue_mask_logits, tissue_masks, reduction='none'
+                    )
+                    masked_bce = bce_per_pixel * pad_masks
+                    tissue_mask_loss = masked_bce.sum() / pad_masks.sum().clamp(min=1.0)
                     loss = point_loss + tissue_mask_weight * tissue_mask_loss
                 else:
                     loss = point_loss
@@ -197,8 +202,8 @@ def _evaluate(
                     else:
                         mask_crop = eval_pad_masks[si:si+1, :eval_h, :eval_w]
 
-                    rmse_val = MSE()(pred=pred_up, target=eval_target_crop, mask=mask_crop).sqrt()
-                    registration_res_rmses += rmse_val.cpu().tolist()
+                    rmse_full_res = MSE()(pred=pred_up, target=eval_target_crop, mask=mask_crop).sqrt()
+                    registration_res_rmses += rmse_full_res.cpu().tolist()
 
             if predict_tissue_mask:
                 tissue_mask_dice_metric(y_pred=pred_tissue_mask.unsqueeze(1), y=tissue_masks.unsqueeze(1))
@@ -510,10 +515,14 @@ def train(
                 with timed():
                     model_out = model(input_images)
                     if predict_tissue_mask:
-                        pred_template_points, pred_tissue_masks = model_out[:, :-1], model_out[:, -1]
+                        pred_template_points, pred_tissue_mask_logits = model_out[:, :-1], model_out[:, -1]
                         mask = tissue_masks
-                        tissue_mask_loss = F.binary_cross_entropy_with_logits(pred_tissue_masks,
-                                                                              tissue_masks)
+                        # Mask out padded pixels from tissue mask loss
+                        bce_per_pixel = F.binary_cross_entropy_with_logits(
+                            pred_tissue_mask_logits, tissue_masks, reduction='none'
+                        )
+                        masked_bce = bce_per_pixel * pad_masks
+                        tissue_mask_loss = masked_bce.sum() / pad_masks.sum().clamp(min=1.0)
 
                     else:
                         pred_template_points = model_out
