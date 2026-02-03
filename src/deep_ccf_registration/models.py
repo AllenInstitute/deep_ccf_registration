@@ -130,6 +130,7 @@ class UNetWithRegressionHeads(nn.Module):
         for out_ch in coord_head_channels:
             layers.append(nn.Conv2d(in_ch, out_ch, kernel_size=1))
             layers.append(nn.ReLU(inplace=True))
+            layers.append(nn.Dropout2d(inplace=True, p=0.1))
             in_ch = out_ch
         layers.append(nn.Conv2d(in_ch, out_coords, kernel_size=1))
         self.coord_head = nn.Sequential(*layers)
