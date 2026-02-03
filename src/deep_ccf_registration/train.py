@@ -62,12 +62,13 @@ class MSE(nn.Module):
             if mask.dim() != per_point_squared_distance.dim():
                 raise ValueError("Mask must have same spatial dimensions as coordinates")
 
-            mask = mask.to(per_point_squared_distance.device, per_point_squared_distance.dtype)
-            squared_errors = per_point_squared_distance * mask
+            # Cast to float32 for numerically stable reduction (important for mixed precision)
+            mask = mask.to(per_point_squared_distance.device).float()
+            squared_errors = per_point_squared_distance.float() * mask
             valid_points = mask.sum(dim=(1, 2)).clamp(min=1.0)
             mse = squared_errors.sum(dim=(1, 2)) / valid_points
         else:
-            mse = per_point_squared_distance.mean(dim=(1, 2))
+            mse = per_point_squared_distance.float().mean(dim=(1, 2))
 
         if self._reduction == 'mean':
             mse = mse.mean()
