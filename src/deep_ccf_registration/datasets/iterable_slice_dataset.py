@@ -286,9 +286,9 @@ class IterableSubjectSliceDataset(IterableDataset):
         subject_id = metadata.subject_id
         if self._loaded_subject_id == subject_id:
             return
-        logger.info(f"Loading full volume for subject {subject_id}")
+        logger.debug(f"Loading full volume for subject {subject_id}")
         self._volume = self._load_full_volume(metadata)
-        logger.info(f"Loading warp for subject {subject_id}")
+        logger.debug(f"Loading warp for subject {subject_id}")
         warp = self._load_warp(metadata=metadata)
         # This apparently improves efficiency when map_coordinates is called on each x,y,z offset dimension
         self._warp = np.ascontiguousarray(warp.transpose(3, 0, 1, 2))
@@ -317,7 +317,7 @@ class IterableSubjectSliceDataset(IterableDataset):
         if warp_local_path.exists():
             return ants.image_read(str(warp_local_path)).numpy()
 
-        logger.info(
+        logger.debug(
             f'Copying {metadata.ls_to_template_inverse_warp_path_original} to {warp_local_path}')
         if str(metadata.ls_to_template_inverse_warp_path_original).startswith('/data/aind_open_data'):
             s3 = boto3.client(
