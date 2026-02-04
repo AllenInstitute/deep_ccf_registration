@@ -9,10 +9,96 @@ from loguru import logger
 from skimage.exposure import rescale_intensity
 
 from deep_ccf_registration.configs.train_config import TrainConfig
-from deep_ccf_registration.datasets.aquisition_meta import AcquisitionDirection, \
-    _get_orientation_transform
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.metadata import SliceOrientation, AcquisitionAxis
+
+
+def _restore_grayscale_channel_last(original: np.ndarray, transformed: np.ndarray) -> np.ndarray:
+    """Ensure grayscale images keep a trailing channel dim.
+
+    Rule: if the *input* looked grayscale (HxW or HxWx1) but the transform returned HxW,
+    restore to HxWx1.
+
+    This intentionally does *not* touch masks.
+    """
+
+    is_grayscale_input = original.ndim == 2 or (original.ndim == 3 and original.shape[-1] == 1)
+    if is_grayscale_input and transformed.ndim == 2:
+        return transformed[..., None]
+    return transformed
+
+
+class Rotate(albumentations.Rotate):
+    """
+    Subclassing, so that template_coords can be treated as an image
+    """
+    @property
+    def targets(self) -> dict[str, Any]:
+        targets = dict(super().targets)
+        targets["template_coords"] = self.apply
+        return targets
+
+    def apply(self, img: np.ndarray, **params: Any) -> np.ndarray:
+        transformed = super().apply(img, **params)
+        return _restore_grayscale_channel_last(img, transformed)
+
+
+class RandomCrop(albumentations.RandomCrop):
+    """
+    Subclassing, so that template_coords can be treated as an image
+    """
+    @property
+    def targets(self) -> dict[str, Any]:
+        targets = dict(super().targets)
+        targets["template_coords"] = self.apply
+        return targets
+
+    def apply(self, img: np.ndarray, **params: Any) -> np.ndarray:
+        transformed = super().apply(img, **params)
+        return _restore_grayscale_channel_last(img, transformed)
+
+
+class Crop(albumentations.Crop):
+    """
+    Subclassing, so that template_coords can be treated as an image
+    """
+    @property
+    def targets(self) -> dict[str, Any]:
+        targets = dict(super().targets)
+        targets["template_coords"] = self.apply
+        return targets
+
+    def apply(self, img: np.ndarray, **params: Any) -> np.ndarray:
+        transformed = super().apply(img, **params)
+        return _restore_grayscale_channel_last(img, transformed)
+
+class SquareSymmetry(albumentations.SquareSymmetry):
+    """
+    Subclassing, so that template_coords can be treated as an image
+    """
+    @property
+    def targets(self) -> dict[str, Any]:
+        targets = dict(super().targets)
+        targets["template_coords"] = self.apply
+        return targets
+
+    def apply(self, img: np.ndarray, *args, **params: Any) -> np.ndarray:
+        transformed = super().apply(img, *args, **params)
+        return _restore_grayscale_channel_last(img, transformed)
+
+class PadIfNeeded(albumentations.PadIfNeeded):
+    """
+    Subclassing, so that template_coords can be treated as an image
+    """
+    @property
+    def targets(self) -> dict[str, Any]:
+        targets = dict(super().targets)
+        targets["template_coords"] = self.apply
+        return targets
+
+    def apply(self, img: np.ndarray, **params: Any) -> np.ndarray:
+        transformed = super().apply(img, **params)
+        return _restore_grayscale_channel_last(img, transformed)
 
 
 class Resample(albumentations.DualTransform):
@@ -29,6 +115,14 @@ class Resample(albumentations.DualTransform):
         self._resize_target = resize_target
         self._resize_mask = resize_mask
 
+    @property
+    def targets(self) -> dict[str, Any]:
+        return {
+            "image": self.apply,
+            "mask": self.apply_to_mask,
+            "template_coords": self.apply_to_template_coords,
+        }
+
     def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
         return {
             "acquisition_axes": data["acquisition_axes"],
@@ -37,24 +131,24 @@ class Resample(albumentations.DualTransform):
         }
 
     def apply(self, img: np.ndarray, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis, orientation: SliceOrientation,  **params: Any) -> np.ndarray:
-        return self._resample(x=img, acquisition_axes=acquisition_axes, slice_axis=slice_axis)
+        transformed = self._resample(x=img, acquisition_axes=acquisition_axes, slice_axis=slice_axis)
+        return _restore_grayscale_channel_last(img, transformed)
 
     def apply_to_mask(self, mask: np.ndarray, *args: Any, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis, orientation: SliceOrientation,  **params: Any) -> np.ndarray:
         if not self._resize_mask:
             return mask
         return self._resample(x=mask, acquisition_axes=acquisition_axes, slice_axis=slice_axis)
 
-    def apply_to_keypoints(self, keypoints: np.ndarray, *args: Any, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis, orientation: SliceOrientation,  **params: Any) -> np.ndarray:
+    def apply_to_template_coords(self, img: np.ndarray, *args: Any, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis, orientation: SliceOrientation,  **params: Any) -> np.ndarray:
         if not self._resize_target:
-            return keypoints
-        return self._resample(x=keypoints, acquisition_axes=acquisition_axes, slice_axis=slice_axis)
+            return img
+        return self._resample(x=img, acquisition_axes=acquisition_axes, slice_axis=slice_axis)
 
     def _resample(self, x: np.ndarray, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis):
         axes = sorted(acquisition_axes, key=lambda x: x.dimension)
         axes = [x for x in axes if x.dimension != slice_axis.dimension]
         scale_y = axes[0].resolution * 2**3 / self._fixed_resolution
         scale_x = axes[1].resolution * 2**3 / self._fixed_resolution
-
         resampled = cv2.resize(x, None, fx=scale_x, fy=scale_y)
         return resampled
 
@@ -67,6 +161,14 @@ class LongestMaxSize(albumentations.DualTransform):
         self.interpolation = interpolation
         self.resize_target = resize_target
         self.resize_mask = resize_mask
+
+    @property
+    def targets(self) -> dict[str, Any]:
+        return {
+            "image": self.apply,
+            "mask": self.apply_to_mask,
+            "template_coords": self.apply_to_template_coords,
+        }
 
     def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
         img = data["image"]
@@ -84,17 +186,18 @@ class LongestMaxSize(albumentations.DualTransform):
     def apply(self, img: np.ndarray, scale: float, height: int, width: int, **params: Any) -> np.ndarray:
         if scale == 1.0:
             return img
-        return cv2.resize(img, (width, height), interpolation=self.interpolation)
+        resized = cv2.resize(img, (width, height), interpolation=self.interpolation)
+        return _restore_grayscale_channel_last(img, resized)
 
     def apply_to_mask(self, mask: np.ndarray, *args: Any, scale: float, height: int, width: int, **params: Any) -> np.ndarray:
         if not self.resize_mask or scale == 1.0:
             return mask
         return self._resize_array(mask, height=height, width=width)
 
-    def apply_to_keypoints(self, keypoints: np.ndarray, scale: float, height: int, width: int, **params: Any) -> np.ndarray:
+    def apply_to_template_coords(self, img: np.ndarray, scale: float, height: int, width: int, **params: Any) -> np.ndarray:
         if not self.resize_target or scale == 1.0:
-            return keypoints
-        return self._resize_array(keypoints, height=height, width=width)
+            return img
+        return self._resize_array(img, height=height, width=width)
 
     def _resize_array(self, array: np.ndarray, height: int, width: int) -> np.ndarray:
         if array.ndim != 3:
@@ -104,136 +207,6 @@ class LongestMaxSize(albumentations.DualTransform):
             for idx in range(array.shape[2])
         ]
         return np.stack(channels, axis=-1)
-
-
-class ImageNormalization(albumentations.ImageOnlyTransform):
-    def __init__(self):
-        super().__init__(p=1.0)
-
-    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
-        img = data['image']
-        low, high = np.percentile(img, (1, 99))
-        return {'low': low, 'high': high}
-
-    def apply(self, img: np.ndarray, low: float, high: float, **params: Any) -> np.ndarray:
-        return rescale_intensity(
-            img,
-            in_range=tuple((low, high)),
-            out_range=(0, 1)
-        )
-
-
-class OrientationNormalization(albumentations.DualTransform):
-    def __init__(self):
-        super().__init__(p=1.0)
-        self._normalize_orientation_map = {
-            SliceOrientation.SAGITTAL: [AcquisitionDirection.SUPERIOR_TO_INFERIOR,
-                                        AcquisitionDirection.ANTERIOR_TO_POSTERIOR]
-        }
-
-    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
-        return {
-            "acquisition_axes": data["acquisition_axes"],
-            "slice_axis": data["slice_axis"],
-            "orientation": data["orientation"],
-        }
-
-    def apply(self, img: np.ndarray, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis, orientation: SliceOrientation,  **params: Any) -> np.ndarray:
-        return self._normalize_orientation(x=img, acquisition_axes=acquisition_axes, slice_axis=slice_axis, orientation=orientation)
-
-    def apply_to_keypoints(self, keypoints: np.ndarray, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis, orientation: SliceOrientation,  **params: Any) -> np.ndarray:
-        return self._normalize_orientation(x=keypoints, acquisition_axes=acquisition_axes, slice_axis=slice_axis, orientation=orientation)
-
-    def _normalize_orientation(self, x: np.ndarray, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis, orientation: SliceOrientation) -> np.ndarray:
-        desired_orientation: list[AcquisitionDirection] = self._normalize_orientation_map[orientation]
-        acquisition_axes = sorted(acquisition_axes, key=lambda x: x.dimension)
-
-        desired_orientation = desired_orientation.copy()
-        desired_orientation.insert(slice_axis.dimension, slice_axis.direction)
-
-        _, swapped, mat = _get_orientation_transform(
-            orientation_in=''.join([x.direction.value.lower()[0] for x in acquisition_axes]),
-            orientation_out=''.join([x.value.lower()[0] for x in desired_orientation])
-        )
-
-        # exclude the slice axis, since just dealing with 2d slices
-        mat = mat[[x for x in range(3) if x != slice_axis.dimension]]
-        mat = mat[:, [x for x in range(3) if x != slice_axis.dimension]]
-
-        # flip axis to desired orientation
-        for idx, dim_orient in enumerate(mat.sum(axis=1)):
-            if dim_orient < 0:
-                if idx == 0:
-                    x = np.flipud(x)
-                else:
-                    x = np.fliplr(x)
-
-        if swapped.tolist() != list(range(3)):
-            x = np.swapaxes(x, 0, 1)
-
-        return x
-
-
-class PadRotateCrop(albumentations.DualTransform):
-    """Pad so that the full image is visible after rotation, rotate, then crop back to original size.
-    This is applied after sampling a slice so that we can keep the whole image inside the frame"""
-
-    def __init__(
-            self,
-            # obtained from the smartSPIM data as a representative range
-            rotation_range: tuple[float, float] = (-20, 20)):
-        super().__init__(p=1.0)
-        self._rotation_range = rotation_range
-
-    def _compute_pad(self, h: int, w: int, angle_deg: float) -> tuple[int, int]:
-        theta = np.radians(abs(angle_deg))
-        padded_h = h * np.cos(theta) + w * np.sin(theta)
-        padded_w = w * np.cos(theta) + h * np.sin(theta)
-        pad_y = int(np.ceil((padded_h - h) / 2))
-        pad_x = int(np.ceil((padded_w - w) / 2))
-        return pad_y, pad_x
-
-    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
-        angle = float(np.random.uniform(*self._rotation_range))
-        img = data["image"]
-        h, w = img.shape[:2]
-        pad_y, pad_x = self._compute_pad(h, w, angle)
-        return {"angle": angle, "pad_y": pad_y, "pad_x": pad_x, "orig_h": h, "orig_w": w}
-
-    def apply(self, img: np.ndarray, angle: float, pad_y: int, pad_x: int, orig_h: int, orig_w: int, **params: Any) -> np.ndarray:
-        padded = np.pad(img, ((pad_y, pad_y), (pad_x, pad_x)), mode='constant', constant_values=0)
-        center = (padded.shape[1] / 2, padded.shape[0] / 2)
-        M = cv2.getRotationMatrix2D(center, angle, 1.0)
-        rotated = cv2.warpAffine(padded, M, (padded.shape[1], padded.shape[0]),
-                                 flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-        cy, cx = rotated.shape[0] // 2, rotated.shape[1] // 2
-        return rotated[cy - orig_h // 2: cy - orig_h // 2 + orig_h,
-                       cx - orig_w // 2: cx - orig_w // 2 + orig_w]
-
-    def apply_to_mask(self, mask: np.ndarray, angle: float, pad_y: int, pad_x: int, orig_h: int, orig_w: int, **params: Any) -> np.ndarray:
-        padded = np.pad(mask, ((pad_y, pad_y), (pad_x, pad_x)), mode='constant', constant_values=0)
-        center = (padded.shape[1] / 2, padded.shape[0] / 2)
-        M = cv2.getRotationMatrix2D(center, angle, 1.0)
-        rotated = cv2.warpAffine(padded, M, (padded.shape[1], padded.shape[0]),
-                                 flags=cv2.INTER_NEAREST, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
-        cy, cx = rotated.shape[0] // 2, rotated.shape[1] // 2
-        return rotated[cy - orig_h // 2: cy - orig_h // 2 + orig_h,
-                       cx - orig_w // 2: cx - orig_w // 2 + orig_w]
-
-    def apply_to_keypoints(self, keypoints: np.ndarray, angle: float, pad_y: int, pad_x: int, orig_h: int, orig_w: int, **params: Any) -> np.ndarray:
-        h, w = keypoints.shape[:2]
-        padded = np.pad(keypoints, ((pad_y, pad_y), (pad_x, pad_x), (0, 0)), mode='edge')
-        channels = []
-        for i in range(padded.shape[2]):
-            center = (padded.shape[1] / 2, padded.shape[0] / 2)
-            M = cv2.getRotationMatrix2D(center, angle, 1.0)
-            rotated = cv2.warpAffine(padded[..., i], M, (padded.shape[1], padded.shape[0]),
-                                     flags=cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
-            channels.append(rotated)
-        rotated = np.stack(channels, axis=-1)
-        cy, cx = rotated.shape[0] // 2, rotated.shape[1] // 2
-        return rotated[cy - h // 2: cy - h // 2 + h,
-                       cx - w // 2: cx - w // 2 + w]
 
 
 class TemplatePointsNormalization(albumentations.DualTransform):
@@ -249,14 +222,21 @@ class TemplatePointsNormalization(albumentations.DualTransform):
             shape=shape
         )
 
-    def apply(self, img: np.ndarray, *args: Any, **params: Any) -> np.ndarray:
-        # just a passthrough
-        return img
+    @property
+    def targets(self) -> dict[str, Any]:
+        return {
+            "image": self.apply,
+            "template_coords": self.apply_to_template_coords,
+        }
 
-    def apply_to_keypoints(self, keypoints: np.ndarray, *args: Any, **params: Any) -> np.ndarray:
-        # repurposing "keypoints" transform for the slice template points
+    def apply(self, img: np.ndarray, *args: Any, **params: Any) -> np.ndarray:
+        # passthrough for image, but keep a trailing channel dim for grayscale
+        return _restore_grayscale_channel_last(img, img)
+
+    def apply_to_template_coords(self, img: np.ndarray, *args: Any, **params: Any) -> np.ndarray:
+        # normalize template coordinates to [-1, 1]
         extent_min, extent_max = self._physical_extent
-        return 2 * (keypoints - extent_min) / (extent_max - extent_min) - 1
+        return 2 * (img - extent_min) / (extent_max - extent_min) - 1
 
     @property
     def physical_extent(self) -> tuple[np.ndarray, np.ndarray]:
@@ -284,6 +264,23 @@ def get_template_point_normalization_inverse(x: np.ndarray | torch.Tensor, templ
 
     return ((x + 1.0) / 2.0) * (extent_max - extent_min) + extent_min
 
+class ImageNormalization(albumentations.ImageOnlyTransform):
+    def __init__(self):
+        super().__init__(p=1.0)
+
+    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+        img = data['image']
+        low, high = np.percentile(img, (1, 99))
+        return {'low': low, 'high': high}
+
+    def apply(self, img: np.ndarray, low: float, high: float, **params: Any) -> np.ndarray:
+        return rescale_intensity(
+            img,
+            in_range=tuple((low, high)),
+            out_range=(0, 1)
+        )
+
+
 def get_physical_extent(origin, scale, direction, shape):
     origin = np.array(origin)
     scale = np.array(scale)
@@ -296,43 +293,168 @@ def get_physical_extent(origin, scale, direction, shape):
 
     return extent_min, extent_max
 
-def build_target_eval_transform(config: TrainConfig):
-    """Build a transform for eval template points: only orientation normalization, no resampling or point normalization."""
-    transforms = []
-    if config.normalize_orientation:
-        transforms.append(OrientationNormalization())
-    if transforms:
-        return albumentations.Compose(transforms)
-    return None
+def build_transform(
+    config: TrainConfig,
+    template_parameters: TemplateParameters,
+    square_symmetry: bool = False,
+    resample_to_fixed_resolution: bool = False,
+    rotate_slices: bool = False,
+    normalize_template_points: bool = False,
+    longest_max_size: bool = False
+):
+    transforms: list[Any] = [ImageNormalization()]
 
+    if square_symmetry:
+        transforms.append(SquareSymmetry())
 
-def build_transform(config: TrainConfig, template_parameters: TemplateParameters, is_train: bool):
-    transforms = []
-
-    if config.longest_max_size is not None:
-        transforms.append(LongestMaxSize(max_size=config.longest_max_size))
-    if config.resample_to_fixed_resolution is not None:
+    if resample_to_fixed_resolution:
+        assert config.resample_to_fixed_resolution is not None
         transforms.append(Resample(fixed_resolution=config.resample_to_fixed_resolution))
 
-    if config.normalize_input_image:
-        transforms.append(ImageNormalization())
-    if config.normalize_orientation:
-        transforms.append(OrientationNormalization())
-    if config.rotate_slices and is_train:
+    if rotate_slices:
         # range obtained from smartSPIM data
-        transforms.append(PadRotateCrop(rotation_range=(-20, 20)))
-    if config.normalize_template_points:
+        transforms.append(Rotate(limit=(-20, 20)))
+
+    if normalize_template_points:
         transforms.append(TemplatePointsNormalization(
             origin=template_parameters.origin,
             scale=template_parameters.scale,
             direction=template_parameters.direction,
             shape=template_parameters.shape
         ))
+
+
+    if config.patch_size is not None:
+        if config.debug and (config.debug_start_y is not None and config.debug_start_x is not None):
+            transforms.append(Crop(
+                y_min=config.debug_start_y,
+                x_min=config.debug_start_x,
+                y_max=config.debug_start_y+config.patch_size[0],
+                x_max=config.debug_start_x+config.patch_size[1],
+                pad_if_needed=True,
+                pad_position='top_left'
+            ))
+        else:
+            transforms.append(RandomCrop(
+                height=config.patch_size[0],
+                width=config.patch_size[1],
+                pad_if_needed=True,
+                pad_position='top_left'
+            ))
+
+    if longest_max_size:
+        assert config.longest_max_size is not None
+        transforms.append(LongestMaxSize(max_size=config.longest_max_size))
+
+    transforms.append(PadIfNeeded(min_height=config.pad_dim, min_width=config.pad_dim, position='top_left'))
+
     if len(transforms) > 0:
-        transforms = albumentations.Compose(transforms, seed=config.seed)
-    else:
-        transforms = None
-    return transforms
+        return albumentations.ReplayCompose(transforms, seed=config.seed)
+    return None
+
+def apply_crop_pad_to_original(
+    template_coords: np.ndarray,
+    replay: dict,
+    original_shape: tuple[int, int],
+    resized_shape: tuple[int, int],
+    mask: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray | None, tuple[int, int]]:
+    """
+    Apply crop and pad transforms to original-resolution coordinates.
+
+    Scales crop coordinates from resized space to original space, then applies
+    crop and pad. This allows evaluation at original resolution without
+    interpolating the target coordinates.
+
+    Args:
+        template_coords: Original template coordinates (H_orig, W_orig, 3)
+        replay: Transform replay dict from albumentations
+        original_shape: (H_orig, W_orig) original image shape
+        resized_shape: (H_resized, W_resized) shape after resize transforms
+        mask: Optional mask array (H_orig, W_orig)
+
+    Returns:
+        Tuple of (transformed_coords, transformed_mask, eval_shape)
+        where eval_shape is the spatial dimensions of the eval targets
+    """
+    orig_h, orig_w = original_shape
+    resized_h, resized_w = resized_shape
+
+    # Compute scale factors
+    scale_h = orig_h / resized_h if resized_h > 0 else 1.0
+    scale_w = orig_w / resized_w if resized_w > 0 else 1.0
+
+    result_coords = template_coords.copy()
+    result_mask = mask.copy() if mask is not None else None
+
+    # Process transforms in order
+    for t in replay.get("transforms", []):
+        t_name = t.get("__class_fullname__", "")
+        params = t.get("params", {}) or {}
+
+        if "RandomCrop" in t_name:
+            # Scale crop coordinates to original resolution
+            h_start = int(params.get("h_start", 0) * scale_h)
+            w_start = int(params.get("w_start", 0) * scale_w)
+            # Get crop size from the transform (height/width attributes)
+            crop_h = int(params.get("shape", (0, 0))[0] * scale_h) if "shape" in params else int(100 * scale_h)
+            crop_w = int(params.get("shape", (0, 0))[1] * scale_w) if "shape" in params else int(100 * scale_w)
+
+            # Actually, RandomCrop params have crop_coords: (y_min, x_min, y_max, x_max)
+            crop_coords = params.get("crop_coords")
+            if crop_coords:
+                y_min, x_min, y_max, x_max = crop_coords
+                h_start = int(y_min * scale_h)
+                w_start = int(x_min * scale_w)
+                crop_h = int((y_max - y_min) * scale_h)
+                crop_w = int((x_max - x_min) * scale_w)
+
+            # Clamp to valid range
+            h_start = max(0, min(h_start, result_coords.shape[0] - 1))
+            w_start = max(0, min(w_start, result_coords.shape[1] - 1))
+            h_end = min(h_start + crop_h, result_coords.shape[0])
+            w_end = min(w_start + crop_w, result_coords.shape[1])
+
+            result_coords = result_coords[h_start:h_end, w_start:w_end]
+            if result_mask is not None:
+                result_mask = result_mask[h_start:h_end, w_start:w_end]
+
+        elif "Crop" in t_name and "RandomCrop" not in t_name:
+            # Fixed crop - scale coordinates
+            y_min = int(t.get("y_min", params.get("y_min", 0)) * scale_h)
+            x_min = int(t.get("x_min", params.get("x_min", 0)) * scale_w)
+            y_max = int(t.get("y_max", params.get("y_max", result_coords.shape[0])) * scale_h)
+            x_max = int(t.get("x_max", params.get("x_max", result_coords.shape[1])) * scale_w)
+
+            result_coords = result_coords[y_min:y_max, x_min:x_max]
+            if result_mask is not None:
+                result_mask = result_mask[y_min:y_max, x_min:x_max]
+
+        elif "PadIfNeeded" in t_name:
+            # Scale pad amounts
+            pad_top = int(params.get("pad_top", 0) * scale_h)
+            pad_bottom = int(params.get("pad_bottom", 0) * scale_h)
+            pad_left = int(params.get("pad_left", 0) * scale_w)
+            pad_right = int(params.get("pad_right", 0) * scale_w)
+
+            # Pad coordinates - use 0 for padding (will be masked out)
+            new_h = result_coords.shape[0] + pad_top + pad_bottom
+            new_w = result_coords.shape[1] + pad_left + pad_right
+
+            padded_coords = np.zeros((new_h, new_w, 3), dtype=result_coords.dtype)
+            padded_coords[pad_top:pad_top + result_coords.shape[0],
+                         pad_left:pad_left + result_coords.shape[1]] = result_coords
+            result_coords = padded_coords
+
+            if result_mask is not None:
+                padded_mask = np.zeros((new_h, new_w), dtype=result_mask.dtype)
+                padded_mask[pad_top:pad_top + result_mask.shape[0],
+                           pad_left:pad_left + result_mask.shape[1]] = result_mask
+                result_mask = padded_mask
+
+    eval_shape = (result_coords.shape[0], result_coords.shape[1])
+    return result_coords, result_mask, eval_shape
+
 
 def physical_to_index_space(physical_pts: torch.Tensor | np.ndarray, template_parameters: TemplateParameters):
     points = physical_pts.clone() if isinstance(physical_pts, torch.Tensor) else physical_pts.copy()

@@ -172,38 +172,48 @@ def _evaluate(
 
             rmse = MSE()(pred=pred_points, target=target_template_points, mask=masks).sqrt()
 
-            if "eval_target_template_points" in batch:
-                eval_target = batch["eval_target_template_points"].to(device)
+            # Compute RMSE against eval targets at original resolution
+            # Targets are NOT interpolated, predictions ARE upsampled to match
+            if "eval_template_points" in batch and "eval_shapes" in batch:
+                eval_targets = batch["eval_template_points"].to(device)
                 eval_pad_masks = batch["eval_pad_masks"].to(device)
-                if predict_tissue_mask:
+                eval_shapes = batch["eval_shapes"]
+
+                if predict_tissue_mask and "eval_tissue_masks" in batch:
                     eval_tissue_masks = batch["eval_tissue_masks"].to(device)
-                heights = batch["pad_mask_heights"]
-                widths = batch["pad_mask_widths"]
 
                 for si in range(pred_points.shape[0]):
-                    # Crop pred to content region (remove pad_dim padding)
-                    h, w = int(heights[si]), int(widths[si])
-                    pred_crop = pred_points[si:si+1, :, :h, :w]
+                    eval_shape = eval_shapes[si]
+                    if eval_shape is None:
+                        continue
 
-                    # Find eval content extent from eval_pad_masks
-                    eval_mask_i = eval_pad_masks[si]
-                    eval_h = int(eval_mask_i.any(dim=1).sum())
-                    eval_w = int(eval_mask_i.any(dim=0).sum())
-                    eval_target_crop = eval_target[si:si+1, :, :eval_h, :eval_w]
+                    eval_h, eval_w = eval_shape
 
-                    # Upsample cropped pred to eval content size
-                    pred_up = F.interpolate(
-                        pred_crop, size=(eval_h, eval_w),
-                        mode="bilinear", align_corners=False
+                    # Get the valid (non-padded) region of predictions
+                    pad_mask_i = pad_masks[si]
+                    valid_h = int(pad_mask_i.any(dim=1).sum())
+                    valid_w = int(pad_mask_i.any(dim=0).sum())
+
+                    # Crop out padding from predictions before upsampling
+                    pred_content = pred_points[si:si+1, :, :valid_h, :valid_w]
+
+                    # Upsample unpadded predictions to eval resolution
+                    pred_upsampled = F.interpolate(
+                        pred_content,
+                        size=(eval_h, eval_w),
+                        mode="bilinear",
+                        align_corners=False
                     )
 
-                    # Select mask
-                    if predict_tissue_mask:
-                        mask_crop = eval_tissue_masks[si:si+1, :eval_h, :eval_w]
-                    else:
-                        mask_crop = eval_pad_masks[si:si+1, :eval_h, :eval_w]
+                    # Get eval target and mask for this sample
+                    eval_target_i = eval_targets[si:si+1, :, :eval_h, :eval_w]
 
-                    rmse_full_res = MSE()(pred=pred_up, target=eval_target_crop, mask=mask_crop).sqrt()
+                    if predict_tissue_mask:
+                        eval_mask_i = eval_tissue_masks[si:si+1, :eval_h, :eval_w]
+                    else:
+                        eval_mask_i = eval_pad_masks[si:si+1, :eval_h, :eval_w]
+
+                    rmse_full_res = MSE()(pred=pred_upsampled, target=eval_target_i, mask=eval_mask_i).sqrt()
                     registration_res_rmses += rmse_full_res.cpu().tolist()
 
             if predict_tissue_mask:
@@ -490,7 +500,7 @@ def train(
     else:
         warmup_scheduler = None
 
-    scheduler = main_scheduler  # Keep reference for checkpoint saving
+    scheduler = main_scheduler
 
     progress_logger = None
 

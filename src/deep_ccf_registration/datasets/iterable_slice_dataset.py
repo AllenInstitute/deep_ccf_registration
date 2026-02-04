@@ -17,7 +17,8 @@ from torch.utils.data import IterableDataset, get_worker_info
 
 from deep_ccf_registration.datasets.aquisition_meta import AcquisitionDirection
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
-from deep_ccf_registration.datasets.transforms import map_points_to_right_hemisphere
+from deep_ccf_registration.datasets.transforms import map_points_to_right_hemisphere, \
+    apply_crop_pad_to_original
 from deep_ccf_registration.datasets.utils.template_points import transform_points_to_template_space, apply_transforms_to_points, Affine
 from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, TissueBoundingBoxes, \
     AcquisitionAxis
@@ -37,8 +38,14 @@ class PatchSample:
     orientation: str = ""
     subject_id: str = ""
     tissue_mask: Optional[np.ndarray] = None
+    pad_top: int = 0
+    pad_bottom: int = 0
+    pad_left: int = 0
+    pad_right: int = 0
+    # Eval template points at original resolution (no interpolation)
     eval_template_points: Optional[np.ndarray] = None
     eval_tissue_mask: Optional[np.ndarray] = None
+    eval_shape: Optional[tuple[int, int]] = None  # (H, W) of eval targets
 
     def to_dict(self) -> dict:
         """Convert to dictionary for batch collation."""
@@ -62,8 +69,6 @@ class SliceSampleSpec:
     metadata: SubjectMetadata
     slice_idx: int
     orientation: SliceOrientation
-    start_y: Optional[int] = None
-    start_x: Optional[int] = None
 
 class IterableSubjectSliceDataset(IterableDataset):
     """Iterable dataset that generates slices on-the-fly from a generator function."""
@@ -78,7 +83,6 @@ class IterableSubjectSliceDataset(IterableDataset):
         crop_size: Optional[tuple[int, int]] = None,
         registration_downsample_factor: int = 3,
         transform: Optional[callable] = None,
-        target_eval_transform: Optional[callable] = None,
         include_tissue_mask: bool = False,
         ccf_annotations: Optional[np.ndarray] = None,
         scratch_path: Path = Path('/tmp'),
@@ -92,7 +96,6 @@ class IterableSubjectSliceDataset(IterableDataset):
         self._aws_credentials_method = tensorstore_aws_credentials_method
         self._registration_downsample_factor = registration_downsample_factor
         self._transform = transform
-        self._target_eval_transform = target_eval_transform
         self._include_tissue_mask = include_tissue_mask
         self._ccf_annotations = ccf_annotations
 
@@ -120,19 +123,12 @@ class IterableSubjectSliceDataset(IterableDataset):
         y_axis, x_axis = in_plane_axes
 
         bbox = self._tissue_bboxes[metadata.subject_id][spec.slice_idx]
-        if self._crop_size is None:
-            start_y = bbox.y
-            start_x = bbox.x
-            patch_height = bbox.height
-            patch_width = bbox.width
-        else:
-            if spec.start_y is not None and spec.start_x is not None:
-                start_y, start_x = spec.start_y, spec.start_x
-            else:
-                start_y = random.randint(bbox.y, max(bbox.y, bbox.y + bbox.height - self._crop_size[0]))
-                start_x = random.randint(bbox.x, max(bbox.x, bbox.x + bbox.width - self._crop_size[1]))
-            patch_height = min(self._crop_size[0], bbox.y + bbox.height - start_y)
-            patch_width = min(self._crop_size[1], bbox.x + bbox.width - start_x)
+
+        start_y = bbox.y
+        start_x = bbox.x
+        patch_height = bbox.height
+        patch_width = bbox.width
+
 
         coordinate_grid = self._get_coordinate_grid(
             experiment_meta=metadata,
@@ -186,38 +182,55 @@ class IterableSubjectSliceDataset(IterableDataset):
                 template_parameters=self._template_parameters,
             )
 
-        eval_template_patch = None
-        eval_tissue_mask = None
-        if self._target_eval_transform is not None:
-            eval_template_patch = template_patch.copy()
-            eval_transform = self._target_eval_transform(
-                image=data_patch,
-                keypoints=eval_template_patch,
-                mask=tissue_mask,
-                slice_axis=slice_axis,
-                acquisition_axes=metadata.axes,
-                orientation=spec.orientation,
-            )
-            eval_template_patch = eval_transform["keypoints"]
-            if self._ccf_annotations is not None:
-                eval_tissue_mask = _get_tissue_mask(
-                    annotations=self._ccf_annotations,
-                    template_patch=eval_template_patch,
-                    template_parameters=self._template_parameters,
-                )
+        # Store original template points before transforms for eval
+        original_template_points = template_patch.copy()
+        original_tissue_mask = tissue_mask.copy() if tissue_mask is not None else None
+        original_shape = (data_patch.shape[0], data_patch.shape[1])
 
+        pad_top, pad_bottom, pad_left, pad_right = 0, 0, 0, 0
+        eval_template_points = None
+        eval_tissue_mask = None
+        eval_shape = None
         if self._transform is not None:
             transforms = self._transform(
                 image=data_patch,
-                keypoints=template_patch,
+                template_coords=template_patch,
                 mask=tissue_mask,
                 slice_axis=slice_axis,
                 acquisition_axes=metadata.axes,
                 orientation=spec.orientation,
             )
             data_patch = transforms["image"]
-            template_patch = transforms["keypoints"]
+            template_patch = transforms["template_coords"]
             tissue_mask = transforms["mask"]
+
+            # Get the shape after resize transforms (before crop/pad)
+            # This is needed to scale crop coordinates to original resolution
+            resized_shape = self._get_shape_after_resize(transforms["replay"], original_shape)
+
+            # Apply crop/pad to original points, scaling coordinates appropriately
+            # This allows evaluation at original resolution without interpolating targets
+            eval_template_points, eval_tissue_mask, eval_shape = apply_crop_pad_to_original(
+                template_coords=original_template_points,
+                replay=transforms["replay"],
+                original_shape=original_shape,
+                resized_shape=resized_shape,
+                mask=original_tissue_mask,
+            )
+
+            # Extract padding info from replay
+            for t in transforms["replay"]["transforms"]:
+                if t.get('params') is None:
+                    params = {}
+                else:
+                    params = t.get("params", {})
+                if "pad_params" in params:
+                    pad_params = t["params"]["pad_params"]
+                    pad_top = pad_params.get("pad_top", 0)
+                    pad_bottom = pad_params.get("pad_bottom", 0)
+                    pad_left = pad_params.get("pad_left", 0)
+                    pad_right = pad_params.get("pad_right", 0)
+                    break
 
         worker_ctx = self._worker_context()
 
@@ -232,8 +245,13 @@ class IterableSubjectSliceDataset(IterableDataset):
             orientation=spec.orientation.value,
             subject_id=metadata.subject_id,
             tissue_mask=tissue_mask,
-            eval_template_points=eval_template_patch,
+            pad_top=pad_top,
+            pad_bottom=pad_bottom,
+            pad_left=pad_left,
+            pad_right=pad_right,
+            eval_template_points=eval_template_points,
             eval_tissue_mask=eval_tissue_mask,
+            eval_shape=eval_shape,
         )
 
     @timed_func
@@ -267,6 +285,42 @@ class IterableSubjectSliceDataset(IterableDataset):
 
         return template_points
 
+    def _get_shape_after_resize(self, replay: dict, original_shape: tuple[int, int]) -> tuple[int, int]:
+        """
+        Compute the image shape after resize transforms (Resample, LongestMaxSize).
+
+        This is needed to properly scale crop coordinates when applying them
+        to original-resolution targets.
+        """
+        h, w = original_shape
+
+        for t in replay.get("transforms", []):
+            t_name = t.get("__class_fullname__", "")
+            params = t.get("params", {}) or {}
+
+            if "Resample" in t_name:
+                # Resample changes shape based on resolution scaling
+                # The output shape is in the params as 'shape'
+                shape = params.get("shape")
+                if shape:
+                    h, w = shape[0], shape[1]
+
+            elif "LongestMaxSize" in t_name:
+                # LongestMaxSize scales to fit max_size
+                scale = params.get("scale", 1.0)
+                new_h = params.get("height")
+                new_w = params.get("width")
+                if new_h is not None and new_w is not None:
+                    h, w = new_h, new_w
+                elif scale != 1.0:
+                    h = int(round(h * scale))
+                    w = int(round(w * scale))
+
+            elif "RandomCrop" in t_name or ("Crop" in t_name and "RandomCrop" not in t_name):
+                # Stop at crop - we want the shape right before crop
+                break
+
+        return (h, w)
 
     @dataclass(frozen=True)
     class _WorkerContext:

@@ -41,8 +41,6 @@ class TrainConfig(BaseModel):
     # downsample input image and target points so that longest max size is this
     longest_max_size: Optional[int] = None
 
-    # make all input images have uniform orientation
-    normalize_orientation: bool = True
     # make all input images range from [0, 1] using lower and upper percentiles as thresholds
     normalize_input_image: bool = True
     # normalize template points to [-1,1] (background points will be outside this range)
@@ -52,6 +50,7 @@ class TrainConfig(BaseModel):
     exclude_background_pixels: bool = False
     predict_tissue_mask: bool = True
     dataloader_prefetch_factor: Optional[int] = None
+    apply_square_symmetry_transform: bool = False
 
     load_checkpoint: Optional[Path] = None
     # MLflow run ID to resume (for spot instance recovery)

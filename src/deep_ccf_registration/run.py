@@ -2,7 +2,6 @@ import multiprocessing
 import os
 import sys
 import tempfile
-from functools import partial
 from importlib.metadata import distribution
 from pathlib import Path
 from typing import Optional
@@ -27,7 +26,7 @@ from deep_ccf_registration.datasets.iterable_slice_dataset import (
     IterableSubjectSliceDataset,
 )
 from deep_ccf_registration.datasets.subject_slice_sampler import SubjectSliceSampler
-from deep_ccf_registration.datasets.transforms import build_transform, build_target_eval_transform
+from deep_ccf_registration.datasets.transforms import build_transform
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.metadata import SubjectMetadata, TissueBoundingBoxes
 from deep_ccf_registration.models import UNetWithRegressionHeads
@@ -44,7 +43,6 @@ def create_dataloader(
     ls_template_parameters: TemplateParameters,
     ccf_annotations: np.ndarray,
     include_tissue_mask: bool = False,
-    target_eval_transform: Optional[callable] = None,
 ):
     """
     Create a dataloader using IterableSubjectSliceDataset with SubjectSliceSampler.
@@ -62,7 +60,11 @@ def create_dataloader(
     transform = build_transform(
         config=config,
         template_parameters=template_parameters,
-        is_train=is_train,
+        square_symmetry=is_train and config.apply_square_symmetry_transform,
+        resample_to_fixed_resolution=config.resample_to_fixed_resolution is not None,
+        rotate_slices=config.rotate_slices and is_train,
+        normalize_template_points=config.normalize_template_points,
+        longest_max_size=config.longest_max_size is not None,
     )
 
     sampler = SubjectSliceSampler(
@@ -88,7 +90,6 @@ def create_dataloader(
         crop_size=config.patch_size,
         registration_downsample_factor=config.registration_downsample_factor,
         transform=transform,
-        target_eval_transform=target_eval_transform,
         include_tissue_mask=include_tissue_mask,
         ccf_annotations=ccf_annotations,
         scratch_path=config.tmp_path,
@@ -101,7 +102,7 @@ def create_dataloader(
         # using 0 workers (main process) for eval,
         # to keep mem usage lower
         num_workers=num_workers if is_train else 0,
-        collate_fn=partial(collate_patch_samples, pad_dim=config.pad_dim),
+        collate_fn=collate_patch_samples,
         pin_memory=device == 'cuda',
         persistent_workers=is_train and num_workers > 0
     )
@@ -282,7 +283,6 @@ def main(config_path: Path):
         include_tissue_mask=config.predict_tissue_mask,
         device=device,
     )
-    target_eval_transform = build_target_eval_transform(config=config)
     val_dataloader = create_dataloader(
         metadata=val_metadata,
         tissue_bboxes=tissue_bboxes,
@@ -293,7 +293,6 @@ def main(config_path: Path):
         is_train=False,
         ccf_annotations=ccf_annotations,
         include_tissue_mask=config.predict_tissue_mask,
-        target_eval_transform=target_eval_transform,
         device=device,
     )
 

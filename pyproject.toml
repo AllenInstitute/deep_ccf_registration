@@ -21,6 +21,7 @@ dependencies = [
     "scikit-image>=0.25.2",
     "scipy>=1.15.3",
     "seaborn>=0.13.2",
+    "segmentation-models-pytorch>=0.5.0",
     "tensorstore>=0.1.77",
     "torch>=2.8.0",
     "torchmetrics>=1.8.2",

@@ -130,6 +130,4 @@ class SubjectSliceSampler:
                     metadata=metadata,
                     slice_idx=slice_idx,
                     orientation=orientation,
-                    start_x=self._debug_start_x if self._is_debug else None,
-                    start_y=self._debug_start_y if self._is_debug else None,
                 )
