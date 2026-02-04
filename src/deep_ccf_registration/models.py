@@ -126,14 +126,16 @@ class UNetWithRegressionHeads(nn.Module):
         )
 
         layers = []
-        in_ch = coord_head_input_channels
-        for out_ch in coord_head_channels:
-            layers.append(nn.Conv2d(in_ch, out_ch, kernel_size=1))
-            layers.append(nn.ReLU())
-            layers.append(nn.Dropout2d(p=0.1))
-            in_ch = out_ch
-        layers.append(nn.Conv2d(in_ch, out_coords, kernel_size=1))
-        self.coord_head = nn.Sequential(*layers)
+        if len(coord_head_input_channels > 0):
+            in_ch = coord_head_input_channels
+            for out_ch in coord_head_channels:
+                layers.append(nn.Conv2d(in_ch, out_ch, kernel_size=1))
+                layers.append(nn.ReLU())
+                in_ch = out_ch
+            layers.append(nn.Conv2d(in_ch, out_coords, kernel_size=1))
+            self.coord_head = nn.Sequential(*layers)
+        else:
+            self.coord_head = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -174,9 +176,12 @@ class UNetWithRegressionHeads(nn.Module):
         if self.use_positional_encoding and self._positional_embedding_placement == PositionalEmbeddingPlacement.LATE:
             coord_features = torch.cat([coord_features, pos_encoding], dim=1)
 
-        # Predict coordinates using regression head
-        coords = self.coord_head(coord_features)
-
+        if self.coord_head is not None:
+            # Predict coordinates using regression head
+            coords = self.coord_head(coord_features)
+        else:
+            coords = coord_features
+            
         # Predict tissue mask using classification head
         if self.include_tissue_mask:
             output = torch.cat([coords, mask_logits], dim=1)
