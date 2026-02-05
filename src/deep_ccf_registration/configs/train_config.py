@@ -72,7 +72,7 @@ class TrainConfig(BaseModel):
 
     device: Literal["cuda", "cpu", "mps", "auto"] = "auto"
     mixed_precision: bool = False
-    seed: int = 1234
+    seed: Optional[int] = 1234
     debug: bool = False
 
     # path to bounding boxes conforming to schema: dict[str, Optional[TissueBoundingBox]]
@@ -104,6 +104,7 @@ class TrainConfig(BaseModel):
     # microns/px to resample to
     resample_to_fixed_resolution: Optional[int] = None
     pad_dim: int = 512
+    pad_if_needed: bool = True
     epoch_subject_slice_fraction: float = 1.0
     debug_start_y: Optional[int] = 0
     debug_start_x: Optional[int] = 0

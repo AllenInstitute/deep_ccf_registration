@@ -65,6 +65,7 @@ def create_dataloader(
         rotate_slices=config.rotate_slices and is_train,
         normalize_template_points=config.normalize_template_points,
         longest_max_size=config.longest_max_size is not None,
+        pad_if_needed=config.pad_if_needed,
     )
 
     sampler = SubjectSliceSampler(

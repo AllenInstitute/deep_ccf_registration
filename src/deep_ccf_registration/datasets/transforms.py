@@ -300,7 +300,8 @@ def build_transform(
     resample_to_fixed_resolution: bool = False,
     rotate_slices: bool = False,
     normalize_template_points: bool = False,
-    longest_max_size: bool = False
+    longest_max_size: bool = False,
+    pad_if_needed: bool = True
 ):
     transforms: list[Any] = [ImageNormalization()]
 
@@ -313,7 +314,7 @@ def build_transform(
 
     if rotate_slices:
         # range obtained from smartSPIM data
-        transforms.append(Rotate(limit=(-20, 20)))
+        transforms.append(Rotate(limit=(-20, 20), border_mode=cv2.BORDER_REPLICATE))
 
     if normalize_template_points:
         transforms.append(TemplatePointsNormalization(
@@ -346,7 +347,8 @@ def build_transform(
         assert config.longest_max_size is not None
         transforms.append(LongestMaxSize(max_size=config.longest_max_size))
 
-    transforms.append(PadIfNeeded(min_height=config.pad_dim, min_width=config.pad_dim, position='top_left'))
+    if pad_if_needed:
+        transforms.append(PadIfNeeded(min_height=config.pad_dim, min_width=config.pad_dim, position='top_left'))
 
     if len(transforms) > 0:
         return albumentations.ReplayCompose(transforms, seed=config.seed)

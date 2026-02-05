@@ -126,7 +126,7 @@ class UNetWithRegressionHeads(nn.Module):
         )
 
         layers = []
-        if len(coord_head_input_channels > 0):
+        if len(coord_head_channels) > 0:
             in_ch = coord_head_input_channels
             for out_ch in coord_head_channels:
                 layers.append(nn.Conv2d(in_ch, out_ch, kernel_size=1))
@@ -181,7 +181,7 @@ class UNetWithRegressionHeads(nn.Module):
             coords = self.coord_head(coord_features)
         else:
             coords = coord_features
-            
+
         # Predict tissue mask using classification head
         if self.include_tissue_mask:
             output = torch.cat([coords, mask_logits], dim=1)

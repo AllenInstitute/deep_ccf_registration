@@ -175,7 +175,7 @@ def apply_transforms_to_points(
             futures = [
                 executor.submit(
                     map_coordinates, warp[i], coords,
-                    order=1, mode="constant", cval=0
+                    order=1, mode="nearest"
                 )
                 for i in range(3)
             ]
