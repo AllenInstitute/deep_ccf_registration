@@ -207,7 +207,9 @@ class IterableSubjectSliceDataset(IterableDataset):
                 slice_axis=slice_axis,
                 acquisition_axes=metadata.axes,
                 orientation=spec.orientation,
-                subject_rotation=self._rotation_angles.rotation_angles[metadata.subject_id]
+                subject_rotation=self._rotation_angles.rotation_angles[metadata.subject_id],
+                subject_id=metadata.subject_id,
+                slice_idx=spec.slice_idx,
             )
             data_patch = transforms["image"]
             template_patch = transforms["template_coords"]
@@ -326,7 +328,7 @@ class IterableSubjectSliceDataset(IterableDataset):
                     h = int(round(h * scale))
                     w = int(round(w * scale))
 
-            elif "RandomCrop" in t_name or ("Crop" in t_name and "CropToMaskBBox" not in t_name):
+            elif "Crop" in t_name:
                 # Stop at final crop - we want the shape right before crop
                 break
 

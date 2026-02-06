@@ -42,40 +42,6 @@ def get_subject_rotation_range(subject_angle: float, valid_range: tuple[float, f
     return min_aug, max_aug
 
 
-class CropToMaskBBox(albumentations.DualTransform):
-    """Crop all targets to the tight bounding box of the (already-transformed) mask.
-
-    This is intended to run *after* rotation so we crop based on the actual sampled angle.
-    If no mask is present (or mask is empty), this is a no-op.
-    """
-
-    def __init__(self):
-        super().__init__(p=1.0)
-
-    @property
-    def targets(self) -> dict[str, Any]:
-        return {
-            "image": self.apply,
-            "mask": self.apply,
-            "template_coords": self.apply,
-        }
-
-    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
-        mask = data.get("mask")
-        if mask is None:
-            raise ValueError('mask not passed')
-        ys, xs, _ = np.where(mask > 0)
-
-        y_min = int(ys.min())
-        y_max = int(ys.max()) + 1
-        x_min = int(xs.min())
-        x_max = int(xs.max()) + 1
-        return {"y_min": y_min, "y_max": y_max, "x_min": x_min, "x_max": x_max}
-
-    def apply(self, img: np.ndarray, y_min: int, y_max: int, x_min: int, x_max: int, **params: Any) -> np.ndarray:
-        cropped = img[y_min:y_max, x_min:x_max]
-        return _restore_grayscale_channel_last(img, cropped)
-
 
 class Rotate(albumentations.Rotate):
 
@@ -320,27 +286,41 @@ class Resample(albumentations.DualTransform):
             "slice_axis": slice_axis,
             "orientation": data["orientation"],
             "shape": (new_h, new_w),
+            "subject_id": data.get("subject_id"),
+            "slice_idx": data.get("slice_idx"),
         }
 
-    def apply(self, img: np.ndarray, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis, orientation: SliceOrientation,  **params: Any) -> np.ndarray:
-        transformed = self._resample(x=img, acquisition_axes=acquisition_axes, slice_axis=slice_axis)
+    def apply(self, img: np.ndarray, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis, orientation: SliceOrientation, subject_id: str = "", slice_idx: int = -1, **params: Any) -> np.ndarray:
+        transformed = self._resample(x=img, acquisition_axes=acquisition_axes, slice_axis=slice_axis, subject_id=subject_id, slice_idx=slice_idx)
         return _restore_grayscale_channel_last(img, transformed)
 
-    def apply_to_mask(self, mask: np.ndarray, *args: Any, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis, orientation: SliceOrientation,  **params: Any) -> np.ndarray:
+    def apply_to_mask(self, mask: np.ndarray, *args: Any, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis, orientation: SliceOrientation, subject_id: str = "", slice_idx: int = -1, **params: Any) -> np.ndarray:
         if not self._resize_mask:
             return mask
-        return self._resample(x=mask, acquisition_axes=acquisition_axes, slice_axis=slice_axis)
+        return self._resample(x=mask, acquisition_axes=acquisition_axes, slice_axis=slice_axis, subject_id=subject_id, slice_idx=slice_idx)
 
-    def apply_to_template_coords(self, img: np.ndarray, *args: Any, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis, orientation: SliceOrientation,  **params: Any) -> np.ndarray:
+    def apply_to_template_coords(self, img: np.ndarray, *args: Any, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis, orientation: SliceOrientation, subject_id: str = "", slice_idx: int = -1, **params: Any) -> np.ndarray:
         if not self._resize_target:
             return img
-        return self._resample(x=img, acquisition_axes=acquisition_axes, slice_axis=slice_axis)
+        return self._resample(x=img, acquisition_axes=acquisition_axes, slice_axis=slice_axis, subject_id=subject_id, slice_idx=slice_idx)
 
-    def _resample(self, x: np.ndarray, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis):
+    def _resample(self, x: np.ndarray, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis, subject_id: str = "", slice_idx: int = -1):
         axes = sorted(acquisition_axes, key=lambda x: x.dimension)
         axes = [x for x in axes if x.dimension != slice_axis.dimension]
         scale_y = axes[0].resolution * 2**3 / self._fixed_resolution
         scale_x = axes[1].resolution * 2**3 / self._fixed_resolution
+        h, w = x.shape[:2]
+        new_h = int(round(h * scale_y))
+        new_w = int(round(w * scale_x))
+        if new_h == 0 or new_w == 0:
+            logger.error(
+                f"Resample produced zero-sized output: "
+                f"subject_id={subject_id}, slice_idx={slice_idx}, "
+                f"input shape={x.shape}, scale_x={scale_x:.4f}, scale_y={scale_y:.4f}, "
+                f"new_size=({new_h}, {new_w}), "
+                f"axes resolutions=({axes[0].resolution}, {axes[1].resolution}), "
+                f"fixed_resolution={self._fixed_resolution}"
+            )
         resampled = cv2.resize(x, None, fx=scale_x, fy=scale_y)
         return resampled
 
@@ -499,7 +479,6 @@ def build_transform(
 
     if rotate_slices:
         transforms.append(Rotate(rotation_angles=rotation_angles, border_mode=cv2.BORDER_REPLICATE))
-        #transforms.append(CropToMaskBBox())
 
     if square_symmetry:
         transforms.append(SquareSymmetry())
@@ -576,7 +555,7 @@ def apply_crop_pad_to_original(
         t_name = t.get("__class_fullname__", "")
         params = t.get("params", {}) or {}
 
-        if "RandomCrop" in t_name or ("Crop" in t_name and "CropToMaskBBox" not in t_name):
+        if "Crop" in t_name:
             crop_coords = params.get("crop_coords")
             if not crop_coords:
                 continue
