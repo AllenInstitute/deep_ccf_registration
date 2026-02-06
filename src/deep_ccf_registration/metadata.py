@@ -88,3 +88,17 @@ class TissueBoundingBox(BaseModel):
 
 class TissueBoundingBoxes(BaseModel):
     bounding_boxes: dict[str, list[Optional[TissueBoundingBox]]]
+
+class SubjectRotationAngle(BaseModel):
+    AP_rot: float
+    SI_rot: float
+    ML_rot: float
+
+class RotationAngles(BaseModel):
+    """
+    Rotation needed to align input to template, calculated from affine matrix
+    """
+    rotation_angles: dict[str, SubjectRotationAngle]
+    AP_range: tuple[float, float]
+    SI_range: tuple[float, float]
+    ML_range: tuple[float, float]

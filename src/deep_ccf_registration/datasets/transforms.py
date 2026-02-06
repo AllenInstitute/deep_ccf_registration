@@ -10,16 +10,12 @@ from skimage.exposure import rescale_intensity
 
 from deep_ccf_registration.configs.train_config import TrainConfig
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
-from deep_ccf_registration.metadata import SliceOrientation, AcquisitionAxis
+from deep_ccf_registration.metadata import SliceOrientation, AcquisitionAxis, SubjectRotationAngle, \
+    RotationAngles
 
 
 def _restore_grayscale_channel_last(original: np.ndarray, transformed: np.ndarray) -> np.ndarray:
     """Ensure grayscale images keep a trailing channel dim.
-
-    Rule: if the *input* looked grayscale (HxW or HxWx1) but the transform returned HxW,
-    restore to HxWx1.
-
-    This intentionally does *not* touch masks.
     """
 
     is_grayscale_input = original.ndim == 2 or (original.ndim == 3 and original.shape[-1] == 1)
@@ -28,10 +24,175 @@ def _restore_grayscale_channel_last(original: np.ndarray, transformed: np.ndarra
     return transformed
 
 
+def get_subject_rotation_range(subject_angle: float, valid_range: tuple[float, float]) -> tuple[float, float]:
+    """
+    want to limit rotation range to typical range. Since subject already rotated relative
+    to template, we don't want to over rotate, so we limit based on subject rotation and
+    typical alignment rotation ranges
+    :param subject_angle:
+    :param valid_range:
+    :return:
+    """
+    min_aug = valid_range[0] - subject_angle
+    max_aug = valid_range[1] - subject_angle
+    if min_aug > max_aug:
+        # Subject already outside typical range; no valid augmentation, use 0
+        return 0.0, 0.0
+    return min_aug, max_aug
+
+
+class CropToMaskBBox(albumentations.DualTransform):
+    """Crop all targets to the tight bounding box of the (already-transformed) mask.
+
+    This is intended to run *after* rotation so we crop based on the actual sampled angle.
+    If no mask is present (or mask is empty), this is a no-op.
+    """
+
+    def __init__(self):
+        super().__init__(p=1.0)
+
+    @property
+    def targets(self) -> dict[str, Any]:
+        return {
+            "image": self.apply,
+            "mask": self.apply,
+            "template_coords": self.apply,
+        }
+
+    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+        mask = data.get("mask")
+        if mask is None:
+            raise ValueError('mask not passed')
+        ys, xs, _ = np.where(mask > 0)
+
+        y_min = int(ys.min())
+        y_max = int(ys.max()) + 1
+        x_min = int(xs.min())
+        x_max = int(xs.max()) + 1
+        return {"y_min": y_min, "y_max": y_max, "x_min": x_min, "x_max": x_max}
+
+    def apply(self, img: np.ndarray, y_min: int, y_max: int, x_min: int, x_max: int, **params: Any) -> np.ndarray:
+        cropped = img[y_min:y_max, x_min:x_max]
+        return _restore_grayscale_channel_last(img, cropped)
+
+
 class Rotate(albumentations.Rotate):
-    """
-    Subclassing, so that template_coords can be treated as an image
-    """
+
+    def __init__(
+            self,
+            rotation_angles: RotationAngles,
+            **kwargs
+    ):
+        super().__init__(**kwargs)
+        self._rotation_angles = rotation_angles
+
+    @property
+    def targets(self) -> dict[str, Any]:
+        return {
+            "image": self.apply,
+            "mask": self.apply,
+            "template_coords": self.apply_to_template_coords,
+        }
+
+    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+        # Extract custom data from params
+        subject_rotation: SubjectRotationAngle = data["subject_rotation"]
+        orientation: SliceOrientation = data["orientation"]
+
+        # Determine which axis is the in-plane rotation axis based on slice orientation
+        if orientation == SliceOrientation.SAGITTAL:
+            subject_angle = subject_rotation.ML_rot
+            valid_range = self._rotation_angles.ML_range
+        else:
+            raise ValueError(f"Unknown orientation: {orientation}")
+
+        # Compute valid augmentation range
+        aug_range = get_subject_rotation_range(subject_angle=subject_angle,
+                                               valid_range=valid_range)
+
+        # Sample rotation angle within valid range
+        angle = float(np.random.uniform(aug_range[0], aug_range[1]))
+
+        logger.debug(f'z_rot={angle:.3f}')
+
+        # Compute symmetric padding needed for angle so rotation won't crop.
+        img = data["image"]
+        height, width = img.shape[:2]
+
+        theta = np.deg2rad(abs(angle))
+        cos_t = abs(float(np.cos(theta)))
+        sin_t = abs(float(np.sin(theta)))
+
+        new_w = width * cos_t + height * sin_t
+        new_h = width * sin_t + height * cos_t
+
+        pad_x = int(np.ceil(max(0.0, (new_w - width) / 2.0)))
+        pad_y = int(np.ceil(max(0.0, (new_h - height) / 2.0)))
+
+        pad_top = pad_y
+        pad_bottom = pad_y
+        pad_left = pad_x
+        pad_right = pad_x
+
+        # Use padded shape so parent computes rotation matrix with correct center
+        padded_h = height + pad_top + pad_bottom
+        padded_w = width + pad_left + pad_right
+
+        params_copy = params.copy()
+        params_copy["shape"] = (padded_h, padded_w) + params_copy["shape"][2:]
+
+        # Force parent to use our sampled angle (it ignores params["angle"]
+        # and instead samples from self.limit)
+        original_limit = self.limit
+        self.limit = (angle, angle)
+        try:
+            rotate_params = super().get_params_dependent_on_data(params=params_copy, data=data)
+        finally:
+            self.limit = original_limit
+        rotate_params.update(
+            {
+                "pad_top": pad_top,
+                "pad_bottom": pad_bottom,
+                "pad_left": pad_left,
+                "pad_right": pad_right,
+            }
+        )
+        return rotate_params
+
+    def apply(
+            self,
+            img: np.ndarray,
+            pad_top: int = 0,
+            pad_bottom: int = 0,
+            pad_left: int = 0,
+            pad_right: int = 0,
+            border_mode: str = 'constant',
+            **params: Any
+    ) -> np.ndarray:
+        if pad_top or pad_bottom or pad_left or pad_right:
+            pad_width = (
+                ((pad_top, pad_bottom), (pad_left, pad_right))
+                if img.ndim == 2
+                else ((pad_top, pad_bottom), (pad_left, pad_right), (0, 0))
+            )
+
+            if border_mode == "constant":
+                padded = np.pad(img, pad_width=pad_width, mode=border_mode, constant_values=0)
+            else:
+                padded = np.pad(img, pad_width=pad_width, mode=border_mode)
+            img = _restore_grayscale_channel_last(original=img, transformed=padded)
+        params['shape'] = img.shape
+        transformed = super().apply(img, **params)
+        return _restore_grayscale_channel_last(img, transformed)
+
+    def apply_to_template_coords(self, *args, **kwargs) -> np.ndarray:
+        return self.apply(
+            *args,
+            **kwargs,
+            border_mode='edge',
+        )
+
+class GridDistortion(albumentations.GridDistortion):
     @property
     def targets(self) -> dict[str, Any]:
         targets = dict(super().targets)
@@ -44,32 +205,63 @@ class Rotate(albumentations.Rotate):
 
 
 class RandomCrop(albumentations.RandomCrop):
-    """
-    Subclassing, so that template_coords can be treated as an image
-    """
     @property
     def targets(self) -> dict[str, Any]:
         targets = dict(super().targets)
-        targets["template_coords"] = self.apply
+        targets["template_coords"] = self.apply_to_template_coords
         return targets
 
     def apply(self, img: np.ndarray, **params: Any) -> np.ndarray:
         transformed = super().apply(img, **params)
         return _restore_grayscale_channel_last(img, transformed)
 
+    def apply_to_mask(
+        self,
+        mask: np.ndarray,
+        **params: Any,
+    ) -> np.ndarray:
+        if len(mask.shape) == 2:
+            mask = np.expand_dims(mask, -1)
+        transformed = super().apply_to_mask(mask, **params)
+        return _restore_grayscale_channel_last(mask, transformed)
+
+    def apply_to_template_coords(self, img: np.ndarray, **params: Any) -> np.ndarray:
+        original_border_mode = self.border_mode
+        self.border_mode = cv2.BORDER_REPLICATE
+        try:
+            transformed = super().apply(img, **params)
+        finally:
+            self.border_mode = original_border_mode
+        return _restore_grayscale_channel_last(img, transformed)
 
 class Crop(albumentations.Crop):
-    """
-    Subclassing, so that template_coords can be treated as an image
-    """
     @property
     def targets(self) -> dict[str, Any]:
         targets = dict(super().targets)
-        targets["template_coords"] = self.apply
+        targets["template_coords"] = self.apply_to_template_coords
         return targets
 
     def apply(self, img: np.ndarray, **params: Any) -> np.ndarray:
         transformed = super().apply(img, **params)
+        return _restore_grayscale_channel_last(img, transformed)
+
+    def apply_to_mask(
+        self,
+        mask: np.ndarray,
+        **params: Any,
+    ) -> np.ndarray:
+        if len(mask.shape) == 2:
+            mask = np.expand_dims(mask, -1)
+        transformed = super().apply_to_mask(mask, **params)
+        return _restore_grayscale_channel_last(mask, transformed)
+
+    def apply_to_template_coords(self, img: np.ndarray, **params: Any) -> np.ndarray:
+        original_border_mode = self.border_mode
+        self.border_mode = cv2.BORDER_REPLICATE
+        try:
+            transformed = super().apply(img, **params)
+        finally:
+            self.border_mode = original_border_mode
         return _restore_grayscale_channel_last(img, transformed)
 
 class SquareSymmetry(albumentations.SquareSymmetry):
@@ -85,21 +277,6 @@ class SquareSymmetry(albumentations.SquareSymmetry):
     def apply(self, img: np.ndarray, *args, **params: Any) -> np.ndarray:
         transformed = super().apply(img, *args, **params)
         return _restore_grayscale_channel_last(img, transformed)
-
-class PadIfNeeded(albumentations.PadIfNeeded):
-    """
-    Subclassing, so that template_coords can be treated as an image
-    """
-    @property
-    def targets(self) -> dict[str, Any]:
-        targets = dict(super().targets)
-        targets["template_coords"] = self.apply
-        return targets
-
-    def apply(self, img: np.ndarray, **params: Any) -> np.ndarray:
-        transformed = super().apply(img, **params)
-        return _restore_grayscale_channel_last(img, transformed)
-
 
 class Resample(albumentations.DualTransform):
     """Resample to fixed resolution"""
@@ -124,10 +301,24 @@ class Resample(albumentations.DualTransform):
         }
 
     def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+        acquisition_axes = data["acquisition_axes"]
+        slice_axis = data["slice_axis"]
+
+        # Compute output shape so it is recorded in the replay dict
+        img = data["image"]
+        h, w = img.shape[:2]
+        axes = sorted(acquisition_axes, key=lambda a: a.dimension)
+        axes = [a for a in axes if a.dimension != slice_axis.dimension]
+        scale_y = axes[0].resolution * 2**3 / self._fixed_resolution
+        scale_x = axes[1].resolution * 2**3 / self._fixed_resolution
+        new_h = int(round(h * scale_y))
+        new_w = int(round(w * scale_x))
+
         return {
-            "acquisition_axes": data["acquisition_axes"],
-            "slice_axis": data["slice_axis"],
+            "acquisition_axes": acquisition_axes,
+            "slice_axis": slice_axis,
             "orientation": data["orientation"],
+            "shape": (new_h, new_w),
         }
 
     def apply(self, img: np.ndarray, acquisition_axes: list[AcquisitionAxis], slice_axis: AcquisitionAxis, orientation: SliceOrientation,  **params: Any) -> np.ndarray:
@@ -296,25 +487,28 @@ def get_physical_extent(origin, scale, direction, shape):
 def build_transform(
     config: TrainConfig,
     template_parameters: TemplateParameters,
+    rotation_angles: RotationAngles,
     square_symmetry: bool = False,
     resample_to_fixed_resolution: bool = False,
     rotate_slices: bool = False,
     normalize_template_points: bool = False,
-    longest_max_size: bool = False,
-    pad_if_needed: bool = True
+    apply_grid_distortion: bool = False
 ):
     transforms: list[Any] = [ImageNormalization()]
+
+    if rotate_slices:
+        transforms.append(Rotate(rotation_angles=rotation_angles, border_mode=cv2.BORDER_REPLICATE))
+        transforms.append(CropToMaskBBox())
 
     if square_symmetry:
         transforms.append(SquareSymmetry())
 
+    if apply_grid_distortion:
+        transforms.append(GridDistortion(border_mode=cv2.BORDER_REPLICATE))
+
     if resample_to_fixed_resolution:
         assert config.resample_to_fixed_resolution is not None
         transforms.append(Resample(fixed_resolution=config.resample_to_fixed_resolution))
-
-    if rotate_slices:
-        # range obtained from smartSPIM data
-        transforms.append(Rotate(limit=(-20, 20), border_mode=cv2.BORDER_REPLICATE))
 
     if normalize_template_points:
         transforms.append(TemplatePointsNormalization(
@@ -325,30 +519,23 @@ def build_transform(
         ))
 
 
-    if config.patch_size is not None:
-        if config.debug and (config.debug_start_y is not None and config.debug_start_x is not None):
-            transforms.append(Crop(
-                y_min=config.debug_start_y,
-                x_min=config.debug_start_x,
-                y_max=config.debug_start_y+config.patch_size[0],
-                x_max=config.debug_start_x+config.patch_size[1],
-                pad_if_needed=True,
-                pad_position='top_left'
-            ))
-        else:
-            transforms.append(RandomCrop(
-                height=config.patch_size[0],
-                width=config.patch_size[1],
-                pad_if_needed=True,
-                pad_position='top_left'
-            ))
+    if config.debug and (config.debug_start_y is not None and config.debug_start_x is not None):
+        transforms.append(Crop(
+            y_min=config.debug_start_y,
+            x_min=config.debug_start_x,
+            y_max=config.debug_start_y+config.patch_size[0],
+            x_max=config.debug_start_x+config.patch_size[1],
+            pad_if_needed=True,
+            pad_position='top_left'
+        ))
+    else:
+        transforms.append(RandomCrop(
+            height=config.patch_size[0],
+            width=config.patch_size[1],
+            pad_if_needed=True,
+            pad_position='top_left'
+        ))
 
-    if longest_max_size:
-        assert config.longest_max_size is not None
-        transforms.append(LongestMaxSize(max_size=config.longest_max_size))
-
-    if pad_if_needed:
-        transforms.append(PadIfNeeded(min_height=config.pad_dim, min_width=config.pad_dim, position='top_left'))
 
     if len(transforms) > 0:
         return albumentations.ReplayCompose(transforms, seed=config.seed)
@@ -382,10 +569,6 @@ def apply_crop_pad_to_original(
     orig_h, orig_w = original_shape
     resized_h, resized_w = resized_shape
 
-    # Compute scale factors
-    scale_h = orig_h / resized_h if resized_h > 0 else 1.0
-    scale_w = orig_w / resized_w if resized_w > 0 else 1.0
-
     result_coords = template_coords.copy()
     result_mask = mask.copy() if mask is not None else None
 
@@ -394,65 +577,45 @@ def apply_crop_pad_to_original(
         t_name = t.get("__class_fullname__", "")
         params = t.get("params", {}) or {}
 
-        if "RandomCrop" in t_name:
-            # Scale crop coordinates to original resolution
-            h_start = int(params.get("h_start", 0) * scale_h)
-            w_start = int(params.get("w_start", 0) * scale_w)
-            # Get crop size from the transform (height/width attributes)
-            crop_h = int(params.get("shape", (0, 0))[0] * scale_h) if "shape" in params else int(100 * scale_h)
-            crop_w = int(params.get("shape", (0, 0))[1] * scale_w) if "shape" in params else int(100 * scale_w)
-
-            # Actually, RandomCrop params have crop_coords: (y_min, x_min, y_max, x_max)
+        if "RandomCrop" in t_name or ("Crop" in t_name and "CropToMaskBBox" not in t_name):
             crop_coords = params.get("crop_coords")
-            if crop_coords:
-                y_min, x_min, y_max, x_max = crop_coords
-                h_start = int(y_min * scale_h)
-                w_start = int(x_min * scale_w)
-                crop_h = int((y_max - y_min) * scale_h)
-                crop_w = int((x_max - x_min) * scale_w)
+            if not crop_coords:
+                continue
+
+            # crop_coords is (x_min, y_min, x_max, y_max) in the padded resized image
+            x_min, y_min, x_max, y_max = crop_coords
+            pad_params_inner = params.get("pad_params")
+
+            # Determine padding offset (content starts at (pad_top, pad_left) in padded space)
+            pad_top = pad_params_inner.get("pad_top", 0) if pad_params_inner else 0
+            pad_left = pad_params_inner.get("pad_left", 0) if pad_params_inner else 0
+
+            # Convert crop coords from padded space to content (resized) space,
+            # clamped to the actual content region [0:resized_h, 0:resized_w]
+            content_y_start = max(y_min - pad_top, 0)
+            content_x_start = max(x_min - pad_left, 0)
+            content_y_end = min(y_max - pad_top, resized_h)
+            content_x_end = min(x_max - pad_left, resized_w)
+
+            # Map content region to original space
+            orig_y_start = round(content_y_start / resized_h * orig_h)
+            orig_y_end   = round(content_y_end   / resized_h * orig_h)
+            orig_x_start = round(content_x_start / resized_w * orig_w)
+            orig_x_end   = round(content_x_end   / resized_w * orig_w)
 
             # Clamp to valid range
-            h_start = max(0, min(h_start, result_coords.shape[0] - 1))
-            w_start = max(0, min(w_start, result_coords.shape[1] - 1))
-            h_end = min(h_start + crop_h, result_coords.shape[0])
-            w_end = min(w_start + crop_w, result_coords.shape[1])
+            orig_y_start = max(0, orig_y_start)
+            orig_y_end   = min(orig_h, orig_y_end)
+            orig_x_start = max(0, orig_x_start)
+            orig_x_end   = min(orig_w, orig_x_end)
 
-            result_coords = result_coords[h_start:h_end, w_start:w_end]
+            result_coords = result_coords[orig_y_start:orig_y_end, orig_x_start:orig_x_end]
             if result_mask is not None:
-                result_mask = result_mask[h_start:h_end, w_start:w_end]
+                result_mask = result_mask[orig_y_start:orig_y_end, orig_x_start:orig_x_end]
 
-        elif "Crop" in t_name and "RandomCrop" not in t_name:
-            # Fixed crop - scale coordinates
-            y_min = int(t.get("y_min", params.get("y_min", 0)) * scale_h)
-            x_min = int(t.get("x_min", params.get("x_min", 0)) * scale_w)
-            y_max = int(t.get("y_max", params.get("y_max", result_coords.shape[0])) * scale_h)
-            x_max = int(t.get("x_max", params.get("x_max", result_coords.shape[1])) * scale_w)
-
-            result_coords = result_coords[y_min:y_max, x_min:x_max]
-            if result_mask is not None:
-                result_mask = result_mask[y_min:y_max, x_min:x_max]
-
-        elif "PadIfNeeded" in t_name:
-            # Scale pad amounts
-            pad_top = int(params.get("pad_top", 0) * scale_h)
-            pad_bottom = int(params.get("pad_bottom", 0) * scale_h)
-            pad_left = int(params.get("pad_left", 0) * scale_w)
-            pad_right = int(params.get("pad_right", 0) * scale_w)
-
-            # Pad coordinates - use 0 for padding (will be masked out)
-            new_h = result_coords.shape[0] + pad_top + pad_bottom
-            new_w = result_coords.shape[1] + pad_left + pad_right
-
-            padded_coords = np.zeros((new_h, new_w, 3), dtype=result_coords.dtype)
-            padded_coords[pad_top:pad_top + result_coords.shape[0],
-                         pad_left:pad_left + result_coords.shape[1]] = result_coords
-            result_coords = padded_coords
-
-            if result_mask is not None:
-                padded_mask = np.zeros((new_h, new_w), dtype=result_mask.dtype)
-                padded_mask[pad_top:pad_top + result_mask.shape[0],
-                           pad_left:pad_left + result_mask.shape[1]] = result_mask
-                result_mask = padded_mask
+            # Update dimensions for any subsequent transforms
+            orig_h = result_coords.shape[0]
+            orig_w = result_coords.shape[1]
 
     eval_shape = (result_coords.shape[0], result_coords.shape[1])
     return result_coords, result_mask, eval_shape
@@ -488,8 +651,8 @@ def map_points_to_right_hemisphere(
     need_mirror = (template_points_index_space[:, :, 0] < template_parameters.shape[0] / 2).all()
     if os.environ.get('LOG_LEVEL') == 'DEBUG':
         logger.debug(
-            f"ML index mean: {template_points[:, :, 0].mean():.1f}, "
-            f"ML index range: {template_points[:, :, 0].min():.1f} - {template_points[:, :, 0].max():.1f} "
+            f"ML index mean: {template_points_index_space[:, :, 0].mean():.1f}, "
+            f"ML index range: {template_points_index_space[:, :, 0].min():.1f} - {template_points_index_space[:, :, 0].max():.1f} "
             f"midpoint: {template_parameters.shape[0] / 2:.1f}, "
             f"need_mirror: {need_mirror}")
     if need_mirror:

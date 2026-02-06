@@ -1,5 +1,4 @@
 import os
-import random
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
@@ -18,10 +17,10 @@ from torch.utils.data import IterableDataset, get_worker_info
 from deep_ccf_registration.datasets.aquisition_meta import AcquisitionDirection
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.datasets.transforms import map_points_to_right_hemisphere, \
-    apply_crop_pad_to_original
+    apply_crop_pad_to_original, get_subject_rotation_range
 from deep_ccf_registration.datasets.utils.template_points import transform_points_to_template_space, apply_transforms_to_points, Affine
 from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, TissueBoundingBoxes, \
-    AcquisitionAxis
+    AcquisitionAxis, RotationAngles, SubjectRotationAngle
 from deep_ccf_registration.utils.logging_utils import timed, timed_func
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 
@@ -70,6 +69,12 @@ class SliceSampleSpec:
     slice_idx: int
     orientation: SliceOrientation
 
+@dataclass
+class SliceRotationRanges:
+    x: tuple[float, float] = (0, 0)
+    y: tuple[float, float] = (0, 0)
+    z: tuple[float, float] = (0, 0)
+
 class IterableSubjectSliceDataset(IterableDataset):
     """Iterable dataset that generates slices on-the-fly from a generator function."""
 
@@ -80,6 +85,7 @@ class IterableSubjectSliceDataset(IterableDataset):
         tensorstore_aws_credentials_method: str,
         is_train: bool,
         tissue_bboxes: TissueBoundingBoxes,
+        rotation_angles: RotationAngles,
         crop_size: Optional[tuple[int, int]] = None,
         registration_downsample_factor: int = 3,
         transform: Optional[callable] = None,
@@ -107,6 +113,7 @@ class IterableSubjectSliceDataset(IterableDataset):
         self._is_train = is_train
         self._scratch_path = scratch_path
         self._rotate_slices = rotate_slices
+        self._rotation_angles = rotation_angles
 
     def __iter__(self) -> Iterator[PatchSample]:
         for spec in self._slice_generator():
@@ -169,6 +176,7 @@ class IterableSubjectSliceDataset(IterableDataset):
             patch_width=patch_width,
             experiment_meta=metadata,
         )
+
         template_patch = map_points_to_right_hemisphere(
             template_points=template_patch,
             template_parameters=self._template_parameters,
@@ -199,6 +207,7 @@ class IterableSubjectSliceDataset(IterableDataset):
                 slice_axis=slice_axis,
                 acquisition_axes=metadata.axes,
                 orientation=spec.orientation,
+                subject_rotation=self._rotation_angles.rotation_angles[metadata.subject_id]
             )
             data_patch = transforms["image"]
             template_patch = transforms["template_coords"]
@@ -226,11 +235,12 @@ class IterableSubjectSliceDataset(IterableDataset):
                     params = t.get("params", {})
                 if "pad_params" in params:
                     pad_params = t["params"]["pad_params"]
-                    pad_top = pad_params.get("pad_top", 0)
-                    pad_bottom = pad_params.get("pad_bottom", 0)
-                    pad_left = pad_params.get("pad_left", 0)
-                    pad_right = pad_params.get("pad_right", 0)
-                    break
+                    if pad_params is not None:
+                        pad_top = pad_params.get("pad_top", 0)
+                        pad_bottom = pad_params.get("pad_bottom", 0)
+                        pad_left = pad_params.get("pad_left", 0)
+                        pad_right = pad_params.get("pad_right", 0)
+                        break
 
         worker_ctx = self._worker_context()
 
@@ -316,8 +326,8 @@ class IterableSubjectSliceDataset(IterableDataset):
                     h = int(round(h * scale))
                     w = int(round(w * scale))
 
-            elif "RandomCrop" in t_name or ("Crop" in t_name and "RandomCrop" not in t_name):
-                # Stop at crop - we want the shape right before crop
+            elif "RandomCrop" in t_name or ("Crop" in t_name and "CropToMaskBBox" not in t_name):
+                # Stop at final crop - we want the shape right before crop
                 break
 
         return (h, w)
@@ -401,7 +411,7 @@ class IterableSubjectSliceDataset(IterableDataset):
         if self._rotate_slices:
             if orientation is None:
                 raise ValueError('provide orientation')
-            slice_rotation_ranges = get_slice_rotation_ranges(
+            slice_rotation_ranges = self._get_slice_rotation_ranges(
                 metadata=experiment_meta,
                 orientation=orientation
             )
@@ -456,6 +466,56 @@ class IterableSubjectSliceDataset(IterableDataset):
             )
         return points
 
+    def _get_slice_rotation_ranges(
+        self,
+        metadata: SubjectMetadata,
+        orientation: SliceOrientation
+    ) -> SliceRotationRanges:
+        # want to limit rotation range to typical range. Since subject already rotated relative
+        # to template, we don't want to over rotate, so we limit based on subject rotation and
+        # typical alignment rotation ranges
+        subject_rotation: SubjectRotationAngle = self._rotation_angles.rotation_angles[metadata.subject_id]
+        AP_rot_range = get_subject_rotation_range(
+            subject_angle=subject_rotation.AP_rot,
+            valid_range=self._rotation_angles.AP_range
+        )
+        SI_rot_range = get_subject_rotation_range(
+            subject_angle=subject_rotation.SI_rot,
+            valid_range=self._rotation_angles.SI_range
+        )
+        ML_rot_range = get_subject_rotation_range(
+            subject_angle=subject_rotation.ML_rot,
+            valid_range=self._rotation_angles.ML_range
+        )
+
+        axes = sorted(metadata.axes, key=lambda x: x.dimension)
+        slice_axis = metadata.get_slice_axis(orientation=orientation)
+        y_axis, x_axis = [axes[i] for i in range(3) if i != slice_axis.dimension]
+
+        if orientation == SliceOrientation.SAGITTAL:
+            direction_to_range = {
+                AcquisitionDirection.SUPERIOR_TO_INFERIOR: SI_rot_range,
+                AcquisitionDirection.INFERIOR_TO_SUPERIOR: SI_rot_range,
+                AcquisitionDirection.ANTERIOR_TO_POSTERIOR: AP_rot_range,
+                AcquisitionDirection.POSTERIOR_TO_ANTERIOR: AP_rot_range,
+            }
+
+            if y_axis.direction not in direction_to_range:
+                raise ValueError(f'unexpected direction for y axis {y_axis.direction}')
+            if x_axis.direction not in direction_to_range:
+                raise ValueError(f'unexpected direction for x axis {x_axis.direction}')
+
+            y_rot_range = direction_to_range[y_axis.direction]
+            x_rot_range = direction_to_range[x_axis.direction]
+            z_rot_range = ML_rot_range
+        else:
+            raise NotImplementedError(f'{orientation} not supported')
+
+        return SliceRotationRanges(
+            x=x_rot_range,
+            y=y_rot_range,
+            z=z_rot_range,
+        )
 
 def _get_tissue_mask(
     annotations: np.ndarray,
@@ -512,6 +572,7 @@ def _extract_rotated_coords(
     Returns:
         Coordinate array of shape (n_points, 3) in volume coordinates.
     """
+    logger.debug(f'rotating slice with y_rot={y_rot:.3f}, x_rot={x_rot:.3f}, width={width}, height={height}')
     center_of_rotation = (
         start_yx[0] + height / 2,
         start_yx[1] + width / 2,
@@ -540,12 +601,6 @@ def _extract_rotated_coords(
     coords[:, in_plane_axes[1]] = inplane_1_coords
 
     return coords
-
-@dataclass
-class SliceRotationRanges:
-    x: tuple[int, int] = (0, 0)
-    y: tuple[int, int] = (0, 0)
-    z: tuple[int, int] = (0, 0)
 
 
 def compute_bounded_rotation_ranges(
@@ -603,39 +658,3 @@ def compute_bounded_rotation_ranges(
     bounded_y = scale_range(desired_y_rot_range, max_abs_y_bounded)
 
     return bounded_x, bounded_y
-
-
-def get_slice_rotation_ranges(metadata: SubjectMetadata, orientation: SliceOrientation) -> SliceRotationRanges:
-        # these were obtained from the data as typical ranges
-        AP_rot_range = (-20, 20)
-        SI_rot_range = (-10, 10)
-        ML_rot_range = (-20, 20)
-
-        axes = sorted(metadata.axes, key=lambda x: x.dimension)
-        slice_axis = metadata.get_slice_axis(orientation=orientation)
-        y_axis, x_axis = [axes[i] for i in range(3) if i != slice_axis.dimension]
-
-        if orientation == SliceOrientation.SAGITTAL:
-            direction_to_range = {
-                AcquisitionDirection.SUPERIOR_TO_INFERIOR: SI_rot_range,
-                AcquisitionDirection.INFERIOR_TO_SUPERIOR: SI_rot_range,
-                AcquisitionDirection.ANTERIOR_TO_POSTERIOR: AP_rot_range,
-                AcquisitionDirection.POSTERIOR_TO_ANTERIOR: AP_rot_range,
-            }
-
-            if y_axis.direction not in direction_to_range:
-                raise ValueError(f'unexpected direction for y axis {y_axis.direction}')
-            if x_axis.direction not in direction_to_range:
-                raise ValueError(f'unexpected direction for x axis {x_axis.direction}')
-
-            y_rot_range = direction_to_range[y_axis.direction]
-            x_rot_range = direction_to_range[x_axis.direction]
-            z_rot_range = ML_rot_range
-        else:
-            raise NotImplementedError(f'{orientation} not supported')
-
-        return SliceRotationRanges(
-            x=x_rot_range,
-            y=y_rot_range,
-            z=z_rot_range,
-        )

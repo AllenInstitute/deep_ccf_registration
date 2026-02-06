@@ -1,18 +1,29 @@
 import json
+import os
+import sys
 
 import ants
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 from aind_smartspim_transform_utils.utils.utils import convert_from_ants_space
+from loguru import logger
 
 from deep_ccf_registration.configs.train_config import TrainConfig
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
-from deep_ccf_registration.metadata import SubjectMetadata, TissueBoundingBoxes
+from deep_ccf_registration.metadata import SubjectMetadata, TissueBoundingBoxes, RotationAngles, \
+    SubjectRotationAngle
 from deep_ccf_registration.run import create_dataloader
 
 
-def main():
+logger.remove()
+log_level = os.getenv("LOG_LEVEL", "INFO").upper()
+logger.add(sys.stderr, level=log_level)
+
+
+
+def main(resample_to_fixed_resolution: int = None):
     with open('/Users/adam.amster/smartspim-registration/dataset_meta-test.json') as f:
         meta = json.load(f)
     meta = [SubjectMetadata(**x) for x in meta]
@@ -36,11 +47,33 @@ def main():
     )
     ccf_annotations = ants.image_read(str(config.ccf_annotations_path)).numpy()
 
-    config.apply_square_symmetry_transform = False
-    config.rotate_slices = False
+    with open(config.rotation_angles_path) as f:
+        rotation_angles = pd.read_csv(f).set_index('subject_id')
+    rotation_angles = RotationAngles(
+        rotation_angles={x.Index: SubjectRotationAngle(AP_rot=x.AP_rotation, ML_rot=x.ML_rotation, SI_rot=x.SI_rotation) for x in rotation_angles.itertuples(index=True)},
+        SI_range=(
+            rotation_angles['SI_rotation'].mean() - rotation_angles['SI_rotation'].std()*2,
+            rotation_angles['SI_rotation'].mean() + rotation_angles['SI_rotation'].std()*2
+        ),
+        ML_range=(
+            rotation_angles['ML_rotation'].mean() - rotation_angles['ML_rotation'].std()*2,
+            rotation_angles['ML_rotation'].mean() + rotation_angles['ML_rotation'].std()*2
+        ),
+        AP_range=(
+            rotation_angles['AP_rotation'].mean() - rotation_angles['AP_rotation'].std()*2,
+            rotation_angles['AP_rotation'].mean() + rotation_angles['AP_rotation'].std()*2
+        ),
+    )
+
+    config.data_augmentation.apply_square_symmetry_transform = False
+    config.data_augmentation.rotate_slices = False
     config.normalize_template_points = False
-    config.pad_if_needed = False
+    config.data_augmentation.apply_grid_distortion = False
     config.seed = None
+    config.debug_slice_idx = 300
+
+    config.patch_size = (512, 512)
+    config.resample_to_fixed_resolution = resample_to_fixed_resolution
 
     dataloader = create_dataloader(
         metadata=meta,
@@ -52,6 +85,8 @@ def main():
         num_workers=0,
         device='cpu',
         ccf_annotations=ccf_annotations,
+        rotation_angles=rotation_angles,
+        include_tissue_mask=config.predict_tissue_mask
     )
 
     fig = plt.figure(figsize=(20, 10))
@@ -68,8 +103,9 @@ def main():
 
     for i in range(6):
         if i == 1:
-            config.rotate_slices = True
-            config.apply_square_symmetry_transform = False
+            config.data_augmentation.rotate_slices = True
+            config.data_augmentation.apply_square_symmetry_transform = True
+            config.data_augmentation.apply_grid_distortion = True
 
             dataloader = create_dataloader(
                 metadata=meta,
@@ -81,6 +117,8 @@ def main():
                 num_workers=0,
                 device='cpu',
                 ccf_annotations=ccf_annotations,
+                rotation_angles=rotation_angles,
+                include_tissue_mask=config.predict_tissue_mask,
             )
 
         batch = next(iter(dataloader))
@@ -88,10 +126,21 @@ def main():
         ax1[i].axis('off')
 
         template_points = batch["target_template_points"][0]
+
         gt_template_points_index_space = convert_from_ants_space(
             template_parameters=ls_template_parameters,
             physical_pts=template_points.permute((1, 2, 0)).view(-1,3).numpy()
         )
+
+        logger.info(f'ML range: {gt_template_points_index_space[:, 0].min():.3f}-{gt_template_points_index_space[:, 0].max():.3f}')
+
+
+        tissue_mask = batch['tissue_masks'][0]
+
+        Y, X = np.meshgrid(np.arange(template_points.shape[1]),
+                           np.arange(template_points.shape[2]),
+                           indexing='ij')
+        ax1[i].contour(X, Y, tissue_mask, levels=[0.5], colors='yellow', linewidths=2)
 
         ML_axis, AP_axis, SI_axis = 0, 1, 2
 
@@ -121,4 +170,4 @@ def main():
     plt.show()
 
 if __name__ == '__main__':
-    main()
+    main(resample_to_fixed_resolution=30)

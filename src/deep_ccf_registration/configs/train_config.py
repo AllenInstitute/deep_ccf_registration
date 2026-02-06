@@ -25,6 +25,12 @@ class ModelConfig(BaseModel):
     positional_embedding_placement: Optional[PositionalEmbeddingPlacement] = None
     coord_head_channels: tuple[int, ...]
 
+class DataAugmentationConfig(BaseModel):
+    # extract rotated slices
+    rotate_slices: bool = False
+    apply_square_symmetry_transform: bool = False
+    apply_grid_distortion: bool = False
+
 class TrainConfig(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
@@ -36,10 +42,7 @@ class TrainConfig(BaseModel):
     orientation: Optional[SliceOrientation] = None
     registration_downsample_factor: int = 3
     tensorstore_aws_credentials_method: str = "default"
-    patch_size: Optional[tuple[int, int]] = None
-
-    # downsample input image and target points so that longest max size is this
-    longest_max_size: Optional[int] = None
+    patch_size: tuple[int, int]
 
     # make all input images range from [0, 1] using lower and upper percentiles as thresholds
     normalize_input_image: bool = True
@@ -50,7 +53,6 @@ class TrainConfig(BaseModel):
     exclude_background_pixels: bool = False
     predict_tissue_mask: bool = True
     dataloader_prefetch_factor: Optional[int] = None
-    apply_square_symmetry_transform: bool = False
 
     load_checkpoint: Optional[Path] = None
     # MLflow run ID to resume (for spot instance recovery)
@@ -81,6 +83,10 @@ class TrainConfig(BaseModel):
     # TODO handle different orientations. Currently only sagittal
     tissue_bounding_boxes_path: Path
 
+    # path to rotation angles to align input to template calculated from affine matrix
+    # conforms to _SubjectRotationAngle
+    rotation_angles_path: Path
+
     mlflow_experiment_name: str = "slice_registration"
     mlflow_tracking_uri: Optional[str] = None
     use_mlflow: bool = True
@@ -95,19 +101,16 @@ class TrainConfig(BaseModel):
     # Learning rate warmup steps. Linearly ramps LR from 0 to learning_rate over this many steps.
     warmup_steps: int = 0
 
-    # extract rotated slices
-    rotate_slices: bool = False
-
     use_positional_encoding: bool = False
     gradient_accumulation_steps: int = 1
 
     # microns/px to resample to
     resample_to_fixed_resolution: Optional[int] = None
-    pad_dim: int = 512
-    pad_if_needed: bool = True
     epoch_subject_slice_fraction: float = 1.0
-    debug_start_y: Optional[int] = 0
-    debug_start_x: Optional[int] = 0
+    debug_start_y: Optional[int] = None
+    debug_start_x: Optional[int] = None
     debug_slice_idx: Optional[int] = None
 
     tmp_path: Path = Path('/tmp')
+
+    data_augmentation: DataAugmentationConfig

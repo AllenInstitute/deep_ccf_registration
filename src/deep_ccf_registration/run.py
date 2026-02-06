@@ -4,11 +4,11 @@ import sys
 import tempfile
 from importlib.metadata import distribution
 from pathlib import Path
-from typing import Optional
 
 import click
 import mlflow
 import numpy as np
+import pandas as pd
 import torch
 import torch.distributed as dist
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
@@ -28,13 +28,15 @@ from deep_ccf_registration.datasets.iterable_slice_dataset import (
 from deep_ccf_registration.datasets.subject_slice_sampler import SubjectSliceSampler
 from deep_ccf_registration.datasets.transforms import build_transform
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
-from deep_ccf_registration.metadata import SubjectMetadata, TissueBoundingBoxes
+from deep_ccf_registration.metadata import SubjectMetadata, TissueBoundingBoxes, RotationAngles, \
+    SubjectRotationAngle
 from deep_ccf_registration.models import UNetWithRegressionHeads
 from deep_ccf_registration.train import train
 
 def create_dataloader(
     metadata: list[SubjectMetadata],
     tissue_bboxes: TissueBoundingBoxes,
+    rotation_angles: RotationAngles,
     config: TrainConfig,
     is_train: bool,
     batch_size: int,
@@ -60,12 +62,12 @@ def create_dataloader(
     transform = build_transform(
         config=config,
         template_parameters=template_parameters,
-        square_symmetry=is_train and config.apply_square_symmetry_transform,
+        square_symmetry=is_train and config.data_augmentation.apply_square_symmetry_transform,
         resample_to_fixed_resolution=config.resample_to_fixed_resolution is not None,
-        rotate_slices=config.rotate_slices and is_train,
+        rotate_slices=config.data_augmentation.rotate_slices and is_train,
         normalize_template_points=config.normalize_template_points,
-        longest_max_size=config.longest_max_size is not None,
-        pad_if_needed=config.pad_if_needed,
+        apply_grid_distortion=config.data_augmentation.apply_grid_distortion,
+        rotation_angles=rotation_angles,
     )
 
     sampler = SubjectSliceSampler(
@@ -88,13 +90,14 @@ def create_dataloader(
         tensorstore_aws_credentials_method=config.tensorstore_aws_credentials_method,
         is_train=is_train,
         tissue_bboxes=tissue_bboxes,
+        rotation_angles=rotation_angles,
         crop_size=config.patch_size,
         registration_downsample_factor=config.registration_downsample_factor,
         transform=transform,
         include_tissue_mask=include_tissue_mask,
         ccf_annotations=ccf_annotations,
         scratch_path=config.tmp_path,
-        rotate_slices=config.rotate_slices,
+        rotate_slices=config.data_augmentation.rotate_slices,
     )
 
     dataloader = DataLoader(
@@ -271,10 +274,28 @@ def main(config_path: Path):
         tissue_bboxes = json.load(f)
     tissue_bboxes = TissueBoundingBoxes(bounding_boxes=tissue_bboxes)
 
+    with open(config.rotation_angles_path) as f:
+        rotation_angles = pd.read_csv(f).set_index('subject_id')
+    rotation_angles = RotationAngles(
+        rotation_angles={x.Index: SubjectRotationAngle(AP_rot=x.AP_rotation, ML_rot=x.ML_rotation, SI_rot=x.SI_rotation) for x in rotation_angles.itertuples(index=True)},
+        SI_range=(
+            rotation_angles['SI_rotation'].mean() - rotation_angles['SI_rotation'].std()*2,
+            rotation_angles['SI_rotation'].mean() + rotation_angles['SI_rotation'].std()*2
+        ),
+        ML_range=(
+            rotation_angles['ML_rotation'].mean() - rotation_angles['ML_rotation'].std()*2,
+            rotation_angles['ML_rotation'].mean() + rotation_angles['ML_rotation'].std()*2
+        ),
+        AP_range=(
+            rotation_angles['AP_rotation'].mean() - rotation_angles['AP_rotation'].std()*2,
+            rotation_angles['AP_rotation'].mean() + rotation_angles['AP_rotation'].std()*2
+        ),
+    )
 
     train_dataloader = create_dataloader(
         metadata=train_metadata,
         tissue_bboxes=tissue_bboxes,
+        rotation_angles=rotation_angles,
         config=config,
         batch_size=config.batch_size,
         num_workers=config.num_workers,
@@ -295,6 +316,7 @@ def main(config_path: Path):
         ccf_annotations=ccf_annotations,
         include_tissue_mask=config.predict_tissue_mask,
         device=device,
+        rotation_angles=rotation_angles,
     )
 
     logger.info(f"Train subjects: {len(train_metadata)}")
@@ -309,7 +331,7 @@ def main(config_path: Path):
         include_tissue_mask=config.predict_tissue_mask,
         use_positional_encoding=config.use_positional_encoding,
         feature_channels=config.model.feature_channels,
-        input_dims=(config.pad_dim, config.pad_dim),
+        input_dims=config.patch_size,
         pos_encoding_channels=config.model.pos_encoding_channels,
         positional_embedding_type=config.model.positional_embedding_type,
         positional_embedding_placement=config.model.positional_embedding_placement,
