@@ -499,7 +499,7 @@ def build_transform(
 
     if rotate_slices:
         transforms.append(Rotate(rotation_angles=rotation_angles, border_mode=cv2.BORDER_REPLICATE))
-        transforms.append(CropToMaskBBox())
+        #transforms.append(CropToMaskBBox())
 
     if square_symmetry:
         transforms.append(SquareSymmetry())
