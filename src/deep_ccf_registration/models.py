@@ -1,7 +1,7 @@
 from enum import Enum
-from typing import Optional
+from typing import Optional, Union
 
-import monai.networks.nets
+import segmentation_models_pytorch
 import torch
 import torch.nn as nn
 
@@ -49,35 +49,38 @@ class UNetWithRegressionHeads(nn.Module):
         self,
         input_dims: tuple[int, int],
         coord_head_channels: tuple[int, ...],
-        spatial_dims: int = 2,
         in_channels: int = 1,
         feature_channels: int = 64,
-        dropout: float = 0.0,
-        channels: tuple[int, ...] = (32, 64, 128, 256, 512, 1024),
-        strides: tuple[int, ...] = (2, 2, 2, 2, 2, 2),
         out_coords: int = 3,
         include_tissue_mask: bool = False,
         use_positional_encoding: bool = False,
         pos_encoding_channels: Optional[int] = None,
         positional_embedding_type: Optional[PositionalEmbeddingType] = None,
         positional_embedding_placement: Optional[PositionalEmbeddingPlacement] = None,
+        encoder_name: str = "resnet34",
+        encoder_weights: Optional[str] = "imagenet",
+        encoder_depth: int = 5,
+        decoder_channels: tuple[int, ...] = (256, 128, 64, 32, 16),
+        decoder_use_norm: Union[bool, str] = "batchnorm",
     ):
         """
         Parameters
         ----------
-        spatial_dims: Number of spatial dimensions (2 for 2D slices)
+        input_dims: (height, width) of input images
+        coord_head_channels: Channel sizes for coordinate regression head layers
         in_channels: Number of input channels (1 for grayscale images)
         feature_channels: Number of feature channels output by UNet backbone
-        dropout: Dropout rate for UNet
-        channels: List of channel sizes for UNet encoder/decoder
-        strides: List of stride sizes for UNet encoder/decoder
         out_coords: Number of output coordinate channels (3 for ML, DV, AP)
         include_tissue_mask: Whether to include tissue mask head
-        head_size: Size of regression head - "small", "medium", or "large"
-        use_positional_encoding: Whether to use learned positional encoding
-        pos_encoding_channels: Number of channels for positional encoding
-        image_height: Height of input images (required if use_positional_encoding=True)
-        image_width: Width of input images (required if use_positional_encoding=True)
+        use_positional_encoding: Whether to use positional encoding
+        pos_encoding_channels: Number of channels for learned positional encoding
+        positional_embedding_type: Type of positional embedding (LEARNED or COORD_CONV)
+        positional_embedding_placement: Where to apply positional embedding (EARLY or LATE)
+        encoder_name: SMP encoder backbone name (e.g. 'resnet34', 'resnet50')
+        encoder_weights: Pretrained weights for encoder (e.g. 'imagenet', None)
+        encoder_depth: Number of stages in encoder (default 5)
+        decoder_channels: Number of channels in each decoder stage
+        decoder_use_norm: Normalization in decoder (True, False, or 'batchnorm')
         """
         super().__init__()
 
@@ -115,14 +118,14 @@ class UNetWithRegressionHeads(nn.Module):
                 else:
                     coord_head_input_channels += pos_encoding_channels
 
-        # UNet backbone for feature extraction
-        self.unet_backbone = monai.networks.nets.UNet(
-            spatial_dims=spatial_dims,
+        self.feature_extractor_backbone = segmentation_models_pytorch.Unet(
+            encoder_name=encoder_name,
+            encoder_weights=encoder_weights,
+            encoder_depth=encoder_depth,
+            decoder_channels=decoder_channels,
+            decoder_use_norm=decoder_use_norm,
             in_channels=in_channels,
-            out_channels=coord_feature_channels+tissue_mask_channels,
-            dropout=dropout,
-            channels=channels,
-            strides=strides,
+            classes=coord_feature_channels + tissue_mask_channels,
         )
 
         layers = []
@@ -166,7 +169,7 @@ class UNetWithRegressionHeads(nn.Module):
             pos_encoding = None
 
         # Extract features from UNet backbone
-        features = self.unet_backbone(x)
+        features = self.feature_extractor_backbone(x)
 
         if self.include_tissue_mask:
             coord_features, mask_logits = features[:, :-1], features[:, -1].unsqueeze(1)

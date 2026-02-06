@@ -1,7 +1,7 @@
 from enum import Enum
 
-from pydantic import BaseModel, Field, ConfigDict
-from typing import Optional, Literal
+from pydantic import BaseModel, Field, ConfigDict, model_validator
+from typing import Optional, Literal, Union
 from pathlib import Path
 
 from deep_ccf_registration.metadata import SliceOrientation
@@ -16,14 +16,27 @@ class LRScheduler(Enum):
 class ModelConfig(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
-    # number of channels in each layer of the unet in the encoder
-    unet_channels: tuple[int, ...]
-    unet_stride: tuple[int, ...]
+    # SMP Unet backbone configuration
+    encoder_name: str = "resnet34"
+    encoder_weights: Optional[str] = "imagenet"
+    encoder_depth: int = 5
+    decoder_channels: tuple[int, ...] = (256, 128, 64, 32, 16)
+    decoder_use_norm: Union[bool, str] = "batchnorm"
+
     feature_channels: int = 64
     pos_encoding_channels: int = 16
     positional_embedding_type: Optional[PositionalEmbeddingType] = None
     positional_embedding_placement: Optional[PositionalEmbeddingPlacement] = None
     coord_head_channels: tuple[int, ...]
+
+    @model_validator(mode='after')
+    def validate_decoder_channels_length(self):
+        if len(self.decoder_channels) != self.encoder_depth:
+            raise ValueError(
+                f"decoder_channels length ({len(self.decoder_channels)}) "
+                f"must equal encoder_depth ({self.encoder_depth})"
+            )
+        return self
 
 class DataAugmentationConfig(BaseModel):
     # extract rotated slices

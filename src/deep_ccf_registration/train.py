@@ -10,7 +10,7 @@ import pandas as pd
 import torch
 from matplotlib import pyplot as plt
 from monai.metrics import DiceMetric
-from monai.networks.nets import UNet
+from segmentation_models_pytorch import Unet
 from torch import nn
 import torch.nn.functional as F
 
@@ -376,7 +376,7 @@ def _resize_pad_masks_from_sizes(
 def train(
         train_dataloader: Iterator,
         val_dataloader: Iterator,
-        model: UNet,
+        model: Unet,
         optimizer,
         max_iters: int,
         model_weights_out_dir: Path,

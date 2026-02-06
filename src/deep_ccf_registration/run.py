@@ -323,10 +323,7 @@ def main(config_path: Path):
     logger.info(f"Val subjects: {len(val_metadata)}")
 
     model = UNetWithRegressionHeads(
-        spatial_dims=2,
         in_channels=1,
-        channels=config.model.unet_channels,
-        strides=config.model.unet_stride,
         out_coords=3,
         include_tissue_mask=config.predict_tissue_mask,
         use_positional_encoding=config.use_positional_encoding,
@@ -336,6 +333,11 @@ def main(config_path: Path):
         positional_embedding_type=config.model.positional_embedding_type,
         positional_embedding_placement=config.model.positional_embedding_placement,
         coord_head_channels=config.model.coord_head_channels,
+        encoder_name=config.model.encoder_name,
+        encoder_weights=config.model.encoder_weights,
+        encoder_depth=config.model.encoder_depth,
+        decoder_channels=config.model.decoder_channels,
+        decoder_use_norm=config.model.decoder_use_norm,
     )
 
     if is_main_process():

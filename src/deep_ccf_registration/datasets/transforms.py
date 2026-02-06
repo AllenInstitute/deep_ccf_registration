@@ -5,6 +5,7 @@ import albumentations
 import cv2
 import numpy as np
 import torch
+from albumentations import Normalize
 from loguru import logger
 from skimage.exposure import rescale_intensity
 
@@ -518,7 +519,6 @@ def build_transform(
             shape=template_parameters.shape
         ))
 
-
     if config.debug and (config.debug_start_y is not None and config.debug_start_x is not None):
         transforms.append(Crop(
             y_min=config.debug_start_y,
@@ -535,7 +535,6 @@ def build_transform(
             pad_if_needed=True,
             pad_position='top_left'
         ))
-
 
     if len(transforms) > 0:
         return albumentations.ReplayCompose(transforms, seed=config.seed)
