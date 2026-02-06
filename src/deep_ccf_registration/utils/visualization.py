@@ -196,15 +196,15 @@ def viz_sample(
         physical_pts=gt_template_points_masked
     )
 
-    ML_axis, DV_axis, SI_axis = 0, 1, 2
+    ML_axis, AP_axis, SI_axis = 0, 1, 2
 
-    # Template grid for SI-DV plane
+    # Template grid for SI-AP plane
     si_grid = np.arange(ls_template_info.shape[SI_axis])
-    dv_grid = np.arange(ls_template_info.shape[DV_axis])
-    SI, DV = np.meshgrid(si_grid, dv_grid)
+    ap_grid = np.arange(ls_template_info.shape[AP_axis])
+    SI, AP = np.meshgrid(si_grid, ap_grid)
 
     def rasterize(pts, values=intensities):
-        return griddata(pts[:, [SI_axis, DV_axis]], values, (SI, DV), method='linear')
+        return griddata(pts[:, [SI_axis, AP_axis]], values, (SI, AP), method='linear')
 
     # Rasterize both predicted and GT
     predicted_raster = rasterize(pred_template_points_index_space)
@@ -221,48 +221,59 @@ def viz_sample(
     sns.set_style("darkgrid")
 
     # Ground truth registration
-    ax1 = fig.add_subplot(2, 5, 1)
+    ax1 = fig.add_subplot(2, 6, 1)
     ax1.imshow(gt_raster, origin='lower', cmap='gray')
     ax1.set_title('Ground Truth Registration')
     ax1.set_xlabel('SI')
-    ax1.set_ylabel('DV')
+    ax1.set_ylabel('AP')
 
     # Predicted registration
-    ax2 = fig.add_subplot(2, 5, 2)
+    ax2 = fig.add_subplot(2, 6, 2)
     ax2.imshow(predicted_raster, origin='lower', cmap='gray')
     ax2.set_title('Predicted Registration')
     ax2.set_xlabel('SI')
-    ax2.set_ylabel('DV')
+    ax2.set_ylabel('AP')
 
     # Overlay comparison
-    ax3 = fig.add_subplot(2, 5, 3)
+    ax3 = fig.add_subplot(2, 6, 3)
     ax3.imshow(gt_raster, origin='lower', cmap='gray', alpha=0.7)
     ax3.imshow(predicted_raster, origin='lower', cmap='Reds', alpha=0.5)
     ax3.set_title('GT (gray) vs Predicted (red)')
     ax3.set_xlabel('SI')
-    ax3.set_ylabel('DV')
+    ax3.set_ylabel('AP')
 
     # SI displacement component
-    ax5 = fig.add_subplot(2, 5, 4)
+    ax5 = fig.add_subplot(2, 6, 4)
     si_error_image = rasterize(pred_template_points_index_space, values=displacement[:, SI_axis])
     im = ax5.imshow(si_error_image, origin='lower', cmap='RdBu_r',
                     vmin=-np.percentile(np.abs(displacement[:, SI_axis]), 95),
                     vmax=np.percentile(np.abs(displacement[:, SI_axis]), 95))
     ax5.set_title('SI Error')
     ax5.set_xlabel('SI')
-    ax5.set_ylabel('DV')
+    ax5.set_ylabel('AP')
     plt.colorbar(im, ax=ax5, label='SI (microns)')
 
-    # DV displacement component
-    ax6 = fig.add_subplot(2, 5, 5)
-    dv_error_image = rasterize(pred_template_points_index_space, values=displacement[:, DV_axis])
+    # AP displacement component
+    ax6 = fig.add_subplot(2, 6, 5)
+    dv_error_image = rasterize(pred_template_points_index_space, values=displacement[:, AP_axis])
     im = ax6.imshow(dv_error_image, origin='lower', cmap='RdBu_r',
-                    vmin=-np.percentile(np.abs(displacement[:, DV_axis]), 95),
-                    vmax=np.percentile(np.abs(displacement[:, DV_axis]), 95))
-    ax6.set_title('DV Error')
+                    vmin=-np.percentile(np.abs(displacement[:, AP_axis]), 95),
+                    vmax=np.percentile(np.abs(displacement[:, AP_axis]), 95))
+    ax6.set_title('AP Error')
     ax6.set_xlabel('SI')
-    ax6.set_ylabel('DV')
-    plt.colorbar(im, ax=ax6, label='DV (microns)')
+    ax6.set_ylabel('AP')
+    plt.colorbar(im, ax=ax6, label='AP (microns)')
+
+    # ML displacement component
+    ax6 = fig.add_subplot(2, 6, 6)
+    dv_error_image = rasterize(pred_template_points_index_space, values=displacement[:, ML_axis])
+    im = ax6.imshow(dv_error_image, origin='lower', cmap='RdBu_r',
+                    vmin=-np.percentile(np.abs(displacement[:, AP_axis]), 95),
+                    vmax=np.percentile(np.abs(displacement[:, AP_axis]), 95))
+    ax6.set_title('ML Error')
+    ax6.set_xlabel('SI')
+    ax6.set_ylabel('AP')
+    plt.colorbar(im, ax=ax6, label='ML (microns)')
 
     # ===== Row 2 =====
 
@@ -271,64 +282,39 @@ def viz_sample(
     # Use template shape for axis limits
     ml_lim = [0, ls_template_info.shape[ML_axis]]
     si_lim = [0, ls_template_info.shape[SI_axis]]
-    dv_lim = [0, ls_template_info.shape[DV_axis]]
+    ap_lim = [0, ls_template_info.shape[AP_axis]]
 
     # Ground truth 3D
-    ax7 = fig.add_subplot(2, 5, 6, projection='3d')
+    ax7 = fig.add_subplot(2, 6, 7, projection='3d')
     ax7.scatter(gt_template_points_index_space[idx, ML_axis],
                 gt_template_points_index_space[idx, SI_axis],
-                gt_template_points_index_space[idx, DV_axis],
+                gt_template_points_index_space[idx, AP_axis],
                 c=intensities[idx], cmap='gray', s=0.5)
-    ax7.view_init(elev=20, azim=45)
+    ax7.view_init(elev=20, azim=80)
     ax7.set_xlim(ml_lim)
     ax7.set_ylim(si_lim)
-    ax7.set_zlim(dv_lim)
+    ax7.set_zlim(ap_lim)
     ax7.set_xlabel('ML')
     ax7.set_ylabel('SI')
-    ax7.set_zlabel('DV')
-    ax7.set_title('Ground Truth 3D')
-    ax7.set_box_aspect([ls_template_info.shape[ML_axis],
-                        ls_template_info.shape[SI_axis],
-                        ls_template_info.shape[DV_axis]])
+    ax7.set_zlabel('AP')
+    ax7.set_box_aspect([1, 1, 1])
+    ax7.set_title('ground truth')
 
-    # Predicted 3D
-    ax8 = fig.add_subplot(2, 5, 7, projection='3d')
+    # pred
+    ax8 = fig.add_subplot(2, 6, 8, projection='3d')
     ax8.scatter(pred_template_points_index_space[idx, ML_axis],
                 pred_template_points_index_space[idx, SI_axis],
-                pred_template_points_index_space[idx, DV_axis],
+                pred_template_points_index_space[idx, AP_axis],
                 c=intensities[idx], cmap='gray', s=0.5)
-    ax8.view_init(elev=20, azim=45)
+    ax8.view_init(elev=20, azim=80)
     ax8.set_xlim(ml_lim)
     ax8.set_ylim(si_lim)
-    ax8.set_zlim(dv_lim)
+    ax8.set_zlim(ap_lim)
     ax8.set_xlabel('ML')
     ax8.set_ylabel('SI')
-    ax8.set_zlabel('DV')
-    ax8.set_title('Predicted 3D')
-    ax8.set_box_aspect([ls_template_info.shape[ML_axis],
-                        ls_template_info.shape[SI_axis],
-                        ls_template_info.shape[DV_axis]])
-
-    # ML displacement colored 3D
-    ax10 = fig.add_subplot(2, 5, 8, projection='3d')
-    ml_vmax = np.percentile(np.abs(displacement[:, ML_axis]), 95)
-    sc = ax10.scatter(pred_template_points_index_space[idx, ML_axis],
-                      pred_template_points_index_space[idx, SI_axis],
-                      pred_template_points_index_space[idx, DV_axis],
-                      c=displacement[idx, ML_axis],
-                      cmap='RdBu_r', s=0.5, vmin=-ml_vmax, vmax=ml_vmax)
-    ax10.view_init(elev=20, azim=45)
-    ax10.set_xlim(ml_lim)
-    ax10.set_ylim(si_lim)
-    ax10.set_zlim(dv_lim)
-    ax10.set_xlabel('ML')
-    ax10.set_ylabel('SI')
-    ax10.set_zlabel('DV')
-    ax10.set_title('ML Error')
-    ax10.set_box_aspect([ls_template_info.shape[ML_axis],
-                         ls_template_info.shape[SI_axis],
-                         ls_template_info.shape[DV_axis]])
-    plt.colorbar(sc, ax=ax10, label='ML (microns)', shrink=0.5)
+    ax8.set_zlabel('AP')
+    ax8.set_box_aspect([1, 1, 1])
+    ax8.set_title('pred')
 
     # Tissue mask comparison (if enabled)
     if predict_tissue_mask and predicted_tissue_masks is not None:
@@ -348,7 +334,7 @@ def viz_sample(
         gt_mask_2d = tissue_mask.reshape(H, W)
 
         # Difference visualization in input space
-        ax = fig.add_subplot(2, 5, 9)
+        ax = fig.add_subplot(2, 6, 9)
         diff = pred_mask_2d.astype(float) - gt_mask_2d.astype(float)
         diff[~pad_mask.astype('bool')] = np.nan
         im = ax.imshow(diff, cmap='RdBu_r', vmin=-1, vmax=1)
@@ -358,7 +344,7 @@ def viz_sample(
         ax.set_ylabel('Y')
         plt.colorbar(im, ax=ax, label='Pred - GT')
 
-    ax = fig.add_subplot(2, 5, 10)
+    ax = fig.add_subplot(2, 6, 10)
     ax.imshow(input_image, cmap='gray')
 
     plt.tight_layout()
