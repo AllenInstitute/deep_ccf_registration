@@ -142,13 +142,14 @@ def create_diagnostic_image(
     if pred_mask is not None:
         ax_seg = fig.add_subplot(gs[3, 3])
 
-        intersection = (pred_mask & tissue_mask).sum()
-        dice = (2 * intersection) / (pred_mask.sum() + tissue_mask.sum() + 1e-8)
+        valid = pad_mask.astype(bool)
+        intersection = (pred_mask & tissue_mask & valid).sum()
+        dice = (2 * intersection) / ((pred_mask & valid).sum() + (tissue_mask & valid).sum() + 1e-8)
 
         ax_seg.imshow(input_image, cmap='gray')
 
-        false_positive = pred_mask & ~tissue_mask
-        false_negative = ~pred_mask & tissue_mask
+        false_positive = pred_mask & ~tissue_mask & valid
+        false_negative = ~pred_mask & tissue_mask & valid
 
         overlay = np.zeros((*tissue_mask.shape, 4))
         overlay[false_positive] = [1, 0, 0, 0.7]
@@ -316,14 +317,18 @@ def viz_sample(
     ax8.set_box_aspect([1, 1, 1])
     ax8.set_title('pred')
 
+    input_image_no_padding = input_image.copy()
+    input_image_no_padding[~pad_mask.astype('bool')] = np.nan
+
     # Tissue mask comparison (if enabled)
     if predict_tissue_mask and predicted_tissue_masks is not None:
-        # Compute mask metrics
+        # Compute mask metrics (excluding padding)
+        valid = pad_mask.astype(bool)
         gt_mask_binary = tissue_mask > 0.5
         pred_mask_binary = predicted_tissue_masks > 0.5
-        tp = np.sum(gt_mask_binary & pred_mask_binary)
-        fp = np.sum(~gt_mask_binary & pred_mask_binary)
-        fn = np.sum(gt_mask_binary & ~pred_mask_binary)
+        tp = np.sum(gt_mask_binary[valid] & pred_mask_binary[valid])
+        fp = np.sum(~gt_mask_binary[valid] & pred_mask_binary[valid])
+        fn = np.sum(gt_mask_binary[valid] & ~pred_mask_binary[valid])
 
         iou = tp / (tp + fp + fn) if (tp + fp + fn) > 0 else 0
         dice = 2 * tp / (2 * tp + fp + fn) if (2 * tp + fp + fn) > 0 else 0
@@ -334,18 +339,20 @@ def viz_sample(
         gt_mask_2d = tissue_mask.reshape(H, W)
 
         # Difference visualization in input space
-        ax = fig.add_subplot(2, 6, 9)
+        ax_diff = fig.add_subplot(2, 6, 9)
         diff = pred_mask_2d.astype(float) - gt_mask_2d.astype(float)
         diff[~pad_mask.astype('bool')] = np.nan
-        im = ax.imshow(diff, cmap='RdBu_r', vmin=-1, vmax=1)
-        ax.imshow(input_image, cmap='gray', alpha=0.3)
-        ax.set_title(f'Mask Diff (IoU={iou:.3f}, Dice={dice:.3f})')
-        ax.set_xlabel('X')
-        ax.set_ylabel('Y')
-        plt.colorbar(im, ax=ax, label='Pred - GT')
+        im = ax_diff.imshow(diff, cmap='RdBu_r', vmin=-1, vmax=1)
+        ax_diff.imshow(input_image_no_padding, cmap='gray', alpha=0.3)
+        ax_diff.set_title(f'Mask Diff (IoU={iou:.3f}, Dice={dice:.3f})')
+        ax_diff.set_xlabel('X')
+        ax_diff.set_ylabel('Y')
 
     ax = fig.add_subplot(2, 6, 10)
-    ax.imshow(input_image, cmap='gray')
+    ax.imshow(input_image_no_padding, cmap='gray')
+
+    if predict_tissue_mask and predicted_tissue_masks is not None:
+        plt.colorbar(im, ax=ax_diff, label='Pred - GT', fraction=0.046, pad=0.04)
 
     plt.tight_layout()
 

@@ -166,8 +166,21 @@ class GridDistortion(albumentations.GridDistortion):
         targets["template_coords"] = self.apply
         return targets
 
-    def apply(self, img: np.ndarray, **params: Any) -> np.ndarray:
-        transformed = super().apply(img, **params)
+    def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
+        try:
+            return super().get_params_dependent_on_data(params, data)
+        except ZeroDivisionError:
+            logger.warning(
+                f"Skipping GridDistortion due to ZeroDivisionError: "
+                f"image shape={params['shape'][:2]}, "
+                f"subject_id={data.get('subject_id')}, slice_idx={data.get('slice_idx')}"
+            )
+            return {"map_x": None, "map_y": None}
+
+    def apply(self, img: np.ndarray, map_x: np.ndarray | None = None, **params: Any) -> np.ndarray:
+        if map_x is None:
+            return _restore_grayscale_channel_last(img, img)
+        transformed = super().apply(img, map_x=map_x, **params)
         return _restore_grayscale_channel_last(img, transformed)
 
 

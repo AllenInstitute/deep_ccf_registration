@@ -70,7 +70,7 @@ def main(resample_to_fixed_resolution: int = None):
     config.normalize_template_points = False
     config.data_augmentation.apply_grid_distortion = False
     config.seed = None
-    config.debug_slice_idx = 300
+    config.debug_slice_idx = 709
 
     config.patch_size = (512, 512)
     config.resample_to_fixed_resolution = resample_to_fixed_resolution
@@ -104,7 +104,7 @@ def main(resample_to_fixed_resolution: int = None):
     for i in range(6):
         if i == 1:
             config.data_augmentation.rotate_slices = True
-            config.data_augmentation.apply_square_symmetry_transform = True
+            #config.data_augmentation.apply_square_symmetry_transform = True
             config.data_augmentation.apply_grid_distortion = True
 
             dataloader = create_dataloader(
@@ -122,7 +122,10 @@ def main(resample_to_fixed_resolution: int = None):
             )
 
         batch = next(iter(dataloader))
-        ax1[i].imshow(batch['input_images'][0].squeeze(), cmap='gray')
+        img = batch['input_images'][0].squeeze()
+        tissue_mask = batch['tissue_masks'][0]
+
+        ax1[i].imshow(img, cmap='gray')
         ax1[i].axis('off')
 
         template_points = batch["target_template_points"][0]
@@ -133,9 +136,6 @@ def main(resample_to_fixed_resolution: int = None):
         )
 
         logger.info(f'ML range: {gt_template_points_index_space[:, 0].min():.3f}-{gt_template_points_index_space[:, 0].max():.3f}')
-
-
-        tissue_mask = batch['tissue_masks'][0]
 
         Y, X = np.meshgrid(np.arange(template_points.shape[1]),
                            np.arange(template_points.shape[2]),

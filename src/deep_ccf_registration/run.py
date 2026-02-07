@@ -66,7 +66,7 @@ def create_dataloader(
         resample_to_fixed_resolution=config.resample_to_fixed_resolution is not None,
         rotate_slices=config.data_augmentation.rotate_slices and is_train,
         normalize_template_points=config.normalize_template_points,
-        apply_grid_distortion=config.data_augmentation.apply_grid_distortion,
+        apply_grid_distortion=config.data_augmentation.apply_grid_distortion and is_train,
         rotation_angles=rotation_angles,
     )
 
@@ -97,7 +97,7 @@ def create_dataloader(
         include_tissue_mask=include_tissue_mask,
         ccf_annotations=ccf_annotations,
         scratch_path=config.tmp_path,
-        rotate_slices=config.data_augmentation.rotate_slices,
+        rotate_slices=config.data_augmentation.rotate_slices and is_train,
     )
 
     dataloader = DataLoader(

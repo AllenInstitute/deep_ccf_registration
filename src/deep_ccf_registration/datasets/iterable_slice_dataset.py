@@ -146,6 +146,7 @@ class IterableSubjectSliceDataset(IterableDataset):
             slice_axis=slice_axis,
             fixed_index_value=spec.slice_idx,
             orientation=spec.orientation,
+            subject_bboxes=self._tissue_bboxes[metadata.subject_id],
         )
 
         if self._rotate_slices:
@@ -407,7 +408,8 @@ class IterableSubjectSliceDataset(IterableDataset):
         width: int,
         fixed_index_value: int,
         slice_axis: AcquisitionAxis,
-        orientation: Optional[SliceOrientation] = None
+        orientation: Optional[SliceOrientation] = None,
+        subject_bboxes: Optional[list] = None,
 
     ):
         if self._rotate_slices:
@@ -418,13 +420,16 @@ class IterableSubjectSliceDataset(IterableDataset):
                 orientation=orientation
             )
 
-            # Get volume depth and compute bounded rotation ranges
-            volume_depth = self._volume.shape[2 + slice_axis.dimension]
+            # Compute tissue depth range from bounding boxes
+            tissue_slices = [i for i, x in enumerate(subject_bboxes) if x is not None]
+            tissue_min = min(tissue_slices)
+            tissue_max = max(tissue_slices)
             bounded_x_range, bounded_y_range = compute_bounded_rotation_ranges(
                 slice_idx=fixed_index_value,
                 patch_height=height,
                 patch_width=width,
-                volume_depth=volume_depth,
+                tissue_min=tissue_min,
+                tissue_max=tissue_max,
                 desired_x_rot_range=slice_rotation_ranges.x,
                 desired_y_rot_range=slice_rotation_ranges.y,
             )
@@ -609,20 +614,21 @@ def compute_bounded_rotation_ranges(
     slice_idx: int,
     patch_height: int,
     patch_width: int,
-    volume_depth: int,
+    tissue_min: int,
+    tissue_max: int,
     desired_x_rot_range: tuple[float, float],
     desired_y_rot_range: tuple[float, float],
 ) -> tuple[tuple[float, float], tuple[float, float]]:
     """
-    Compute rotation ranges bounded to keep sampled coordinates within volume.
+    Compute rotation ranges bounded to keep sampled coordinates within tissue.
 
     When tilted by angle θ, points at patch edge have slice offset:
         offset = (height/2) * tan(y_rot) + (width/2) * tan(x_rot)
 
     Returns (bounded_x_range, bounded_y_range) in degrees.
     """
-    headroom_low = slice_idx
-    headroom_high = volume_depth - 1 - slice_idx
+    headroom_low = slice_idx - tissue_min
+    headroom_high = tissue_max - slice_idx
 
     half_height = patch_height / 2.0
     half_width = patch_width / 2.0
