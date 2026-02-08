@@ -1,8 +1,7 @@
-import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Iterator, Optional
+from typing import Optional
 
 import ants
 import boto3
@@ -12,7 +11,7 @@ from botocore import UNSIGNED
 from botocore.config import Config
 from loguru import logger
 from scipy.ndimage import map_coordinates
-from torch.utils.data import IterableDataset, get_worker_info
+from torch.utils.data import Dataset
 
 from deep_ccf_registration.datasets.aquisition_meta import AcquisitionDirection
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
@@ -33,7 +32,6 @@ class PatchSample:
     data: np.ndarray
     template_points: Optional[np.ndarray] = None
     dataset_idx: str = ""
-    worker_id: int = -1
     orientation: str = ""
     subject_id: str = ""
     tissue_mask: Optional[np.ndarray] = None
@@ -55,7 +53,6 @@ class PatchSample:
             "data": self.data,
             "template_points": self.template_points,
             "dataset_idx": self.dataset_idx,
-            "worker_id": self.worker_id,
             "orientation": self.orientation,
             "subject_id": self.subject_id,
         }
@@ -75,50 +72,90 @@ class SliceRotationRanges:
     y: tuple[float, float] = (0, 0)
     z: tuple[float, float] = (0, 0)
 
-class IterableSubjectSliceDataset(IterableDataset):
-    """Iterable dataset that generates slices on-the-fly from a generator function."""
+
+class SubjectSliceDataset(Dataset):
+    """Map-style dataset that randomly samples slices from subjects."""
 
     def __init__(
         self,
-        slice_generator: Callable[[], Iterator[SliceSampleSpec]],
+        subjects: list[SubjectMetadata],
         template_parameters: TemplateParameters,
         tensorstore_aws_credentials_method: str,
         is_train: bool,
         tissue_bboxes: TissueBoundingBoxes,
         rotation_angles: RotationAngles,
+        orientations: list[SliceOrientation],
         crop_size: Optional[tuple[int, int]] = None,
         registration_downsample_factor: int = 3,
         transform: Optional[callable] = None,
         include_tissue_mask: bool = False,
         ccf_annotations: Optional[np.ndarray] = None,
         scratch_path: Path = Path('/tmp'),
-        rotate_slices: bool = False
+        rotate_slices: bool = False,
+        is_debug: bool = False,
+        debug_slice_idx: Optional[int] = None,
     ):
         if include_tissue_mask and ccf_annotations is None:
             raise ValueError("include_tissue_mask=True requires ccf_annotations")
 
-        self._slice_generator = slice_generator
+        self._all_subjects = subjects
         self._template_parameters = template_parameters
         self._aws_credentials_method = tensorstore_aws_credentials_method
         self._registration_downsample_factor = registration_downsample_factor
         self._transform = transform
         self._include_tissue_mask = include_tissue_mask
         self._ccf_annotations = ccf_annotations
+        self._orientations = orientations
 
         self._loaded_subject_id: Optional[str] = None
         self._volume: Optional[np.ndarray] = None
         self._warp: Optional[np.ndarray] = None
+        self._cached_affine: Optional[Affine] = None
         self._tissue_bboxes = tissue_bboxes.bounding_boxes
         self._crop_size = crop_size
-        self._is_train = is_train
         self._scratch_path = scratch_path
         self._rotate_slices = rotate_slices
         self._rotation_angles = rotation_angles
 
-    def __iter__(self) -> Iterator[PatchSample]:
-        for spec in self._slice_generator():
-            self._ensure_subject_loaded(spec.metadata)
-            yield self._load_slice(spec=spec)
+        # Precompute valid slices per subject
+        self._valid_slices_cache: dict[str, list[int]] = {}
+        for s in self._all_subjects:
+            bboxes = self._tissue_bboxes[s.subject_id]
+            valid = [i for i, b in enumerate(bboxes) if b is not None]
+            self._valid_slices_cache[s.subject_id] = valid
+
+        # Debug mode: restrict to a single slice per subject
+        if is_debug:
+            for subject_id, valid_slices in self._valid_slices_cache.items():
+                if debug_slice_idx is not None:
+                    if debug_slice_idx in valid_slices:
+                        self._valid_slices_cache[subject_id] = [debug_slice_idx]
+                    else:
+                        # Fall back to middle slice if debug_slice_idx not valid
+                        self._valid_slices_cache[subject_id] = [valid_slices[len(valid_slices) // 2]]
+                else:
+                    # Default debug: use middle slice
+                    self._valid_slices_cache[subject_id] = [valid_slices[len(valid_slices) // 2]]
+
+        # Build flat index mapping for map-style access
+        self._index_map: list[tuple[SubjectMetadata, int, SliceOrientation]] = []
+        for subject in self._all_subjects:
+            valid_slices = self._valid_slices_cache[subject.subject_id]
+            for slice_idx in valid_slices:
+                for orientation in self._orientations:
+                    self._index_map.append((subject, slice_idx, orientation))
+        self._epoch_length = len(self._index_map)
+
+    def __len__(self) -> int:
+        return self._epoch_length
+
+    def __getitem__(self, index: int) -> PatchSample:
+        if index >= len(self._index_map):
+            raise IndexError(f"Index {index} out of range for dataset of size {len(self._index_map)}")
+        subject, slice_idx, orientation = self._index_map[index]
+        self._ensure_subject_loaded(subject)
+        spec = SliceSampleSpec(metadata=subject, slice_idx=slice_idx, orientation=orientation)
+        return self._load_slice(spec=spec)
 
     def _load_slice(self, spec: SliceSampleSpec) -> PatchSample:
         metadata = spec.metadata
@@ -245,8 +282,6 @@ class IterableSubjectSliceDataset(IterableDataset):
                         pad_right = pad_params.get("pad_right", 0)
                         break
 
-        worker_ctx = self._worker_context()
-
         return PatchSample(
             slice_idx=spec.slice_idx,
             start_y=start_y,
@@ -254,7 +289,6 @@ class IterableSubjectSliceDataset(IterableDataset):
             data=data_patch,
             template_points=template_patch,
             dataset_idx=metadata.subject_id,
-            worker_id=worker_ctx.worker_id,
             orientation=spec.orientation.value,
             subject_id=metadata.subject_id,
             tissue_mask=tissue_mask,
@@ -312,14 +346,11 @@ class IterableSubjectSliceDataset(IterableDataset):
             params = t.get("params", {}) or {}
 
             if "Resample" in t_name:
-                # Resample changes shape based on resolution scaling
-                # The output shape is in the params as 'shape'
                 shape = params.get("shape")
                 if shape:
                     h, w = shape[0], shape[1]
 
             elif "LongestMaxSize" in t_name:
-                # LongestMaxSize scales to fit max_size
                 scale = params.get("scale", 1.0)
                 new_h = params.get("height")
                 new_w = params.get("width")
@@ -330,24 +361,9 @@ class IterableSubjectSliceDataset(IterableDataset):
                     w = int(round(w * scale))
 
             elif "Crop" in t_name:
-                # Stop at final crop - we want the shape right before crop
                 break
 
         return (h, w)
-
-    @dataclass(frozen=True)
-    class _WorkerContext:
-        worker_id: int
-        num_workers: int
-
-    def _worker_context(self) -> _WorkerContext:
-        worker_info = get_worker_info()
-        if worker_info is None:
-            return IterableSubjectSliceDataset._WorkerContext(worker_id=0, num_workers=1)
-        return IterableSubjectSliceDataset._WorkerContext(
-            worker_id=worker_info.id,
-            num_workers=worker_info.num_workers,
-        )
 
     def _ensure_subject_loaded(self, metadata: SubjectMetadata):
         subject_id = metadata.subject_id
@@ -356,13 +372,20 @@ class IterableSubjectSliceDataset(IterableDataset):
         logger.debug(f"Loading full volume for subject {subject_id}")
         self._volume = self._load_full_volume(metadata)
         logger.debug(f"Loading warp for subject {subject_id}")
-        warp = self._load_warp(metadata=metadata)
-        # This apparently improves efficiency when map_coordinates is called on each x,y,z offset dimension
-        self._warp = np.ascontiguousarray(warp.transpose(3, 0, 1, 2))
+        self._warp = self._load_warp(metadata=metadata)
         self._cached_affine = Affine.from_ants_file(metadata.ls_to_template_affine_matrix_path)
         self._loaded_subject_id = subject_id
 
     def _load_full_volume(self, metadata: SubjectMetadata) -> np.ndarray:
+        volume_dir = self._scratch_path / 'volumes'
+        volume_dir.mkdir(parents=True, exist_ok=True)
+        npy_path = volume_dir / f'{metadata.subject_id}.npy'
+
+        if npy_path.exists():
+            logger.debug(f'Loading volume from numpy cache: {npy_path}')
+            return np.load(str(npy_path), mmap_mode='r')
+
+        # First time: load from tensorstore
         store = tensorstore.open(
             spec={
                 "driver": "auto",
@@ -373,31 +396,47 @@ class IterableSubjectSliceDataset(IterableDataset):
             },
             read=True,
         ).result()
-        data = store[...].read().result()
-        return np.array(data)
+        data = np.array(store[...].read().result())
+
+        np.save(str(npy_path), data)
+        logger.debug(f'Saved volume numpy cache: {npy_path}')
+
+        return np.load(str(npy_path), mmap_mode='r')
 
     def _load_warp(self, metadata: SubjectMetadata) -> np.ndarray:
         warp_dir = self._scratch_path / 'warps'
-        os.makedirs(warp_dir, exist_ok=True)
+        warp_dir.mkdir(parents=True, exist_ok=True)
 
-        warp_local_path = warp_dir / f'{metadata.subject_id}_{metadata.ls_to_template_inverse_warp_path_original.name}'
-        if warp_local_path.exists():
-            return ants.image_read(str(warp_local_path)).numpy()
+        # Check for .npy cache first (fast path, already transposed)
+        npy_cache_path = warp_dir / f'{metadata.subject_id}_warp.npy'
+        if npy_cache_path.exists():
+            logger.debug(f'Loading warp from numpy cache: {npy_cache_path}')
+            return np.load(str(npy_cache_path))
 
-        logger.debug(
-            f'Copying {metadata.ls_to_template_inverse_warp_path_original} to {warp_local_path}')
-        if str(metadata.ls_to_template_inverse_warp_path_original).startswith('/data/aind_open_data'):
-            s3 = boto3.client(
-                's3',
-                config=Config(signature_version=UNSIGNED),
-                region_name='us-west-2')
-            s3.download_file('aind-open-data',
-                             str(metadata.ls_to_template_inverse_warp_path_original.relative_to('/data/aind_open_data')),
-                             str(warp_local_path))
-        else:
-            shutil.copy(metadata.ls_to_template_inverse_warp_path_original, warp_local_path)
+        # Download/copy NIfTI if needed
+        nifti_local_path = warp_dir / f'{metadata.subject_id}_{metadata.ls_to_template_inverse_warp_path_original.name}'
+        if not nifti_local_path.exists():
+            logger.debug(
+                f'Copying {metadata.ls_to_template_inverse_warp_path_original} to {nifti_local_path}')
+            if str(metadata.ls_to_template_inverse_warp_path_original).startswith('/data/aind_open_data'):
+                s3 = boto3.client(
+                    's3',
+                    config=Config(signature_version=UNSIGNED),
+                    region_name='us-west-2')
+                s3.download_file('aind-open-data',
+                                 str(metadata.ls_to_template_inverse_warp_path_original.relative_to('/data/aind_open_data')),
+                                 str(nifti_local_path))
+            else:
+                shutil.copy(metadata.ls_to_template_inverse_warp_path_original, nifti_local_path)
 
-        return ants.image_read(str(warp_local_path)).numpy()
+        # Read via ANTs, transpose, save as .npy
+        warp_raw = ants.image_read(str(nifti_local_path)).numpy()
+        warp_transposed = np.ascontiguousarray(warp_raw.transpose(3, 0, 1, 2))
+
+        np.save(npy_cache_path, warp_transposed)
+        logger.debug(f'Saved warp numpy cache: {npy_cache_path}')
+
+        return warp_transposed
 
     def _get_coordinate_grid(
         self,
@@ -478,9 +517,6 @@ class IterableSubjectSliceDataset(IterableDataset):
         metadata: SubjectMetadata,
         orientation: SliceOrientation
     ) -> SliceRotationRanges:
-        # want to limit rotation range to typical range. Since subject already rotated relative
-        # to template, we don't want to over rotate, so we limit based on subject rotation and
-        # typical alignment rotation ranges
         subject_rotation: SubjectRotationAngle = self._rotation_angles.rotation_angles[metadata.subject_id]
         AP_rot_range = get_subject_rotation_range(
             subject_angle=subject_rotation.AP_rot,
@@ -523,6 +559,59 @@ class IterableSubjectSliceDataset(IterableDataset):
             y=y_rot_range,
             z=z_rot_range,
         )
+
+
+# Also expose as standalone for tests
+def get_slice_rotation_ranges(
+    metadata: SubjectMetadata,
+    orientation: SliceOrientation,
+    rotation_angles: Optional[RotationAngles] = None,
+) -> SliceRotationRanges:
+    """Standalone version of _get_slice_rotation_ranges for testing.
+
+    When rotation_angles is not provided, uses hardcoded default ranges.
+    """
+    if rotation_angles is None:
+        # Default ranges for testing
+        AP_rot_range = (-10, 10)
+        SI_rot_range = (-10, 10)
+        ML_rot_range = (-10, 10)
+    else:
+        from deep_ccf_registration.datasets.transforms import get_subject_rotation_range as _get_range
+        subject_rotation = rotation_angles.rotation_angles[metadata.subject_id]
+        AP_rot_range = _get_range(subject_angle=subject_rotation.AP_rot, valid_range=rotation_angles.AP_range)
+        SI_rot_range = _get_range(subject_angle=subject_rotation.SI_rot, valid_range=rotation_angles.SI_range)
+        ML_rot_range = _get_range(subject_angle=subject_rotation.ML_rot, valid_range=rotation_angles.ML_range)
+
+    axes = sorted(metadata.axes, key=lambda x: x.dimension)
+    slice_axis = metadata.get_slice_axis(orientation=orientation)
+    y_axis, x_axis = [axes[i] for i in range(3) if i != slice_axis.dimension]
+
+    if orientation == SliceOrientation.SAGITTAL:
+        direction_to_range = {
+            AcquisitionDirection.SUPERIOR_TO_INFERIOR: SI_rot_range,
+            AcquisitionDirection.INFERIOR_TO_SUPERIOR: SI_rot_range,
+            AcquisitionDirection.ANTERIOR_TO_POSTERIOR: AP_rot_range,
+            AcquisitionDirection.POSTERIOR_TO_ANTERIOR: AP_rot_range,
+        }
+
+        if y_axis.direction not in direction_to_range:
+            raise ValueError(f'unexpected direction for y axis {y_axis.direction}')
+        if x_axis.direction not in direction_to_range:
+            raise ValueError(f'unexpected direction for x axis {x_axis.direction}')
+
+        y_rot_range = direction_to_range[y_axis.direction]
+        x_rot_range = direction_to_range[x_axis.direction]
+        z_rot_range = ML_rot_range
+    else:
+        raise NotImplementedError(f'{orientation} not supported')
+
+    return SliceRotationRanges(
+        x=x_rot_range,
+        y=y_rot_range,
+        z=z_rot_range,
+    )
+
 
 def _get_tissue_mask(
     annotations: np.ndarray,
@@ -622,7 +711,7 @@ def compute_bounded_rotation_ranges(
     """
     Compute rotation ranges bounded to keep sampled coordinates within tissue.
 
-    When tilted by angle θ, points at patch edge have slice offset:
+    When tilted by angle theta, points at patch edge have slice offset:
         offset = (height/2) * tan(y_rot) + (width/2) * tan(x_rot)
 
     Returns (bounded_x_range, bounded_y_range) in degrees.

@@ -22,10 +22,7 @@ import random
 
 from deep_ccf_registration.configs.train_config import TrainConfig
 from deep_ccf_registration.datasets.collation import collate_patch_samples
-from deep_ccf_registration.datasets.iterable_slice_dataset import (
-    IterableSubjectSliceDataset,
-)
-from deep_ccf_registration.datasets.subject_slice_sampler import SubjectSliceSampler
+from deep_ccf_registration.datasets.slice_dataset import SubjectSliceDataset
 from deep_ccf_registration.datasets.transforms import build_transform
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.metadata import SubjectMetadata, TissueBoundingBoxes, RotationAngles, \
@@ -47,9 +44,9 @@ def create_dataloader(
     include_tissue_mask: bool = False,
 ):
     """
-    Create a dataloader using IterableSubjectSliceDataset with SubjectSliceSampler.
+    Create a dataloader using SubjectSliceDataset (Map-style).
 
-    Returns an iterator that yields collated batch dicts.
+    Returns a DataLoader that yields collated batch dicts.
     """
     template_parameters = TemplateParameters(
         origin=ls_template_parameters.origin,
@@ -70,27 +67,14 @@ def create_dataloader(
         rotation_angles=rotation_angles,
     )
 
-    sampler = SubjectSliceSampler(
+    dataset = SubjectSliceDataset(
         subjects=metadata,
-        orientations=[config.orientation] if config.orientation is not None else [],
-        slice_fraction=config.epoch_subject_slice_fraction,
-        shuffle_subjects=is_train,
-        shuffle_slices_within_subject=is_train,
-        seed=config.seed,
-        tissue_bboxes=tissue_bboxes,
-        is_debug=config.debug,
-        debug_start_y=config.debug_start_y,
-        debug_start_x=config.debug_start_x,
-        debug_slice_idx=config.debug_slice_idx,
-    )
-
-    dataset = IterableSubjectSliceDataset(
-        slice_generator=sampler,
         template_parameters=template_parameters,
         tensorstore_aws_credentials_method=config.tensorstore_aws_credentials_method,
         is_train=is_train,
         tissue_bboxes=tissue_bboxes,
         rotation_angles=rotation_angles,
+        orientations=[config.orientation] if config.orientation is not None else [],
         crop_size=config.patch_size,
         registration_downsample_factor=config.registration_downsample_factor,
         transform=transform,
@@ -98,11 +82,14 @@ def create_dataloader(
         ccf_annotations=ccf_annotations,
         scratch_path=config.tmp_path,
         rotate_slices=config.data_augmentation.rotate_slices and is_train,
+        is_debug=config.debug,
+        debug_slice_idx=config.debug_slice_idx,
     )
 
     dataloader = DataLoader(
         dataset=dataset,
         batch_size=batch_size,
+        shuffle=True,
         # using 0 workers (main process) for eval,
         # to keep mem usage lower
         num_workers=num_workers if is_train else 0,

@@ -322,18 +322,6 @@ class Resample(albumentations.DualTransform):
         axes = [x for x in axes if x.dimension != slice_axis.dimension]
         scale_y = axes[0].resolution * 2**3 / self._fixed_resolution
         scale_x = axes[1].resolution * 2**3 / self._fixed_resolution
-        h, w = x.shape[:2]
-        new_h = int(round(h * scale_y))
-        new_w = int(round(w * scale_x))
-        if new_h == 0 or new_w == 0:
-            logger.error(
-                f"Resample produced zero-sized output: "
-                f"subject_id={subject_id}, slice_idx={slice_idx}, "
-                f"input shape={x.shape}, scale_x={scale_x:.4f}, scale_y={scale_y:.4f}, "
-                f"new_size=({new_h}, {new_w}), "
-                f"axes resolutions=({axes[0].resolution}, {axes[1].resolution}), "
-                f"fixed_resolution={self._fixed_resolution}"
-            )
         resampled = cv2.resize(x, None, fx=scale_x, fy=scale_y)
         return resampled
 

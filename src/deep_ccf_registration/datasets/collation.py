@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 
-from deep_ccf_registration.datasets.iterable_slice_dataset import PatchSample
+from deep_ccf_registration.datasets.slice_dataset import PatchSample
 
 
 def collate_patch_samples(samples: list[PatchSample]) -> dict:
