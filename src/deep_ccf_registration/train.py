@@ -518,21 +518,23 @@ def train(
         tissue_mask_losses = []
 
         for batch in train_dataloader:
-            # Track epochs and resample at epoch boundaries
-            if train_dataset is not None and batches_per_epoch is not None:
-                if batch_counter > 0 and batch_counter % batches_per_epoch == 0:
-                    train_dataset.resample_slices()
-            batch_counter += 1
+            # Handle subject grouping or slice resampling
+            if train_dataset is not None:
+                # If subject grouping is enabled, switch groups periodically
+                if hasattr(train_dataset, '_subject_group_size') and train_dataset._subject_group_size is not None:
+                    group_switch_counter += 1
+                    if group_switch_counter >= group_switch_interval:
+                        train_dataset.switch_to_next_group()
+                        group_switch_counter = 0
+                        # Update batch count since dataset size changed
+                        batches_per_epoch = len(train_dataloader) if hasattr(train_dataloader, '__len__') else None
+                        group_switch_interval = batches_per_epoch if batches_per_epoch is not None else 1000
+                # Otherwise, use regular slice resampling
+                elif batches_per_epoch is not None:
+                    if batch_counter > 0 and batch_counter % batches_per_epoch == 0:
+                        train_dataset.resample_slices()
 
-            # Switch to next subject group periodically
-            if train_dataset is not None and hasattr(train_dataset, 'switch_to_next_group'):
-                group_switch_counter += 1
-                if group_switch_counter >= group_switch_interval:
-                    train_dataset.switch_to_next_group()
-                    group_switch_counter = 0
-                    # Update batch count since dataset size changed
-                    batches_per_epoch = len(train_dataloader) if hasattr(train_dataloader, '__len__') else None
-                    group_switch_interval = batches_per_epoch if batches_per_epoch is not None else 1000
+            batch_counter += 1
             if progress_logger is None and is_main_process():
                 progress_logger = ProgressLogger(desc='Training', total=max_iters, log_every=log_interval)
 
