@@ -86,16 +86,30 @@ def create_dataloader(
         subject_group_size=config.subject_group_size if is_train else None,
     )
 
+    # Use single worker when subject grouping is enabled to avoid
+    # loading subjects across multiple worker processes
+    use_workers = (
+        num_workers if is_train else 0
+    ) if config.subject_group_size is None else 0
+
+    if config.subject_group_size is not None and num_workers > 0 and is_train:
+        logger.warning(
+            f"Subject grouping is enabled (group_size={config.subject_group_size}). "
+            f"Overriding num_workers={num_workers} to 0 to prevent loading subjects "
+            f"across multiple worker processes. This ensures only {config.subject_group_size} "
+            f"subjects are in memory via memmap."
+        )
+
     dataloader = DataLoader(
         dataset=dataset,
         batch_size=batch_size,
         shuffle=True,
         # using 0 workers (main process) for eval,
         # to keep mem usage lower
-        num_workers=num_workers if is_train else 0,
+        num_workers=use_workers,
         collate_fn=collate_patch_samples,
         pin_memory=device == 'cuda',
-        persistent_workers=is_train and num_workers > 0
+        persistent_workers=is_train and use_workers > 0
     )
 
     return dataloader
