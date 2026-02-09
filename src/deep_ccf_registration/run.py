@@ -427,6 +427,8 @@ def main(config_path: Path):
             model=model,
             optimizer=opt,
             max_iters=config.max_iters,
+            train_dataset=train_dataloader.dataset,
+            val_dataset=val_dataloader.dataset,
             model_weights_out_dir=config.model_weights_out_dir,
             learning_rate=config.learning_rate,
             eval_interval=config.eval_interval,

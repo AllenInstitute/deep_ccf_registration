@@ -406,6 +406,8 @@ def train(
         start_best_val_loss: float = float("inf"),
         start_patience_counter: int = 0,
         scheduler_state_dict: Optional[dict] = None,
+        train_dataset = None,
+        val_dataset = None,
 ):
     """
     Train slice registration model
@@ -503,6 +505,8 @@ def train(
     scheduler = main_scheduler
 
     progress_logger = None
+    batches_per_epoch = len(train_dataloader) if hasattr(train_dataloader, '__len__') else None
+    batch_counter = 0
 
     while True:
         model.train()
@@ -511,6 +515,11 @@ def train(
         tissue_mask_losses = []
 
         for batch in train_dataloader:
+            # Track epochs and resample at epoch boundaries
+            if train_dataset is not None and batches_per_epoch is not None:
+                if batch_counter > 0 and batch_counter % batches_per_epoch == 0:
+                    train_dataset.resample_slices()
+            batch_counter += 1
             if progress_logger is None and is_main_process():
                 progress_logger = ProgressLogger(desc='Training', total=max_iters, log_every=log_interval)
 
@@ -617,6 +626,8 @@ def train(
 
                 # Periodic evaluation
                 if global_step % eval_interval == 0:
+                    if val_dataset is not None:
+                        val_dataset.resample_slices()
                     logger.info(f"Evaluating at step {global_step}")
                     if is_debug:
                         # evaluate train too

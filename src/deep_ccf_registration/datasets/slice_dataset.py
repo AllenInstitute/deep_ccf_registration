@@ -130,7 +130,6 @@ class SubjectSliceDataset(Dataset):
 
         # Build flat index mapping for map-style access
         self._index_map: list[tuple[SubjectMetadata, int, SliceOrientation]] = []
-        self._epoch_counter = 0
         self._build_index_map()
         self._epoch_length = len(self._index_map)
 
@@ -173,15 +172,6 @@ class SubjectSliceDataset(Dataset):
         return self._epoch_length
 
     def __getitem__(self, index: int) -> PatchSample:
-        # Detect epoch boundary - when index wraps back to 0, resample
-        if index == 0 and self._subject_slice_fraction < 1.0 and self._epoch_counter > 0:
-            logger.info(f"Epoch {self._epoch_counter} complete, resampling slices")
-            self._build_index_map()
-            self._epoch_length = len(self._index_map)
-            
-        if index == 0:
-            self._epoch_counter += 1
-            
         if index >= len(self._index_map):
             raise IndexError(f"Index {index} out of range for dataset of size {len(self._index_map)}")
         subject, slice_idx, orientation = self._index_map[index]
