@@ -730,7 +730,12 @@ def train(
                         if is_main_process():
                             mlflow.log_metric("final_best_val_rmse", best_val_loss)
 
-                        return best_val_loss
+                        return {
+                            "best_val_loss": best_val_loss,
+                            "global_step": global_step,
+                            "patience_counter": patience_counter,
+                            "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
+                        }
 
                     # Reset train losses for next eval period
                     point_losses = []
@@ -744,4 +749,9 @@ def train(
 
                     if is_main_process():
                         mlflow.log_metric("final_best_val_rmse", best_val_loss)
-                    return best_val_loss
+                    return {
+                        "best_val_loss": best_val_loss,
+                        "global_step": global_step,
+                        "patience_counter": patience_counter,
+                        "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
+                    }

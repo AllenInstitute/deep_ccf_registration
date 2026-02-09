@@ -133,6 +133,9 @@ class TrainConfig(BaseModel):
     local_cache_dir: Optional[Path] = None
     # Number of threads for parallel data staging from remote to local storage.
     prestage_workers: int = Field(32, ge=1)
+    # Number of train subjects to stage and train at a time.
+    # None = stage all subjects before training (default).
+    subject_cache_size: Optional[int] = None
 
     tmp_path: Path = Path('/tmp')
 

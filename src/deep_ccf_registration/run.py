@@ -33,6 +33,8 @@ from deep_ccf_registration.models import UNetWithRegressionHeads
 from deep_ccf_registration.train import train
 from deep_ccf_registration.utils.logging_utils import ProgressLogger
 
+_SENTINEL = object()
+
 
 def create_dataloader(
     metadata: list[SubjectMetadata],
@@ -46,6 +48,7 @@ def create_dataloader(
     ls_template_parameters: TemplateParameters,
     ccf_annotations: np.ndarray,
     include_tissue_mask: bool = False,
+    local_cache_dir: Path | None = _SENTINEL,
 ):
     """
     Create a dataloader using SubjectSliceDataset (Map-style).
@@ -83,7 +86,7 @@ def create_dataloader(
         include_tissue_mask=include_tissue_mask,
         ccf_annotations=ccf_annotations,
         cache_dir=config.cache_dir,
-        local_cache_dir=config.local_cache_dir,
+        local_cache_dir=config.local_cache_dir if local_cache_dir is _SENTINEL else local_cache_dir,
         rotate_slices=config.data_augmentation.rotate_slices and is_train,
         is_debug=config.debug,
         debug_slice_idx=config.debug_slice_idx,
@@ -372,31 +375,42 @@ def main(config_path: Path):
         ),
     )
 
-    # Pre-stage all subject data from remote storage to fast local disk
-    if config.local_cache_dir is not None:
-        config.local_cache_dir.mkdir(parents=True, exist_ok=True)
-        logger.info(f"Local data cache: {config.local_cache_dir}")
-        all_subjects = set(s.subject_id for s in train_metadata + val_metadata)
-        _prestage_data(
-            subject_ids=all_subjects,
-            cache_dir=config.cache_dir,
-            local_cache_dir=config.local_cache_dir,
-            max_workers=config.prestage_workers,
+    # Determine whether to use subject cycling or stage everything upfront
+    use_subject_cycling = (
+        config.subject_cache_size is not None
+        and config.local_cache_dir is not None
+        and config.subject_cache_size < len(train_metadata)
+    )
+
+    if not use_subject_cycling:
+        # Original behavior: stage all subjects, create dataloaders once
+        if config.local_cache_dir is not None:
+            config.local_cache_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Local data cache: {config.local_cache_dir}")
+            all_subjects = set(s.subject_id for s in train_metadata + val_metadata)
+            _prestage_data(
+                subject_ids=all_subjects,
+                cache_dir=config.cache_dir,
+                local_cache_dir=config.local_cache_dir,
+                max_workers=config.prestage_workers,
+            )
+
+        train_dataloader = create_dataloader(
+            metadata=train_metadata,
+            tissue_bboxes=tissue_bboxes,
+            rotation_angles=rotation_angles,
+            config=config,
+            batch_size=config.batch_size,
+            num_workers=config.num_workers,
+            ls_template_parameters=ls_template_parameters,
+            is_train=True,
+            ccf_annotations=ccf_annotations,
+            include_tissue_mask=config.predict_tissue_mask,
+            device=device,
         )
 
-    train_dataloader = create_dataloader(
-        metadata=train_metadata,
-        tissue_bboxes=tissue_bboxes,
-        rotation_angles=rotation_angles,
-        config=config,
-        batch_size=config.batch_size,
-        num_workers=config.num_workers,
-        ls_template_parameters=ls_template_parameters,
-        is_train=True,
-        ccf_annotations=ccf_annotations,
-        include_tissue_mask=config.predict_tissue_mask,
-        device=device,
-    )
+    # Val dataloader: created once. In cycling mode, mmap from EFS directly
+    # (no local cache) since val uses 0 workers and runs infrequently.
     val_dataloader = create_dataloader(
         metadata=val_metadata,
         tissue_bboxes=tissue_bboxes,
@@ -409,6 +423,7 @@ def main(config_path: Path):
         include_tissue_mask=config.predict_tissue_mask,
         device=device,
         rotation_angles=rotation_angles,
+        local_cache_dir=None if use_subject_cycling else _SENTINEL,
     )
 
     logger.info(f"Train subjects: {len(train_metadata)}")
@@ -513,6 +528,34 @@ def main(config_path: Path):
     else:
         mlflow_run = nullcontext()
 
+    # Common kwargs for train() calls
+    train_kwargs = dict(
+        val_dataloader=val_dataloader,
+        model=model,
+        optimizer=opt,
+        val_dataset=val_dataloader.dataset,
+        model_weights_out_dir=config.model_weights_out_dir,
+        learning_rate=config.learning_rate,
+        eval_interval=config.eval_interval,
+        patience=config.patience,
+        min_delta=config.min_delta,
+        autocast_context=autocast_context,
+        scaler=scaler,
+        device=device,
+        eval_iters=config.eval_iters,
+        is_debug=config.debug,
+        ls_template_parameters=ls_template_parameters,
+        ccf_annotations=ccf_annotations,
+        val_viz_samples=config.val_viz_samples,
+        exclude_background_pixels=config.exclude_background_pixels,
+        lr_scheduler=config.lr_scheduler,
+        normalize_target_points=config.normalize_template_points,
+        predict_tissue_mask=config.predict_tissue_mask,
+        gradient_accumulation_steps=config.gradient_accumulation_steps,
+        grad_clip_max_norm=config.grad_clip_max_norm,
+        warmup_steps=config.warmup_steps,
+    )
+
     with mlflow_run:
         if is_main_process() and not config.resume_mlflow_run_id:
             # Only log params on new runs (not resume)
@@ -527,40 +570,97 @@ def main(config_path: Path):
         # Restore original seeded state
         random.setstate(state)
 
-        best_val_loss = train(
-            train_dataloader=train_dataloader,
-            val_dataloader=val_dataloader,
-            model=model,
-            optimizer=opt,
-            max_iters=config.max_iters,
-            train_dataset=train_dataloader.dataset,
-            val_dataset=val_dataloader.dataset,
-            model_weights_out_dir=config.model_weights_out_dir,
-            learning_rate=config.learning_rate,
-            eval_interval=config.eval_interval,
-            patience=config.patience,
-            min_delta=config.min_delta,
-            autocast_context=autocast_context,
-            scaler=scaler,
-            device=device,
-            eval_iters=config.eval_iters,
-            is_debug=config.debug,
-            ls_template_parameters=ls_template_parameters,
-            ccf_annotations=ccf_annotations,
-            val_viz_samples=config.val_viz_samples,
-            exclude_background_pixels=config.exclude_background_pixels,
-            lr_scheduler=config.lr_scheduler,
-            normalize_target_points=config.normalize_template_points,
-            predict_tissue_mask=config.predict_tissue_mask,
-            gradient_accumulation_steps=config.gradient_accumulation_steps,
-            grad_clip_max_norm=config.grad_clip_max_norm,
-            warmup_steps=config.warmup_steps,
-            # Resume state from checkpoint
-            start_step=start_step,
-            start_best_val_loss=start_best_val_loss,
-            start_patience_counter=start_patience_counter,
-            scheduler_state_dict=scheduler_state_dict,
-        )
+        if use_subject_cycling:
+            config.local_cache_dir.mkdir(parents=True, exist_ok=True)
+            logger.info(f"Subject cycling: {config.subject_cache_size} subjects per group, "
+                        f"local cache: {config.local_cache_dir}")
+
+            all_train = list(train_metadata)
+            n = config.subject_cache_size
+            current_step = start_step
+            current_best_val_loss = start_best_val_loss
+            current_patience = start_patience_counter
+            current_sched_state = scheduler_state_dict
+            done = False
+
+            while current_step < config.max_iters and not done:
+                random.shuffle(all_train)
+                groups = [all_train[i:i + n] for i in range(0, len(all_train), n)]
+
+                for group_idx, group in enumerate(groups):
+                    group_ids = {s.subject_id for s in group}
+                    logger.info(f"Subject group {group_idx + 1}/{len(groups)}: "
+                                f"{len(group)} subjects, step {current_step}")
+
+                    _prestage_data(
+                        subject_ids=group_ids,
+                        cache_dir=config.cache_dir,
+                        local_cache_dir=config.local_cache_dir,
+                        max_workers=config.prestage_workers,
+                    )
+
+                    train_dl = create_dataloader(
+                        metadata=group,
+                        tissue_bboxes=tissue_bboxes,
+                        rotation_angles=rotation_angles,
+                        config=config,
+                        batch_size=config.batch_size,
+                        num_workers=config.num_workers,
+                        ls_template_parameters=ls_template_parameters,
+                        is_train=True,
+                        ccf_annotations=ccf_annotations,
+                        include_tissue_mask=config.predict_tissue_mask,
+                        device=device,
+                        local_cache_dir=config.local_cache_dir,
+                    )
+
+                    # One pass through this group's data
+                    group_max_iters = min(
+                        current_step + len(train_dl),
+                        config.max_iters,
+                    )
+
+                    result = train(
+                        train_dataloader=train_dl,
+                        max_iters=group_max_iters,
+                        train_dataset=train_dl.dataset,
+                        start_step=current_step,
+                        start_best_val_loss=current_best_val_loss,
+                        start_patience_counter=current_patience,
+                        scheduler_state_dict=current_sched_state,
+                        **train_kwargs,
+                    )
+
+                    current_step = result["global_step"]
+                    current_best_val_loss = result["best_val_loss"]
+                    current_patience = result["patience_counter"]
+                    current_sched_state = result["scheduler_state_dict"]
+
+                    # Clean up dataloader workers before next group
+                    del train_dl
+
+                    if current_step >= config.max_iters:
+                        done = True
+                        break
+                    if current_patience >= config.patience:
+                        done = True
+                        break
+
+            best_val_loss = current_best_val_loss
+
+        else:
+            # Original path: single train() call with all subjects
+            result = train(
+                train_dataloader=train_dataloader,
+                max_iters=config.max_iters,
+                train_dataset=train_dataloader.dataset,
+                start_step=start_step,
+                start_best_val_loss=start_best_val_loss,
+                start_patience_counter=start_patience_counter,
+                scheduler_state_dict=scheduler_state_dict,
+                **train_kwargs,
+            )
+            best_val_loss = result["best_val_loss"]
 
     if is_main_process():
         logger.info("=" * 60)
