@@ -408,6 +408,8 @@ def main(config_path: Path):
             include_tissue_mask=config.predict_tissue_mask,
             device=device,
         )
+        # Preload all subjects into RAM once — zero disk I/O during training
+        train_dataloader.dataset.preload_subjects()
 
     # Val dataloader: created once. In cycling mode, mmap from EFS directly
     # (no local cache) since val uses 0 workers and runs infrequently.
@@ -613,6 +615,8 @@ def main(config_path: Path):
                         device=device,
                         local_cache_dir=config.local_cache_dir,
                     )
+                    # Preload group's subjects into RAM — zero disk I/O during training
+                    train_dl.dataset.preload_subjects()
 
                     # One pass through this group's data
                     group_max_iters = min(

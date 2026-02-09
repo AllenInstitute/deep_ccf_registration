@@ -102,6 +102,10 @@ class SubjectSliceDataset(Dataset):
         self._volume: Optional[np.ndarray] = None
         self._warp: Optional[np.ndarray] = None
         self._cached_affine: Optional[Affine] = None
+        # Preloaded subject data: populated by preload_subjects()
+        self._preloaded_volumes: dict[str, np.ndarray] = {}
+        self._preloaded_warps: dict[str, np.ndarray] = {}
+        self._preloaded_affines: dict[str, Affine] = {}
         self._tissue_bboxes = tissue_bboxes.bounding_boxes
         self._crop_size = crop_size
         self._cache_dir = cache_dir
@@ -158,6 +162,30 @@ class SubjectSliceDataset(Dataset):
             for slice_idx in sampled_slices:
                 for orientation in self._orientations:
                     self._index_map.append((subject, slice_idx, orientation))
+
+    def preload_subjects(self):
+        """Load all subjects' volumes and warps into RAM upfront.
+
+        Call once before training starts. Subsequent __getitem__ calls
+        will look up from the preloaded dicts instead of hitting disk.
+        """
+        base = self._local_cache_dir if self._local_cache_dir is not None else self._cache_dir
+        logger.info(f"Preloading {len(self._all_subjects)} subjects from {base}")
+        for i, subject in enumerate(self._all_subjects):
+            sid = subject.subject_id
+            if sid in self._preloaded_volumes:
+                continue
+            vol_path = base / "volumes" / f"{sid}.npy"
+            warp_path = base / "warps" / f"{sid}_warp.npy"
+            with timed():
+                self._preloaded_volumes[sid] = np.load(str(vol_path))
+            with timed():
+                self._preloaded_warps[sid] = np.load(str(warp_path))
+            self._preloaded_affines[sid] = Affine.from_ants_file(
+                subject.ls_to_template_affine_matrix_path
+            )
+            logger.info(f"Preloaded {i+1}/{len(self._all_subjects)}: {sid}")
+        logger.info("All subjects preloaded into RAM")
 
     def resample_slices(self):
         """Resample slices for a new epoch.
@@ -394,6 +422,16 @@ class SubjectSliceDataset(Dataset):
         subject_id = metadata.subject_id
         if self._loaded_subject_id == subject_id:
             return
+
+        # Fast path: use preloaded data (no disk I/O)
+        if subject_id in self._preloaded_volumes:
+            self._volume = self._preloaded_volumes[subject_id]
+            self._warp = self._preloaded_warps[subject_id]
+            self._cached_affine = self._preloaded_affines[subject_id]
+            self._loaded_subject_id = subject_id
+            return
+
+        # Fallback: load from disk (for val or when preload not used)
         base = self._local_cache_dir if self._local_cache_dir is not None else self._cache_dir
         logger.debug(f"Loading subject {subject_id} from {base}")
 
@@ -407,12 +445,10 @@ class SubjectSliceDataset(Dataset):
                     "Precompute with cache_volume_and_warp_numpy.py."
                 )
 
-        # Load fully into RAM — mmap causes I/O contention when multiple
-        # workers page-fault into different subjects' files simultaneously.
         with timed():
-            self._volume = np.load(str(vol_path))
+            self._volume = np.load(str(vol_path), mmap_mode="r")
         with timed():
-            self._warp = np.load(str(warp_path))
+            self._warp = np.load(str(warp_path), mmap_mode="r")
         with timed():
             self._cached_affine = Affine.from_ants_file(metadata.ls_to_template_affine_matrix_path)
 
