@@ -395,28 +395,26 @@ class SubjectSliceDataset(Dataset):
             return
         logger.debug(f"Loading subject {subject_id}")
         base = self._local_cache_dir if self._local_cache_dir is not None else self._cache_dir
-        self._volume = self._load_npy(
-            base / "volumes" / f"{subject_id}.npy"
-        )
-        self._warp = self._load_npy(
-            base / "warps" / f"{subject_id}_warp.npy"
-        )
+
+        vol_path = base / "volumes" / f"{subject_id}.npy"
+        warp_path = base / "warps" / f"{subject_id}_warp.npy"
+
+        for p in (vol_path, warp_path):
+            if not p.exists():
+                raise FileNotFoundError(
+                    f"Expected cached file at {p}. "
+                    "Precompute with cache_volume_and_warp_numpy.py."
+                )
+
+        # Volume is accessed sequentially per-slice → mmap is fine.
+        self._volume = np.load(str(vol_path), mmap_mode="r")
+        # Warp is accessed with scattered 3D coordinates by
+        # map_coordinates_cropped → load fully into RAM to avoid
+        # page-fault latency (0.08s–9.6s per sample when mmap'd).
+        self._warp = np.load(str(warp_path))
+
         self._cached_affine = Affine.from_ants_file(metadata.ls_to_template_affine_matrix_path)
         self._loaded_subject_id = subject_id
-
-    def _load_npy(self, path: Path) -> np.ndarray:
-        """Load a .npy file as a memory-mapped array.
-
-        The caller (_ensure_subject_loaded) resolves the path to either
-        local_cache_dir or cache_dir.  Staging from remote to local is
-        handled by _prestage_data in run.py before training starts.
-        """
-        if not path.exists():
-            raise FileNotFoundError(
-                f"Expected cached file at {path}. "
-                "Precompute with cache_volume_and_warp_numpy.py."
-            )
-        return np.load(str(path), mmap_mode="r")
 
     def _get_coordinate_grid(
         self,
