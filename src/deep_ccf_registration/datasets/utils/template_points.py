@@ -13,6 +13,7 @@ from scipy.ndimage import map_coordinates
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.metadata import AcquisitionAxis
 from deep_ccf_registration.utils.logging_utils import timed
+from deep_ccf_registration.datasets.utils.interpolation import map_coordinates_cropped
 
 
 @dataclass
@@ -174,8 +175,11 @@ def apply_transforms_to_points(
         with ThreadPoolExecutor(max_workers=3) as executor:
             futures = [
                 executor.submit(
-                    map_coordinates, warp[i], coords,
-                    order=1, mode="nearest"
+                    map_coordinates_cropped,
+                    warp[i],
+                    coords,
+                    order=1,
+                    mode="nearest",
                 )
                 for i in range(3)
             ]

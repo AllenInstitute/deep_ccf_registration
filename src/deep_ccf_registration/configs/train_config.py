@@ -119,10 +119,12 @@ class TrainConfig(BaseModel):
 
     # microns/px to resample to
     resample_to_fixed_resolution: Optional[int] = None
-    epoch_subject_slice_fraction: float = 1.0
     debug_start_y: Optional[int] = None
     debug_start_x: Optional[int] = None
     debug_slice_idx: Optional[int] = None
+
+    # base directory containing /volumes and /warps caches
+    cache_dir: Path = Path('/data')
 
     tmp_path: Path = Path('/tmp')
 

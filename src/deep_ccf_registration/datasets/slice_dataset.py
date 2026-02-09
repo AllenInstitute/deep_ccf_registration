@@ -1,14 +1,8 @@
-import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-import ants
-import boto3
 import numpy as np
-import tensorstore
-from botocore import UNSIGNED
-from botocore.config import Config
 from loguru import logger
 from scipy.ndimage import map_coordinates
 from torch.utils.data import Dataset
@@ -18,11 +12,10 @@ from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.datasets.transforms import map_points_to_right_hemisphere, \
     apply_crop_pad_to_original, get_subject_rotation_range
 from deep_ccf_registration.datasets.utils.template_points import transform_points_to_template_space, apply_transforms_to_points, Affine
+from deep_ccf_registration.datasets.utils.interpolation import map_coordinates_cropped
 from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, TissueBoundingBoxes, \
     AcquisitionAxis, RotationAngles, SubjectRotationAngle
 from deep_ccf_registration.utils.logging_utils import timed, timed_func
-from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
-
 
 @dataclass(frozen=True)
 class PatchSample:
@@ -80,17 +73,15 @@ class SubjectSliceDataset(Dataset):
         self,
         subjects: list[SubjectMetadata],
         template_parameters: TemplateParameters,
-        tensorstore_aws_credentials_method: str,
         is_train: bool,
         tissue_bboxes: TissueBoundingBoxes,
         rotation_angles: RotationAngles,
         orientations: list[SliceOrientation],
         crop_size: Optional[tuple[int, int]] = None,
-        registration_downsample_factor: int = 3,
         transform: Optional[callable] = None,
         include_tissue_mask: bool = False,
         ccf_annotations: Optional[np.ndarray] = None,
-        scratch_path: Path = Path('/tmp'),
+        cache_dir: Path = Path('/data'),
         rotate_slices: bool = False,
         is_debug: bool = False,
         debug_slice_idx: Optional[int] = None,
@@ -100,8 +91,6 @@ class SubjectSliceDataset(Dataset):
 
         self._all_subjects = subjects
         self._template_parameters = template_parameters
-        self._aws_credentials_method = tensorstore_aws_credentials_method
-        self._registration_downsample_factor = registration_downsample_factor
         self._transform = transform
         self._include_tissue_mask = include_tissue_mask
         self._ccf_annotations = ccf_annotations
@@ -113,7 +102,7 @@ class SubjectSliceDataset(Dataset):
         self._cached_affine: Optional[Affine] = None
         self._tissue_bboxes = tissue_bboxes.bounding_boxes
         self._crop_size = crop_size
-        self._scratch_path = scratch_path
+        self._cache_dir = cache_dir
         self._rotate_slices = rotate_slices
         self._rotation_angles = rotation_angles
 
@@ -192,13 +181,12 @@ class SubjectSliceDataset(Dataset):
             coords_for_interp = coordinate_grid.T
             # Volume shape: (C, T, D0, D1, D2) - sample from spatial dims
             volume_3d = self._volume[0, 0]
-
-            interpolated_flat = map_coordinates(
-                input=volume_3d,
-                coordinates=coords_for_interp,
+            interpolated_flat = map_coordinates_cropped(
+                volume=volume_3d,
+                coords=coords_for_interp,
                 order=1,  # linear interpolation
                 mode='constant',
-                cval=0.0
+                cval=0.0,
             )
             data_patch = interpolated_flat.reshape(patch_height, patch_width).astype("float32")
         else:
@@ -377,66 +365,22 @@ class SubjectSliceDataset(Dataset):
         self._loaded_subject_id = subject_id
 
     def _load_full_volume(self, metadata: SubjectMetadata) -> np.ndarray:
-        volume_dir = self._scratch_path / 'volumes'
-        volume_dir.mkdir(parents=True, exist_ok=True)
-        npy_path = volume_dir / f'{metadata.subject_id}.npy'
-
-        if npy_path.exists():
-            logger.debug(f'Loading volume from numpy cache: {npy_path}')
-            return np.load(str(npy_path), mmap_mode='r')
-
-        # First time: load from tensorstore
-        store = tensorstore.open(
-            spec={
-                "driver": "auto",
-                "kvstore": create_kvstore(
-                    path=f"{metadata.stitched_volume_path}/{self._registration_downsample_factor}",
-                    aws_credentials_method="anonymous",
-                ),
-            },
-            read=True,
-        ).result()
-        data = np.array(store[...].read().result())
-
-        np.save(str(npy_path), data)
-        logger.debug(f'Saved volume numpy cache: {npy_path}')
-
-        return np.load(str(npy_path), mmap_mode='r')
+        npy_path = self._cache_dir / "volumes" / f"{metadata.subject_id}.npy"
+        if not npy_path.exists():
+            raise FileNotFoundError(
+                f"Expected cached volume at {npy_path}. Precompute with cache_volume_and_warp_numpy.py."
+            )
+        logger.debug(f"Loading volume from cache: {npy_path}")
+        return np.load(str(npy_path), mmap_mode="r")
 
     def _load_warp(self, metadata: SubjectMetadata) -> np.ndarray:
-        warp_dir = self._scratch_path / 'warps'
-        warp_dir.mkdir(parents=True, exist_ok=True)
-
-        # Check for .npy cache first (fast path, already transposed)
-        npy_cache_path = warp_dir / f'{metadata.subject_id}_warp.npy'
-        if npy_cache_path.exists():
-            logger.debug(f'Loading warp from numpy cache: {npy_cache_path}')
-            return np.load(str(npy_cache_path))
-
-        # Download/copy NIfTI if needed
-        nifti_local_path = warp_dir / f'{metadata.subject_id}_{metadata.ls_to_template_inverse_warp_path_original.name}'
-        if not nifti_local_path.exists():
-            logger.debug(
-                f'Copying {metadata.ls_to_template_inverse_warp_path_original} to {nifti_local_path}')
-            if str(metadata.ls_to_template_inverse_warp_path_original).startswith('/data/aind_open_data'):
-                s3 = boto3.client(
-                    's3',
-                    config=Config(signature_version=UNSIGNED),
-                    region_name='us-west-2')
-                s3.download_file('aind-open-data',
-                                 str(metadata.ls_to_template_inverse_warp_path_original.relative_to('/data/aind_open_data')),
-                                 str(nifti_local_path))
-            else:
-                shutil.copy(metadata.ls_to_template_inverse_warp_path_original, nifti_local_path)
-
-        # Read via ANTs, transpose, save as .npy
-        warp_raw = ants.image_read(str(nifti_local_path)).numpy()
-        warp_transposed = np.ascontiguousarray(warp_raw.transpose(3, 0, 1, 2))
-
-        np.save(npy_cache_path, warp_transposed)
-        logger.debug(f'Saved warp numpy cache: {npy_cache_path}')
-
-        return warp_transposed
+        npy_cache_path = self._cache_dir / "warps" / f"{metadata.subject_id}_warp.npy"
+        if not npy_cache_path.exists():
+            raise FileNotFoundError(
+                f"Expected cached warp at {npy_cache_path}. Precompute with cache_volume_and_warp_numpy.py."
+            )
+        logger.debug(f"Loading warp from cache: {npy_cache_path}")
+        return np.load(str(npy_cache_path), mmap_mode="r")
 
     def _get_coordinate_grid(
         self,

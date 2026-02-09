@@ -103,8 +103,8 @@ def main(resample_to_fixed_resolution: int = None):
 
     for i in range(6):
         if i == 1:
-            #config.data_augmentation.rotate_slices = True
-            #config.data_augmentation.apply_square_symmetry_transform = True
+            config.data_augmentation.rotate_slices = True
+            config.data_augmentation.apply_square_symmetry_transform = True
             config.data_augmentation.apply_grid_distortion = True
 
             dataloader = create_dataloader(
