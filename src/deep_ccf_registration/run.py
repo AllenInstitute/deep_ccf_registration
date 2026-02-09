@@ -82,6 +82,7 @@ def create_dataloader(
         rotate_slices=config.data_augmentation.rotate_slices and is_train,
         is_debug=config.debug,
         debug_slice_idx=config.debug_slice_idx,
+        subject_slice_fraction=config.subject_slice_fraction,
     )
 
     dataloader = DataLoader(

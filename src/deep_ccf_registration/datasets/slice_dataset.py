@@ -85,6 +85,7 @@ class SubjectSliceDataset(Dataset):
         rotate_slices: bool = False,
         is_debug: bool = False,
         debug_slice_idx: Optional[int] = None,
+        subject_slice_fraction: float = 0.25,
     ):
         if include_tissue_mask and ccf_annotations is None:
             raise ValueError("include_tissue_mask=True requires ccf_annotations")
@@ -105,6 +106,7 @@ class SubjectSliceDataset(Dataset):
         self._cache_dir = cache_dir
         self._rotate_slices = rotate_slices
         self._rotation_angles = rotation_angles
+        self._subject_slice_fraction = subject_slice_fraction
 
         # Precompute valid slices per subject
         self._valid_slices_cache: dict[str, list[int]] = {}
@@ -128,17 +130,58 @@ class SubjectSliceDataset(Dataset):
 
         # Build flat index mapping for map-style access
         self._index_map: list[tuple[SubjectMetadata, int, SliceOrientation]] = []
+        self._epoch_counter = 0
+        self._build_index_map()
+        self._epoch_length = len(self._index_map)
+
+    def _build_index_map(self):
+        """Build or rebuild the index map with slice sampling."""
+        self._index_map.clear()
         for subject in self._all_subjects:
             valid_slices = self._valid_slices_cache[subject.subject_id]
-            for slice_idx in valid_slices:
+            
+            # Sample slices based on fraction
+            if self._subject_slice_fraction < 1.0:
+                num_to_sample = max(1, int(len(valid_slices) * self._subject_slice_fraction))
+                if num_to_sample < len(valid_slices):
+                    sampled_slices = np.random.choice(
+                        valid_slices,
+                        size=num_to_sample,
+                        replace=False
+                    ).tolist()
+                else:
+                    sampled_slices = valid_slices
+            else:
+                sampled_slices = valid_slices
+            
+            for slice_idx in sampled_slices:
                 for orientation in self._orientations:
                     self._index_map.append((subject, slice_idx, orientation))
-        self._epoch_length = len(self._index_map)
+
+    def resample_slices(self):
+        """Resample slices for a new epoch.
+        
+        Call this at the start of each epoch to randomly sample a new set of slices
+        based on the subject_slice_fraction.
+        """
+        if self._subject_slice_fraction < 1.0:
+            self._build_index_map()
+            self._epoch_length = len(self._index_map)
+            logger.info(f"Resampled slices: {self._epoch_length} total samples across {len(self._all_subjects)} subjects")
 
     def __len__(self) -> int:
         return self._epoch_length
 
     def __getitem__(self, index: int) -> PatchSample:
+        # Detect epoch boundary - when index wraps back to 0, resample
+        if index == 0 and self._subject_slice_fraction < 1.0 and self._epoch_counter > 0:
+            logger.info(f"Epoch {self._epoch_counter} complete, resampling slices")
+            self._build_index_map()
+            self._epoch_length = len(self._index_map)
+            
+        if index == 0:
+            self._epoch_counter += 1
+            
         if index >= len(self._index_map):
             raise IndexError(f"Index {index} out of range for dataset of size {len(self._index_map)}")
         subject, slice_idx, orientation = self._index_map[index]
