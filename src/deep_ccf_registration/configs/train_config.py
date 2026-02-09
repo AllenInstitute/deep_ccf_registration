@@ -127,6 +127,10 @@ class TrainConfig(BaseModel):
 
     # base directory containing /volumes and /warps caches
     cache_dir: Path = Path('/data')
+    # Fast local storage for staging files from slow remote filesystems (e.g. EFS).
+    # When set, volume/warp files are copied here before loading into RAM.
+    # Set to a path on local NVMe or instance storage (e.g. /tmp/data_cache).
+    local_cache_dir: Optional[Path] = None
 
     tmp_path: Path = Path('/tmp')
 

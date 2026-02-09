@@ -79,6 +79,7 @@ def create_dataloader(
         include_tissue_mask=include_tissue_mask,
         ccf_annotations=ccf_annotations,
         cache_dir=config.cache_dir,
+        local_cache_dir=config.local_cache_dir,
         rotate_slices=config.data_augmentation.rotate_slices and is_train,
         is_debug=config.debug,
         debug_slice_idx=config.debug_slice_idx,
@@ -277,6 +278,11 @@ def main(config_path: Path):
             rotation_angles['AP_rotation'].mean() + rotation_angles['AP_rotation'].std()*2
         ),
     )
+
+    # Create local cache directory for staging files from remote storage
+    if config.local_cache_dir is not None:
+        config.local_cache_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"Local data cache: {config.local_cache_dir}")
 
     train_dataloader = create_dataloader(
         metadata=train_metadata,

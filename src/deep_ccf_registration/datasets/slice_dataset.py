@@ -1,3 +1,6 @@
+import os
+import shutil
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -82,6 +85,7 @@ class SubjectSliceDataset(Dataset):
         include_tissue_mask: bool = False,
         ccf_annotations: Optional[np.ndarray] = None,
         cache_dir: Path = Path('/data'),
+        local_cache_dir: Optional[Path] = None,
         rotate_slices: bool = False,
         is_debug: bool = False,
         debug_slice_idx: Optional[int] = None,
@@ -104,6 +108,7 @@ class SubjectSliceDataset(Dataset):
         self._tissue_bboxes = tissue_bboxes.bounding_boxes
         self._crop_size = crop_size
         self._cache_dir = cache_dir
+        self._local_cache_dir = local_cache_dir
         self._rotate_slices = rotate_slices
         self._rotation_angles = rotation_angles
         self._subject_slice_fraction = subject_slice_fraction
@@ -391,38 +396,64 @@ class SubjectSliceDataset(Dataset):
         subject_id = metadata.subject_id
         if self._loaded_subject_id == subject_id:
             return
-        logger.debug(f"Loading full volume for subject {subject_id}")
-        self._volume = self._load_full_volume(metadata)
-        logger.debug(f"Loading warp for subject {subject_id}")
-        self._warp = self._load_warp(metadata=metadata)
+        logger.debug(f"Loading subject {subject_id}")
+        self._volume = self._load_npy(
+            self._cache_dir / "volumes" / f"{subject_id}.npy"
+        )
+        self._warp = self._load_npy(
+            self._cache_dir / "warps" / f"{subject_id}_warp.npy"
+        )
         self._cached_affine = Affine.from_ants_file(metadata.ls_to_template_affine_matrix_path)
         self._loaded_subject_id = subject_id
 
-    def _load_full_volume(self, metadata: SubjectMetadata) -> np.ndarray:
-        npy_path = self._cache_dir / "volumes" / f"{metadata.subject_id}.npy"
-        if not npy_path.exists():
-            raise FileNotFoundError(
-                f"Expected cached volume at {npy_path}. Precompute with cache_volume_and_warp_numpy.py."
-            )
-        logger.debug(f"Loading volume into RAM from cache: {npy_path}")
-        # Load fully into RAM — when rotate_slices is enabled, the volume is
-        # sampled via map_coordinates_cropped with random 3D access patterns
-        # (oblique slices). Mmap causes expensive page faults on every sample.
-        # Only one subject's volume is held at a time.
-        return np.load(str(npy_path))
+    def _load_npy(self, src_path: Path) -> np.ndarray:
+        """Load a .npy file as a memory-mapped array.
 
-    def _load_warp(self, metadata: SubjectMetadata) -> np.ndarray:
-        npy_cache_path = self._cache_dir / "warps" / f"{metadata.subject_id}_warp.npy"
-        if not npy_cache_path.exists():
+        When local_cache_dir is set, files are copied from the remote
+        filesystem (e.g. EFS) to fast local storage on first access and
+        memory-mapped from there on subsequent accesses.  The local cache
+        is persistent and shared across all workers — files accumulate
+        over training so repeated visits to the same subject are fast.
+
+        Memory-mapping keeps RAM usage low regardless of num_workers,
+        and is fast on local disk (unlike EFS where page faults are expensive).
+        """
+        if self._local_cache_dir is not None:
+            # Preserve subdirectory structure (volumes/, warps/)
+            relative = src_path.relative_to(self._cache_dir)
+            local_path = self._local_cache_dir / relative
+            if not local_path.exists():
+                # First access: stage from remote to local
+                if not src_path.exists():
+                    raise FileNotFoundError(
+                        f"Expected cached file at {src_path}. "
+                        "Precompute with cache_volume_and_warp_numpy.py."
+                    )
+                local_path.parent.mkdir(parents=True, exist_ok=True)
+                logger.debug(f"Staging {src_path} -> {local_path}")
+                # Write to temp file then atomic rename to avoid partial reads
+                # by other workers
+                tmp_fd, tmp_path = tempfile.mkstemp(
+                    dir=str(local_path.parent),
+                    suffix=".npy.tmp",
+                )
+                try:
+                    os.close(tmp_fd)
+                    shutil.copy2(str(src_path), tmp_path)
+                    Path(tmp_path).rename(local_path)
+                except BaseException:
+                    Path(tmp_path).unlink(missing_ok=True)
+                    raise
+            logger.debug(f"mmap from local cache: {local_path}")
+            return np.load(str(local_path), mmap_mode="r")
+
+        if not src_path.exists():
             raise FileNotFoundError(
-                f"Expected cached warp at {npy_cache_path}. Precompute with cache_volume_and_warp_numpy.py."
+                f"Expected cached file at {src_path}. "
+                "Precompute with cache_volume_and_warp_numpy.py."
             )
-        logger.debug(f"Loading warp into RAM from cache: {npy_cache_path}")
-        # Load fully into RAM (not mmap) — warp is accessed via random 3D
-        # subvolume slicing in map_coordinates_cropped, and mmap causes
-        # expensive page faults on every sample. Only one subject's warp is
-        # held in memory at a time, so the footprint is manageable.
-        return np.load(str(npy_cache_path))
+        logger.debug(f"mmap from {src_path}")
+        return np.load(str(src_path), mmap_mode="r")
 
     def _get_coordinate_grid(
         self,
