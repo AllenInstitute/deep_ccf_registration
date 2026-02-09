@@ -82,6 +82,7 @@ class TrainConfig(BaseModel):
     val_viz_samples: int = Field(10, ge=0)
 
     eval_interval: int = Field(500, gt=0)
+    log_interval: int = Field(20, gt=0)
     patience: int = Field(10, gt=0)
     min_delta: float = Field(1e-4, ge=0.0)
     region_ccf_ids_map_path: Path
