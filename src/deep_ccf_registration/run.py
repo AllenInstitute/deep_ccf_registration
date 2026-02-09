@@ -1,7 +1,3 @@
-import torch
-import torch.multiprocessing
-torch.multiprocessing.set_sharing_strategy('file_system')
-
 import multiprocessing
 import os
 import sys
@@ -13,10 +9,11 @@ import click
 import mlflow
 import numpy as np
 import pandas as pd
+import torch
 import torch.distributed as dist
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, IterableDataset
 from contextlib import nullcontext
 from loguru import logger
 import json
@@ -34,6 +31,55 @@ from deep_ccf_registration.models import UNetWithRegressionHeads
 from deep_ccf_registration.train import train
 from deep_ccf_registration.utils.logging_utils import ProgressLogger
 
+class ShardedIterableDataset(IterableDataset):
+    """Wraps a SubjectSliceDataset so each worker iterates only its own
+    subject shard. No oversampling — each sample is yielded exactly once.
+
+    On init in a worker (via __iter__), subjects are assigned round-robin
+    to workers. Each worker preloads its shard, filters to those subjects,
+    shuffles, and yields.
+    """
+
+    def __init__(self, map_dataset):
+        self._map_dataset = map_dataset
+        self._initialized = False
+
+    @property
+    def dataset(self):
+        """Access the underlying map-style dataset."""
+        return self._map_dataset
+
+    def __iter__(self):
+        info = torch.utils.data.get_worker_info()
+        ds = self._map_dataset
+
+        if info is not None:
+            # Multi-worker: shard subjects
+            worker_id = info.id
+            num_workers = info.num_workers
+
+            if not self._initialized:
+                all_sids = [s.subject_id for s in ds._all_subjects]
+                my_sids = set(all_sids[worker_id::num_workers])
+                ds.preload_subjects(subject_ids=my_sids)
+                ds.filter_to_subjects(subject_ids=my_sids)
+                self._initialized = True
+
+            # Shuffle index map each iteration
+            indices = list(range(len(ds._index_map)))
+            np.random.shuffle(indices)
+        else:
+            # Single-process: iterate everything
+            indices = list(range(len(ds._index_map)))
+            np.random.shuffle(indices)
+
+        for idx in indices:
+            yield ds[idx]
+
+    def __len__(self):
+        return len(self._map_dataset)
+
+
 def create_dataloader(
     metadata: list[SubjectMetadata],
     tissue_bboxes: TissueBoundingBoxes,
@@ -48,7 +94,10 @@ def create_dataloader(
     include_tissue_mask: bool = False,
 ):
     """
-    Create a dataloader using SubjectSliceDataset (Map-style).
+    Create a dataloader using SubjectSliceDataset.
+
+    When num_workers > 0 for training, wraps in ShardedIterableDataset
+    so each worker loads and serves only its subject shard (no oversampling).
 
     Returns a DataLoader that yields collated batch dicts.
     """
@@ -71,7 +120,7 @@ def create_dataloader(
         rotation_angles=rotation_angles,
     )
 
-    dataset = SubjectSliceDataset(
+    map_dataset = SubjectSliceDataset(
         subjects=metadata,
         template_parameters=template_parameters,
         is_train=is_train,
@@ -89,19 +138,32 @@ def create_dataloader(
         subject_slice_fraction=config.subject_slice_fraction,
     )
 
+    effective_num_workers = num_workers if is_train else 0
+
+    if effective_num_workers > 0:
+        dataset = ShardedIterableDataset(map_dataset)
+    else:
+        dataset = map_dataset
+
     dataloader = DataLoader(
         dataset=dataset,
         batch_size=batch_size,
-        shuffle=True,
-        # using 0 workers (main process) for eval,
-        # to keep mem usage lower
-        num_workers=num_workers if is_train else 0,
+        shuffle=isinstance(dataset, SubjectSliceDataset),  # only map-style
+        num_workers=effective_num_workers,
         collate_fn=collate_patch_samples,
         pin_memory=device == 'cuda',
-        persistent_workers=is_train and num_workers > 0
+        persistent_workers=is_train and effective_num_workers > 0,
     )
 
     return dataloader
+
+
+def _unwrap_dataset(dataset):
+    """Get the underlying SubjectSliceDataset, unwrapping ShardedIterableDataset if needed."""
+    if isinstance(dataset, ShardedIterableDataset):
+        return dataset.dataset
+    return dataset
+
 
 logger.remove()
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -303,9 +365,6 @@ def main(config_path: Path):
             device=device,
         )
 
-        # Preload all subjects into RAM — workers share via COW (fork)
-        train_dataloader.dataset.preload_subjects()
-
     val_dataloader = create_dataloader(
         metadata=val_metadata,
         tissue_bboxes=tissue_bboxes,
@@ -500,10 +559,6 @@ def main(config_path: Path):
                         device=device,
                     )
 
-                    # Preload group's subjects into RAM (from EFS).
-                    # With fork, workers share via COW — zero extra RAM.
-                    train_dl.dataset.preload_subjects()
-
                     # One pass through this group's data
                     group_max_iters = min(
                         current_step + len(train_dl),
@@ -513,7 +568,7 @@ def main(config_path: Path):
                     result = train(
                         train_dataloader=train_dl,
                         max_iters=group_max_iters,
-                        train_dataset=train_dl.dataset,
+                        train_dataset=_unwrap_dataset(train_dl.dataset),
                         start_step=current_step,
                         start_best_val_loss=current_best_val_loss,
                         start_patience_counter=current_patience,
@@ -544,7 +599,7 @@ def main(config_path: Path):
             result = train(
                 train_dataloader=train_dataloader,
                 max_iters=config.max_iters,
-                train_dataset=train_dataloader.dataset,
+                train_dataset=_unwrap_dataset(train_dataloader.dataset),
                 start_step=start_step,
                 start_best_val_loss=start_best_val_loss,
                 start_patience_counter=start_patience_counter,
@@ -617,9 +672,5 @@ def split_train_val_test(
     return train_metadata, val_metadata, test_metadata
 
 if __name__ == "__main__":
-    multiprocessing.set_start_method('fork', force=True)
-    # Raise open file limit for file_system sharing strategy
-    import resource
-    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
-    resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
+    multiprocessing.set_start_method('spawn', force=True)
     main()

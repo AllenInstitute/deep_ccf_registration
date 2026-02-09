@@ -161,17 +161,21 @@ class SubjectSliceDataset(Dataset):
                 for orientation in self._orientations:
                     self._index_map.append((subject, slice_idx, orientation))
 
-    def preload_subjects(self):
-        """Load all subjects' volumes and warps into RAM upfront.
+    def preload_subjects(self, subject_ids: Optional[set[str]] = None):
+        """Load subjects' volumes and warps into RAM.
 
-        Call once before training starts. Subsequent __getitem__ calls
-        will look up from the preloaded dicts instead of hitting disk.
+        Args:
+            subject_ids: If provided, only load these subjects.
+                         If None, load all subjects.
         """
-        logger.info(f"Preloading {len(self._all_subjects)} subjects from {self._cache_dir}")
-        for i, subject in enumerate(self._all_subjects):
+        subjects_to_load = [
+            s for s in self._all_subjects
+            if (subject_ids is None or s.subject_id in subject_ids)
+            and s.subject_id not in self._preloaded_volumes
+        ]
+        logger.info(f"Preloading {len(subjects_to_load)} subjects from {self._cache_dir}")
+        for i, subject in enumerate(subjects_to_load):
             sid = subject.subject_id
-            if sid in self._preloaded_volumes:
-                continue
             vol_path = self._cache_dir / "volumes" / f"{sid}.npy"
             warp_path = self._cache_dir / "warps" / f"{sid}_warp.npy"
             with timed():
@@ -181,8 +185,19 @@ class SubjectSliceDataset(Dataset):
             self._preloaded_affines[sid] = Affine.from_ants_file(
                 subject.ls_to_template_affine_matrix_path
             )
-            logger.info(f"Preloaded {i+1}/{len(self._all_subjects)}: {sid}")
-        logger.info("All subjects preloaded into RAM")
+            logger.info(f"Preloaded {i+1}/{len(subjects_to_load)}: {sid}")
+        logger.info("Subjects preloaded into RAM")
+
+    def filter_to_subjects(self, subject_ids: set[str]):
+        """Filter index map to only include entries for the given subjects.
+
+        Used by worker_init_fn so each worker only serves its shard.
+        """
+        self._index_map = [
+            (s, idx, o) for s, idx, o in self._index_map
+            if s.subject_id in subject_ids
+        ]
+        self._epoch_length = len(self._index_map)
 
     def resample_slices(self):
         """Resample slices for a new epoch.
