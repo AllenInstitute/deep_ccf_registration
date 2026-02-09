@@ -86,6 +86,7 @@ class SubjectSliceDataset(Dataset):
         is_debug: bool = False,
         debug_slice_idx: Optional[int] = None,
         subject_slice_fraction: float = 0.25,
+        subject_group_size: Optional[int] = None,
     ):
         if include_tissue_mask and ccf_annotations is None:
             raise ValueError("include_tissue_mask=True requires ccf_annotations")
@@ -107,6 +108,20 @@ class SubjectSliceDataset(Dataset):
         self._rotate_slices = rotate_slices
         self._rotation_angles = rotation_angles
         self._subject_slice_fraction = subject_slice_fraction
+
+        # Subject grouping setup
+        self._subject_group_size = subject_group_size
+        if subject_group_size is not None:
+            # Shuffle subjects once at initialization
+            self._subject_groups = self._create_subject_groups(subjects, subject_group_size)
+            self._current_group_idx = 0
+            self._current_group_subjects = self._subject_groups[self._current_group_idx]
+            logger.info(f"Created {len(self._subject_groups)} subject groups of size {subject_group_size}")
+            logger.info(f"Starting with group 0 containing {len(self._current_group_subjects)} subjects")
+        else:
+            self._subject_groups = None
+            self._current_group_idx = None
+            self._current_group_subjects = self._all_subjects
 
         # Precompute valid slices per subject
         self._valid_slices_cache: dict[str, list[int]] = {}
@@ -133,12 +148,49 @@ class SubjectSliceDataset(Dataset):
         self._build_index_map()
         self._epoch_length = len(self._index_map)
 
+    def _create_subject_groups(self, subjects: list[SubjectMetadata], group_size: int) -> list[list[SubjectMetadata]]:
+        """Divide subjects into groups of specified size."""
+        shuffled = subjects.copy()
+        np.random.shuffle(shuffled)
+        groups = []
+        for i in range(0, len(shuffled), group_size):
+            groups.append(shuffled[i:i + group_size])
+        return groups
+
+    def switch_to_next_group(self):
+        """Switch to the next group of subjects. Wraps around to group 0 after the last group."""
+        if self._subject_groups is None:
+            logger.warning("Subject grouping is not enabled. Ignoring switch_to_next_group call.")
+            return
+
+        # Clear loaded subject to free memory
+        self._loaded_subject_id = None
+        self._volume = None
+        self._warp = None
+        self._cached_affine = None
+
+        # Move to next group
+        self._current_group_idx = (self._current_group_idx + 1) % len(self._subject_groups)
+        self._current_group_subjects = self._subject_groups[self._current_group_idx]
+
+        # Rebuild index map for new group
+        self._build_index_map()
+        self._epoch_length = len(self._index_map)
+
+        logger.info(
+            f"Switched to subject group {self._current_group_idx}/{len(self._subject_groups)-1} "
+            f"with {len(self._current_group_subjects)} subjects, {len(self._index_map)} samples"
+        )
+
     def _build_index_map(self):
         """Build or rebuild the index map with slice sampling."""
         self._index_map.clear()
-        for subject in self._all_subjects:
+        # Use current group subjects if grouping is enabled, otherwise use all subjects
+        subjects_to_use = self._current_group_subjects
+
+        for subject in subjects_to_use:
             valid_slices = self._valid_slices_cache[subject.subject_id]
-            
+
             # Sample slices based on fraction
             if self._subject_slice_fraction < 1.0:
                 num_to_sample = max(1, int(len(valid_slices) * self._subject_slice_fraction))
@@ -152,7 +204,7 @@ class SubjectSliceDataset(Dataset):
                     sampled_slices = valid_slices
             else:
                 sampled_slices = valid_slices
-            
+
             for slice_idx in sampled_slices:
                 for orientation in self._orientations:
                     self._index_map.append((subject, slice_idx, orientation))

@@ -83,6 +83,7 @@ def create_dataloader(
         is_debug=config.debug,
         debug_slice_idx=config.debug_slice_idx,
         subject_slice_fraction=config.subject_slice_fraction,
+        subject_group_size=config.subject_group_size if is_train else None,
     )
 
     dataloader = DataLoader(

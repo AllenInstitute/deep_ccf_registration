@@ -507,6 +507,9 @@ def train(
     progress_logger = None
     batches_per_epoch = len(train_dataloader) if hasattr(train_dataloader, '__len__') else None
     batch_counter = 0
+    group_switch_counter = 0
+    # Switch groups every N batches (approximately 1 epoch through current group)
+    group_switch_interval = batches_per_epoch if batches_per_epoch is not None else 1000
 
     while True:
         model.train()
@@ -520,6 +523,16 @@ def train(
                 if batch_counter > 0 and batch_counter % batches_per_epoch == 0:
                     train_dataset.resample_slices()
             batch_counter += 1
+
+            # Switch to next subject group periodically
+            if train_dataset is not None and hasattr(train_dataset, 'switch_to_next_group'):
+                group_switch_counter += 1
+                if group_switch_counter >= group_switch_interval:
+                    train_dataset.switch_to_next_group()
+                    group_switch_counter = 0
+                    # Update batch count since dataset size changed
+                    batches_per_epoch = len(train_dataloader) if hasattr(train_dataloader, '__len__') else None
+                    group_switch_interval = batches_per_epoch if batches_per_epoch is not None else 1000
             if progress_logger is None and is_main_process():
                 progress_logger = ProgressLogger(desc='Training', total=max_iters, log_every=log_interval)
 
