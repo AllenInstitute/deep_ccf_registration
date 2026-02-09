@@ -734,5 +734,5 @@ def split_train_val_test(
     return train_metadata, val_metadata, test_metadata
 
 if __name__ == "__main__":
-    multiprocessing.set_start_method('spawn', force=True)   # tensorstore complains "fork" not allowed
+    multiprocessing.set_start_method('fork', force=True)
     main()
