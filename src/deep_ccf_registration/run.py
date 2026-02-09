@@ -1,7 +1,9 @@
 import multiprocessing
 import os
+import shutil
 import sys
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from importlib.metadata import distribution
 from pathlib import Path
 
@@ -12,6 +14,7 @@ import pandas as pd
 import torch
 import torch.distributed as dist
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
+from prompt_toolkit.shortcuts.progress_bar import Progress
 
 from torch.utils.data import DataLoader
 from contextlib import nullcontext
@@ -29,6 +32,8 @@ from deep_ccf_registration.metadata import SubjectMetadata, TissueBoundingBoxes,
     SubjectRotationAngle
 from deep_ccf_registration.models import UNetWithRegressionHeads
 from deep_ccf_registration.train import train
+from deep_ccf_registration.utils.logging_utils import ProgressLogger
+
 
 def create_dataloader(
     metadata: list[SubjectMetadata],
@@ -141,6 +146,95 @@ def setup_ddp() -> tuple[str, int]:
         device = None  # Will be set by config
 
     return device, world_size
+
+
+def _stage_single_file(src_path: Path, local_path: Path) -> str:
+    """Copy a single file from remote to local storage atomically.
+
+    Returns the filename for logging purposes.
+    """
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        dir=str(local_path.parent), suffix=".npy.tmp"
+    )
+    try:
+        os.close(tmp_fd)
+        shutil.copy2(str(src_path), tmp_path)
+        Path(tmp_path).rename(local_path)
+    except BaseException:
+        Path(tmp_path).unlink(missing_ok=True)
+        raise
+    return src_path.name
+
+
+def _prestage_data(
+    subject_ids: set[str],
+    cache_dir: Path,
+    local_cache_dir: Path,
+    max_workers: int = 8,
+) -> None:
+    """Copy volume and warp files from remote storage to local disk.
+
+    Runs once before training starts so that DataLoader workers can
+    mmap from fast local storage instead of slow remote filesystems.
+    Files that already exist locally are skipped.
+
+    Uses a thread pool to maximise EFS throughput (which scales with
+    concurrent connections).
+    """
+    subdirs = ["volumes", "warps"]
+    for subdir in subdirs:
+        (local_cache_dir / subdir).mkdir(parents=True, exist_ok=True)
+
+    # Collect files that need staging
+    to_stage: list[tuple[Path, Path]] = []
+
+    for subject_id in subject_ids:
+        for src_path, local_path in [
+            (
+                cache_dir / "volumes" / f"{subject_id}.npy",
+                local_cache_dir / "volumes" / f"{subject_id}.npy",
+            ),
+            (
+                cache_dir / "warps" / f"{subject_id}_warp.npy",
+                local_cache_dir / "warps" / f"{subject_id}_warp.npy",
+            ),
+        ]:
+            if not local_path.exists() and src_path.exists():
+                to_stage.append((src_path, local_path))
+
+    if not to_stage:
+        logger.info("All subject data already staged locally")
+        return
+
+    total = len(to_stage)
+    logger.info(
+        f"Staging {total} files from {cache_dir} -> {local_cache_dir} "
+        f"(max_workers={max_workers})"
+    )
+    progress_logger = ProgressLogger(
+        desc=f'copying data to {local_cache_dir}',
+        log_every=1,
+        total=total,
+    )
+
+    completed = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = {
+            executor.submit(_stage_single_file, src, dst): (src, dst)
+            for src, dst in to_stage
+        }
+        for future in as_completed(futures):
+            src, dst = futures[future]
+            try:
+                name = future.result()
+                completed += 1
+                logger.info(f"  [{completed}/{total}] {name}")
+            except Exception:
+                logger.exception(f"Failed to stage {src} -> {dst}")
+                raise
+            progress_logger.log_progress()
+
+    logger.info("Data staging complete")
 
 
 def _get_git_commit_from_package(package_name="deep-ccf-registration"):
@@ -279,10 +373,16 @@ def main(config_path: Path):
         ),
     )
 
-    # Create local cache directory for staging files from remote storage
+    # Pre-stage all subject data from remote storage to fast local disk
     if config.local_cache_dir is not None:
         config.local_cache_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"Local data cache: {config.local_cache_dir}")
+        all_subjects = set(s.subject_id for s in train_metadata + val_metadata)
+        _prestage_data(
+            subject_ids=all_subjects,
+            cache_dir=config.cache_dir,
+            local_cache_dir=config.local_cache_dir,
+        )
 
     train_dataloader = create_dataloader(
         metadata=train_metadata,
