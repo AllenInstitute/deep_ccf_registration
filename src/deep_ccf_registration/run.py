@@ -584,6 +584,9 @@ def main(config_path: Path):
             current_patience = start_patience_counter
             current_sched_state = scheduler_state_dict
             done = False
+            overall_progress = ProgressLogger(
+                desc='Training', total=config.max_iters, log_every=20,
+            )
 
             while current_step < config.max_iters and not done:
                 random.shuffle(all_train)
@@ -632,6 +635,7 @@ def main(config_path: Path):
                         start_best_val_loss=current_best_val_loss,
                         start_patience_counter=current_patience,
                         scheduler_state_dict=current_sched_state,
+                        progress_logger=overall_progress,
                         **train_kwargs,
                     )
 

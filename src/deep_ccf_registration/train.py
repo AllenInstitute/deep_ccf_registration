@@ -408,6 +408,7 @@ def train(
         scheduler_state_dict: Optional[dict] = None,
         train_dataset = None,
         val_dataset = None,
+        progress_logger: Optional[ProgressLogger] = None,
 ):
     """
     Train slice registration model
@@ -504,7 +505,6 @@ def train(
 
     scheduler = main_scheduler
 
-    progress_logger = None
     batches_per_epoch = len(train_dataloader) if hasattr(train_dataloader, '__len__') else None
     batch_counter = 0
 
