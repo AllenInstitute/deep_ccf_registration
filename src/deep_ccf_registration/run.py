@@ -14,7 +14,6 @@ import pandas as pd
 import torch
 import torch.distributed as dist
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
-from prompt_toolkit.shortcuts.progress_bar import Progress
 
 from torch.utils.data import DataLoader
 from contextlib import nullcontext
