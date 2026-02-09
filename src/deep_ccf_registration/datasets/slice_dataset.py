@@ -116,8 +116,8 @@ class SubjectSliceDataset(Dataset):
             self._subject_groups = self._create_subject_groups(subjects, subject_group_size)
             self._current_group_idx = 0
             self._current_group_subjects = self._subject_groups[self._current_group_idx]
-            logger.info(f"Created {len(self._subject_groups)} subject groups of size {subject_group_size}")
-            logger.info(f"Starting with group 0 containing {len(self._current_group_subjects)} subjects")
+            logger.info(f"Created {len(self._subject_groups)} subject groups of size ~{subject_group_size}")
+            self._log_current_group_info()
         else:
             self._subject_groups = None
             self._current_group_idx = None
@@ -147,6 +147,7 @@ class SubjectSliceDataset(Dataset):
         self._index_map: list[tuple[SubjectMetadata, int, SliceOrientation]] = []
         self._build_index_map()
         self._epoch_length = len(self._index_map)
+        logger.info(f"Dataset initialized with {len(self._index_map)} total samples")
 
     def _create_subject_groups(self, subjects: list[SubjectMetadata], group_size: int) -> list[list[SubjectMetadata]]:
         """Divide subjects into groups of specified size."""
@@ -156,6 +157,30 @@ class SubjectSliceDataset(Dataset):
         for i in range(0, len(shuffled), group_size):
             groups.append(shuffled[i:i + group_size])
         return groups
+
+    def _log_current_group_info(self):
+        """Log detailed information about the current subject group."""
+        if self._subject_groups is None:
+            return
+
+        subject_ids = [s.subject_id for s in self._current_group_subjects]
+        logger.info(
+            f"Group {self._current_group_idx}/{len(self._subject_groups)-1}: "
+            f"{len(self._current_group_subjects)} subjects - {', '.join(subject_ids)}"
+        )
+
+        # Log slice counts per subject
+        for subject in self._current_group_subjects:
+            valid_slices = self._valid_slices_cache[subject.subject_id]
+            if self._subject_slice_fraction < 1.0:
+                num_to_sample = max(1, int(len(valid_slices) * self._subject_slice_fraction))
+                sampled = min(num_to_sample, len(valid_slices))
+            else:
+                sampled = len(valid_slices)
+            logger.debug(
+                f"  {subject.subject_id}: {sampled}/{len(valid_slices)} slices "
+                f"(fraction={self._subject_slice_fraction:.2f})"
+            )
 
     def switch_to_next_group(self):
         """Switch to the next group of subjects. Wraps around to group 0 after the last group."""
@@ -177,10 +202,8 @@ class SubjectSliceDataset(Dataset):
         self._build_index_map()
         self._epoch_length = len(self._index_map)
 
-        logger.info(
-            f"Switched to subject group {self._current_group_idx}/{len(self._subject_groups)-1} "
-            f"with {len(self._current_group_subjects)} subjects, {len(self._index_map)} samples"
-        )
+        logger.info(f"Switched to group {self._current_group_idx}, total samples: {len(self._index_map)}")
+        self._log_current_group_info()
 
     def _build_index_map(self):
         """Build or rebuild the index map with slice sampling."""
