@@ -505,35 +505,28 @@ def train(
     scheduler = main_scheduler
 
     progress_logger = None
-    batches_per_epoch = len(train_dataloader) if hasattr(train_dataloader, '__len__') else None
     batch_counter = 0
-    group_switch_counter = 0
-    # Switch groups every N batches (approximately 1 epoch through current group)
-    group_switch_interval = batches_per_epoch if batches_per_epoch is not None else 1000
+    epoch_in_group = 0  # Track epochs within current subject group
 
     while True:
+        # Switch to next group or resample slices at the start of each epoch
+        if train_dataset is not None:
+            if hasattr(train_dataset, '_subject_group_size') and train_dataset._subject_group_size is not None:
+                # Switch groups after each epoch through the current group
+                if epoch_in_group > 0:  # Don't switch before first epoch
+                    train_dataset.switch_to_next_group()
+                epoch_in_group += 1
+            elif train_dataset._subject_slice_fraction < 1.0:
+                # Resample slices at epoch boundary when not using grouping
+                if batch_counter > 0:
+                    train_dataset.resample_slices()
+
         model.train()
         losses = []
         point_losses = []
         tissue_mask_losses = []
 
         for batch in train_dataloader:
-            # Handle subject grouping or slice resampling
-            if train_dataset is not None:
-                # If subject grouping is enabled, switch groups periodically
-                if hasattr(train_dataset, '_subject_group_size') and train_dataset._subject_group_size is not None:
-                    group_switch_counter += 1
-                    if group_switch_counter >= group_switch_interval:
-                        train_dataset.switch_to_next_group()
-                        group_switch_counter = 0
-                        # Update batch count since dataset size changed
-                        batches_per_epoch = len(train_dataloader) if hasattr(train_dataloader, '__len__') else None
-                        group_switch_interval = batches_per_epoch if batches_per_epoch is not None else 1000
-                # Otherwise, use regular slice resampling
-                elif batches_per_epoch is not None:
-                    if batch_counter > 0 and batch_counter % batches_per_epoch == 0:
-                        train_dataset.resample_slices()
-
             batch_counter += 1
             if progress_logger is None and is_main_process():
                 progress_logger = ProgressLogger(desc='Training', total=max_iters, log_every=log_interval)

@@ -86,18 +86,15 @@ def create_dataloader(
         subject_group_size=config.subject_group_size if is_train else None,
     )
 
-    # Use single worker when subject grouping is enabled to avoid
-    # loading subjects across multiple worker processes
-    use_workers = (
-        num_workers if is_train else 0
-    ) if config.subject_group_size is None else 0
+    # With subject grouping, workers will only load subjects from the current group
+    # Each worker gets a copy of the dataset with the same _current_group_subjects
+    use_workers = num_workers if is_train else 0
 
     if config.subject_group_size is not None and num_workers > 0 and is_train:
-        logger.warning(
-            f"Subject grouping is enabled (group_size={config.subject_group_size}). "
-            f"Overriding num_workers={num_workers} to 0 to prevent loading subjects "
-            f"across multiple worker processes. This ensures only {config.subject_group_size} "
-            f"subjects are in memory via memmap."
+        logger.info(
+            f"Subject grouping is enabled (group_size={config.subject_group_size}) with "
+            f"{num_workers} workers. Each worker will only load subjects from the current group "
+            f"(max {config.subject_group_size} subjects total across all workers via memmap)."
         )
 
     dataloader = DataLoader(
