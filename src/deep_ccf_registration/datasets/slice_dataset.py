@@ -393,8 +393,8 @@ class SubjectSliceDataset(Dataset):
         subject_id = metadata.subject_id
         if self._loaded_subject_id == subject_id:
             return
-        logger.debug(f"Loading subject {subject_id}")
         base = self._local_cache_dir if self._local_cache_dir is not None else self._cache_dir
+        logger.debug(f"Loading subject {subject_id} from {base}")
 
         vol_path = base / "volumes" / f"{subject_id}.npy"
         warp_path = base / "warps" / f"{subject_id}_warp.npy"
