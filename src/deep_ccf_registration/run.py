@@ -1,9 +1,7 @@
 import multiprocessing
 import os
-import shutil
 import sys
 import tempfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from importlib.metadata import distribution
 from pathlib import Path
 
@@ -33,9 +31,6 @@ from deep_ccf_registration.models import UNetWithRegressionHeads
 from deep_ccf_registration.train import train
 from deep_ccf_registration.utils.logging_utils import ProgressLogger
 
-_SENTINEL = object()
-
-
 def create_dataloader(
     metadata: list[SubjectMetadata],
     tissue_bboxes: TissueBoundingBoxes,
@@ -48,7 +43,6 @@ def create_dataloader(
     ls_template_parameters: TemplateParameters,
     ccf_annotations: np.ndarray,
     include_tissue_mask: bool = False,
-    local_cache_dir: Path | None = _SENTINEL,
 ):
     """
     Create a dataloader using SubjectSliceDataset (Map-style).
@@ -86,7 +80,6 @@ def create_dataloader(
         include_tissue_mask=include_tissue_mask,
         ccf_annotations=ccf_annotations,
         cache_dir=config.cache_dir,
-        local_cache_dir=config.local_cache_dir if local_cache_dir is _SENTINEL else local_cache_dir,
         rotate_slices=config.data_augmentation.rotate_slices and is_train,
         is_debug=config.debug,
         debug_slice_idx=config.debug_slice_idx,
@@ -148,95 +141,6 @@ def setup_ddp() -> tuple[str, int]:
         device = None  # Will be set by config
 
     return device, world_size
-
-
-def _stage_single_file(src_path: Path, local_path: Path) -> str:
-    """Copy a single file from remote to local storage atomically.
-
-    Returns the filename for logging purposes.
-    """
-    tmp_fd, tmp_path = tempfile.mkstemp(
-        dir=str(local_path.parent), suffix=".npy.tmp"
-    )
-    try:
-        os.close(tmp_fd)
-        shutil.copy2(str(src_path), tmp_path)
-        Path(tmp_path).rename(local_path)
-    except BaseException:
-        Path(tmp_path).unlink(missing_ok=True)
-        raise
-    return src_path.name
-
-
-def _prestage_data(
-    subject_ids: set[str],
-    cache_dir: Path,
-    local_cache_dir: Path,
-    max_workers: int = 32,
-) -> None:
-    """Copy volume and warp files from remote storage to local disk.
-
-    Runs once before training starts so that DataLoader workers can
-    mmap from fast local storage instead of slow remote filesystems.
-    Files that already exist locally are skipped.
-
-    Uses a thread pool to maximise EFS throughput (which scales with
-    concurrent connections).
-    """
-    subdirs = ["volumes", "warps"]
-    for subdir in subdirs:
-        (local_cache_dir / subdir).mkdir(parents=True, exist_ok=True)
-
-    # Collect files that need staging
-    to_stage: list[tuple[Path, Path]] = []
-
-    for subject_id in subject_ids:
-        for src_path, local_path in [
-            (
-                cache_dir / "volumes" / f"{subject_id}.npy",
-                local_cache_dir / "volumes" / f"{subject_id}.npy",
-            ),
-            (
-                cache_dir / "warps" / f"{subject_id}_warp.npy",
-                local_cache_dir / "warps" / f"{subject_id}_warp.npy",
-            ),
-        ]:
-            if not local_path.exists() and src_path.exists():
-                to_stage.append((src_path, local_path))
-
-    if not to_stage:
-        logger.info("All subject data already staged locally")
-        return
-
-    total = len(to_stage)
-    logger.info(
-        f"Staging {total} files from {cache_dir} -> {local_cache_dir} "
-        f"(max_workers={max_workers})"
-    )
-    progress_logger = ProgressLogger(
-        desc=f'copying data to {local_cache_dir}',
-        log_every=1,
-        total=total,
-    )
-
-    completed = 0
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(_stage_single_file, src, dst): (src, dst)
-            for src, dst in to_stage
-        }
-        for future in as_completed(futures):
-            src, dst = futures[future]
-            try:
-                name = future.result()
-                completed += 1
-                logger.info(f"  [{completed}/{total}] {name}")
-            except Exception:
-                logger.exception(f"Failed to stage {src} -> {dst}")
-                raise
-            progress_logger.log_progress()
-
-    logger.info("Data staging complete")
 
 
 def _get_git_commit_from_package(package_name="deep-ccf-registration"):
@@ -378,23 +282,10 @@ def main(config_path: Path):
     # Determine whether to use subject cycling or stage everything upfront
     use_subject_cycling = (
         config.subject_cache_size is not None
-        and config.local_cache_dir is not None
         and config.subject_cache_size < len(train_metadata)
     )
 
     if not use_subject_cycling:
-        # Original behavior: stage all subjects, create dataloaders once
-        if config.local_cache_dir is not None:
-            config.local_cache_dir.mkdir(parents=True, exist_ok=True)
-            logger.info(f"Local data cache: {config.local_cache_dir}")
-            all_subjects = set(s.subject_id for s in train_metadata + val_metadata)
-            _prestage_data(
-                subject_ids=all_subjects,
-                cache_dir=config.cache_dir,
-                local_cache_dir=config.local_cache_dir,
-                max_workers=config.prestage_workers,
-            )
-
         train_dataloader = create_dataloader(
             metadata=train_metadata,
             tissue_bboxes=tissue_bboxes,
@@ -408,11 +299,10 @@ def main(config_path: Path):
             include_tissue_mask=config.predict_tissue_mask,
             device=device,
         )
-        # Preload all subjects into RAM once — zero disk I/O during training
+
+        # Preload all subjects into RAM — workers share via COW (fork)
         train_dataloader.dataset.preload_subjects()
 
-    # Val dataloader: created once. In cycling mode, mmap from EFS directly
-    # (no local cache) since val uses 0 workers and runs infrequently.
     val_dataloader = create_dataloader(
         metadata=val_metadata,
         tissue_bboxes=tissue_bboxes,
@@ -425,7 +315,6 @@ def main(config_path: Path):
         include_tissue_mask=config.predict_tissue_mask,
         device=device,
         rotation_angles=rotation_angles,
-        local_cache_dir=None if use_subject_cycling else _SENTINEL,
     )
 
     logger.info(f"Train subjects: {len(train_metadata)}")
@@ -573,9 +462,7 @@ def main(config_path: Path):
         random.setstate(state)
 
         if use_subject_cycling:
-            config.local_cache_dir.mkdir(parents=True, exist_ok=True)
-            logger.info(f"Subject cycling: {config.subject_cache_size} subjects per group, "
-                        f"local cache: {config.local_cache_dir}")
+            logger.info(f"Subject cycling: {config.subject_cache_size} subjects per group")
 
             all_train = list(train_metadata)
             n = config.subject_cache_size
@@ -593,16 +480,8 @@ def main(config_path: Path):
                 groups = [all_train[i:i + n] for i in range(0, len(all_train), n)]
 
                 for group_idx, group in enumerate(groups):
-                    group_ids = {s.subject_id for s in group}
                     logger.info(f"Subject group {group_idx + 1}/{len(groups)}: "
                                 f"{len(group)} subjects, step {current_step}")
-
-                    _prestage_data(
-                        subject_ids=group_ids,
-                        cache_dir=config.cache_dir,
-                        local_cache_dir=config.local_cache_dir,
-                        max_workers=config.prestage_workers,
-                    )
 
                     train_dl = create_dataloader(
                         metadata=group,
@@ -616,9 +495,10 @@ def main(config_path: Path):
                         ccf_annotations=ccf_annotations,
                         include_tissue_mask=config.predict_tissue_mask,
                         device=device,
-                        local_cache_dir=config.local_cache_dir,
                     )
-                    # Preload group's subjects into RAM — zero disk I/O during training
+
+                    # Preload group's subjects into RAM (from EFS).
+                    # With fork, workers share via COW — zero extra RAM.
                     train_dl.dataset.preload_subjects()
 
                     # One pass through this group's data

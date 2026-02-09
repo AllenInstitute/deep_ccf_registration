@@ -127,14 +127,8 @@ class TrainConfig(BaseModel):
 
     # base directory containing /volumes and /warps caches
     cache_dir: Path = Path('/data')
-    # Fast local storage for staging files from slow remote filesystems (e.g. EFS).
-    # When set, volume/warp files are copied here before loading into RAM.
-    # Set to a path on local NVMe or instance storage (e.g. /tmp/data_cache).
-    local_cache_dir: Optional[Path] = None
-    # Number of threads for parallel data staging from remote to local storage.
-    prestage_workers: int = Field(32, ge=1)
-    # Number of train subjects to stage and train at a time.
-    # None = stage all subjects before training (default).
+    # Number of train subjects to load into RAM and train at a time.
+    # None = load all subjects at once (default).
     subject_cache_size: Optional[int] = None
 
     tmp_path: Path = Path('/tmp')

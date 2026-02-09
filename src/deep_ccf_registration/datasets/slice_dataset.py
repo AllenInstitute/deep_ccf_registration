@@ -82,7 +82,6 @@ class SubjectSliceDataset(Dataset):
         include_tissue_mask: bool = False,
         ccf_annotations: Optional[np.ndarray] = None,
         cache_dir: Path = Path('/data'),
-        local_cache_dir: Optional[Path] = None,
         rotate_slices: bool = False,
         is_debug: bool = False,
         debug_slice_idx: Optional[int] = None,
@@ -109,7 +108,6 @@ class SubjectSliceDataset(Dataset):
         self._tissue_bboxes = tissue_bboxes.bounding_boxes
         self._crop_size = crop_size
         self._cache_dir = cache_dir
-        self._local_cache_dir = local_cache_dir
         self._rotate_slices = rotate_slices
         self._rotation_angles = rotation_angles
         self._subject_slice_fraction = subject_slice_fraction
@@ -169,14 +167,13 @@ class SubjectSliceDataset(Dataset):
         Call once before training starts. Subsequent __getitem__ calls
         will look up from the preloaded dicts instead of hitting disk.
         """
-        base = self._local_cache_dir if self._local_cache_dir is not None else self._cache_dir
-        logger.info(f"Preloading {len(self._all_subjects)} subjects from {base}")
+        logger.info(f"Preloading {len(self._all_subjects)} subjects from {self._cache_dir}")
         for i, subject in enumerate(self._all_subjects):
             sid = subject.subject_id
             if sid in self._preloaded_volumes:
                 continue
-            vol_path = base / "volumes" / f"{sid}.npy"
-            warp_path = base / "warps" / f"{sid}_warp.npy"
+            vol_path = self._cache_dir / "volumes" / f"{sid}.npy"
+            warp_path = self._cache_dir / "warps" / f"{sid}_warp.npy"
             with timed():
                 self._preloaded_volumes[sid] = np.load(str(vol_path))
             with timed():
@@ -432,11 +429,10 @@ class SubjectSliceDataset(Dataset):
             return
 
         # Fallback: load from disk (for val or when preload not used)
-        base = self._local_cache_dir if self._local_cache_dir is not None else self._cache_dir
-        logger.debug(f"Loading subject {subject_id} from {base}")
+        logger.debug(f"Loading subject {subject_id} from {self._cache_dir}")
 
-        vol_path = base / "volumes" / f"{subject_id}.npy"
-        warp_path = base / "warps" / f"{subject_id}_warp.npy"
+        vol_path = self._cache_dir / "volumes" / f"{subject_id}.npy"
+        warp_path = self._cache_dir / "warps" / f"{subject_id}_warp.npy"
 
         for p in (vol_path, warp_path):
             if not p.exists():
