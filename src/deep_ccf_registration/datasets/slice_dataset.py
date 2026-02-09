@@ -109,6 +109,13 @@ class SubjectSliceDataset(Dataset):
         self._rotation_angles = rotation_angles
         self._subject_slice_fraction = subject_slice_fraction
 
+        # Precompute valid slices per subject (needed before grouping setup)
+        self._valid_slices_cache: dict[str, list[int]] = {}
+        for s in self._all_subjects:
+            bboxes = self._tissue_bboxes[s.subject_id]
+            valid = [i for i, b in enumerate(bboxes) if b is not None]
+            self._valid_slices_cache[s.subject_id] = valid
+
         # Subject grouping setup
         self._subject_group_size = subject_group_size
         if subject_group_size is not None:
@@ -122,13 +129,6 @@ class SubjectSliceDataset(Dataset):
             self._subject_groups = None
             self._current_group_idx = None
             self._current_group_subjects = self._all_subjects
-
-        # Precompute valid slices per subject
-        self._valid_slices_cache: dict[str, list[int]] = {}
-        for s in self._all_subjects:
-            bboxes = self._tissue_bboxes[s.subject_id]
-            valid = [i for i, b in enumerate(bboxes) if b is not None]
-            self._valid_slices_cache[s.subject_id] = valid
 
         # Debug mode: restrict to a single slice per subject
         if is_debug:
