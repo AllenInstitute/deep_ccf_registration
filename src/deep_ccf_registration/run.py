@@ -10,6 +10,8 @@ import mlflow
 import numpy as np
 import pandas as pd
 import torch
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy('file_system')
 import torch.distributed as dist
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 
@@ -615,5 +617,8 @@ def split_train_val_test(
 
 if __name__ == "__main__":
     multiprocessing.set_start_method('fork', force=True)
-    torch.multiprocessing.set_sharing_strategy('file_system')
+    # Raise open file limit for file_system sharing strategy
+    import resource
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    resource.setrlimit(resource.RLIMIT_NOFILE, (hard, hard))
     main()
