@@ -131,6 +131,8 @@ class TrainConfig(BaseModel):
     # When set, volume/warp files are copied here before loading into RAM.
     # Set to a path on local NVMe or instance storage (e.g. /tmp/data_cache).
     local_cache_dir: Optional[Path] = None
+    # Number of threads for parallel data staging from remote to local storage.
+    prestage_workers: int = Field(32, ge=1)
 
     tmp_path: Path = Path('/tmp')
 

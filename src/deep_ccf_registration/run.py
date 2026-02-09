@@ -169,7 +169,7 @@ def _prestage_data(
     subject_ids: set[str],
     cache_dir: Path,
     local_cache_dir: Path,
-    max_workers: int = 8,
+    max_workers: int = 32,
 ) -> None:
     """Copy volume and warp files from remote storage to local disk.
 
@@ -381,6 +381,7 @@ def main(config_path: Path):
             subject_ids=all_subjects,
             cache_dir=config.cache_dir,
             local_cache_dir=config.local_cache_dir,
+            max_workers=config.prestage_workers,
         )
 
     train_dataloader = create_dataloader(
