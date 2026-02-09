@@ -171,6 +171,7 @@ class SubjectSliceDataset(Dataset):
     def __len__(self) -> int:
         return self._epoch_length
 
+    @timed_func
     def __getitem__(self, index: int) -> PatchSample:
         if index >= len(self._index_map):
             raise IndexError(f"Index {index} out of range for dataset of size {len(self._index_map)}")
