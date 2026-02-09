@@ -1,3 +1,7 @@
+import torch
+import torch.multiprocessing
+torch.multiprocessing.set_sharing_strategy('file_system')
+
 import multiprocessing
 import os
 import sys
@@ -9,10 +13,6 @@ import click
 import mlflow
 import numpy as np
 import pandas as pd
-import torch
-import torch.multiprocessing
-torch.multiprocessing.set_sharing_strategy('file_system')
-print(torch.multiprocessing.get_sharing_strategy())
 import torch.distributed as dist
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 
