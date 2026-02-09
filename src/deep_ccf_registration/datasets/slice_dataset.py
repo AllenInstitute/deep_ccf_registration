@@ -1,6 +1,3 @@
-import os
-import shutil
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -397,63 +394,29 @@ class SubjectSliceDataset(Dataset):
         if self._loaded_subject_id == subject_id:
             return
         logger.debug(f"Loading subject {subject_id}")
+        base = self._local_cache_dir if self._local_cache_dir is not None else self._cache_dir
         self._volume = self._load_npy(
-            self._cache_dir / "volumes" / f"{subject_id}.npy"
+            base / "volumes" / f"{subject_id}.npy"
         )
         self._warp = self._load_npy(
-            self._cache_dir / "warps" / f"{subject_id}_warp.npy"
+            base / "warps" / f"{subject_id}_warp.npy"
         )
         self._cached_affine = Affine.from_ants_file(metadata.ls_to_template_affine_matrix_path)
         self._loaded_subject_id = subject_id
 
-    def _load_npy(self, src_path: Path) -> np.ndarray:
+    def _load_npy(self, path: Path) -> np.ndarray:
         """Load a .npy file as a memory-mapped array.
 
-        When local_cache_dir is set, files are copied from the remote
-        filesystem (e.g. EFS) to fast local storage on first access and
-        memory-mapped from there on subsequent accesses.  The local cache
-        is persistent and shared across all workers — files accumulate
-        over training so repeated visits to the same subject are fast.
-
-        Memory-mapping keeps RAM usage low regardless of num_workers,
-        and is fast on local disk (unlike EFS where page faults are expensive).
+        The caller (_ensure_subject_loaded) resolves the path to either
+        local_cache_dir or cache_dir.  Staging from remote to local is
+        handled by _prestage_data in run.py before training starts.
         """
-        if self._local_cache_dir is not None:
-            # Preserve subdirectory structure (volumes/, warps/)
-            relative = src_path.relative_to(self._cache_dir)
-            local_path = self._local_cache_dir / relative
-            if not local_path.exists():
-                # First access: stage from remote to local
-                if not src_path.exists():
-                    raise FileNotFoundError(
-                        f"Expected cached file at {src_path}. "
-                        "Precompute with cache_volume_and_warp_numpy.py."
-                    )
-                local_path.parent.mkdir(parents=True, exist_ok=True)
-                logger.debug(f"Staging {src_path} -> {local_path}")
-                # Write to temp file then atomic rename to avoid partial reads
-                # by other workers
-                tmp_fd, tmp_path = tempfile.mkstemp(
-                    dir=str(local_path.parent),
-                    suffix=".npy.tmp",
-                )
-                try:
-                    os.close(tmp_fd)
-                    shutil.copy2(str(src_path), tmp_path)
-                    Path(tmp_path).rename(local_path)
-                except BaseException:
-                    Path(tmp_path).unlink(missing_ok=True)
-                    raise
-            logger.debug(f"mmap from local cache: {local_path}")
-            return np.load(str(local_path), mmap_mode="r")
-
-        if not src_path.exists():
+        if not path.exists():
             raise FileNotFoundError(
-                f"Expected cached file at {src_path}. "
+                f"Expected cached file at {path}. "
                 "Precompute with cache_volume_and_warp_numpy.py."
             )
-        logger.debug(f"mmap from {src_path}")
-        return np.load(str(src_path), mmap_mode="r")
+        return np.load(str(path), mmap_mode="r")
 
     def _get_coordinate_grid(
         self,
