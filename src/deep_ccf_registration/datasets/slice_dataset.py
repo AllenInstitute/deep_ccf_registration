@@ -217,13 +217,14 @@ class SubjectSliceDataset(Dataset):
             coords_for_interp = coordinate_grid.T
             # Volume shape: (C, T, D0, D1, D2) - sample from spatial dims
             volume_3d = self._volume[0, 0]
-            interpolated_flat = map_coordinates_cropped(
-                volume=volume_3d,
-                coords=coords_for_interp,
-                order=1,  # linear interpolation
-                mode='constant',
-                cval=0.0,
-            )
+            with timed():
+                interpolated_flat = map_coordinates_cropped(
+                    volume=volume_3d,
+                    coords=coords_for_interp,
+                    order=1,  # linear interpolation
+                    mode='constant',
+                    cval=0.0,
+                )
             data_patch = interpolated_flat.reshape(patch_height, patch_width).astype("float32")
         else:
             spatial_slices = [0, 0, slice(None), slice(None), slice(None)]
@@ -406,14 +407,16 @@ class SubjectSliceDataset(Dataset):
                     "Precompute with cache_volume_and_warp_numpy.py."
                 )
 
-        # Volume is accessed sequentially per-slice → mmap is fine.
-        self._volume = np.load(str(vol_path), mmap_mode="r")
-        # Warp is accessed with scattered 3D coordinates by
-        # map_coordinates_cropped → load fully into RAM to avoid
-        # page-fault latency (0.08s–9.6s per sample when mmap'd).
-        self._warp = np.load(str(warp_path))
+        # Both mmap'd — map_coordinates_cropped forces the cropped
+        # subvolume into contiguous RAM before interpolation.
+        with timed():
+            self._volume = np.load(str(vol_path), mmap_mode="r")
+        with timed():
+            self._warp = np.load(str(warp_path), mmap_mode="r")
+        with timed():
+            self._cached_affine = Affine.from_ants_file(metadata.ls_to_template_affine_matrix_path)
 
-        self._cached_affine = Affine.from_ants_file(metadata.ls_to_template_affine_matrix_path)
+        logger.debug(f"Subject {subject_id} loaded: vol={self._volume.shape} warp={self._warp.shape}")
         self._loaded_subject_id = subject_id
 
     def _get_coordinate_grid(
