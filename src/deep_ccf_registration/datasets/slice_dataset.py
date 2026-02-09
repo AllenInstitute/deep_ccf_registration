@@ -407,12 +407,12 @@ class SubjectSliceDataset(Dataset):
                     "Precompute with cache_volume_and_warp_numpy.py."
                 )
 
-        # Both mmap'd — map_coordinates_cropped forces the cropped
-        # subvolume into contiguous RAM before interpolation.
+        # Load fully into RAM — mmap causes I/O contention when multiple
+        # workers page-fault into different subjects' files simultaneously.
         with timed():
-            self._volume = np.load(str(vol_path), mmap_mode="r")
+            self._volume = np.load(str(vol_path))
         with timed():
-            self._warp = np.load(str(warp_path), mmap_mode="r")
+            self._warp = np.load(str(warp_path))
         with timed():
             self._cached_affine = Affine.from_ants_file(metadata.ls_to_template_affine_matrix_path)
 
