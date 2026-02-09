@@ -1,8 +1,8 @@
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import tensorstore
 from loguru import logger
 from scipy.ndimage import map_coordinates
 from torch.utils.data import Dataset
@@ -11,11 +11,11 @@ from deep_ccf_registration.datasets.aquisition_meta import AcquisitionDirection
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.datasets.transforms import map_points_to_right_hemisphere, \
     apply_crop_pad_to_original, get_subject_rotation_range
-from deep_ccf_registration.datasets.utils.template_points import transform_points_to_template_space, apply_transforms_to_points, Affine
 from deep_ccf_registration.datasets.utils.interpolation import map_coordinates_cropped
 from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, TissueBoundingBoxes, \
     AcquisitionAxis, RotationAngles, SubjectRotationAngle
-from deep_ccf_registration.utils.logging_utils import timed, timed_func
+from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
+
 
 @dataclass(frozen=True)
 class PatchSample:
@@ -67,7 +67,8 @@ class SliceRotationRanges:
 
 
 class SubjectSliceDataset(Dataset):
-    """Map-style dataset that randomly samples slices from subjects."""
+    """Map-style dataset that loads volume slices and precomputed template
+    points directly from tensorstore (S3 / local zarr)."""
 
     def __init__(
         self,
@@ -77,11 +78,11 @@ class SubjectSliceDataset(Dataset):
         tissue_bboxes: TissueBoundingBoxes,
         rotation_angles: RotationAngles,
         orientations: list[SliceOrientation],
+        aws_credentials_method: str = "default",
         crop_size: Optional[tuple[int, int]] = None,
         transform: Optional[callable] = None,
         include_tissue_mask: bool = False,
         ccf_annotations: Optional[np.ndarray] = None,
-        cache_dir: Path = Path('/data'),
         rotate_slices: bool = False,
         is_debug: bool = False,
         debug_slice_idx: Optional[int] = None,
@@ -96,18 +97,10 @@ class SubjectSliceDataset(Dataset):
         self._include_tissue_mask = include_tissue_mask
         self._ccf_annotations = ccf_annotations
         self._orientations = orientations
+        self._aws_credentials_method = aws_credentials_method
 
-        self._loaded_subject_id: Optional[str] = None
-        self._volume: Optional[np.ndarray] = None
-        self._warp: Optional[np.ndarray] = None
-        self._cached_affine: Optional[Affine] = None
-        # Preloaded subject data: populated by preload_subjects()
-        self._preloaded_volumes: dict[str, np.ndarray] = {}
-        self._preloaded_warps: dict[str, np.ndarray] = {}
-        self._preloaded_affines: dict[str, Affine] = {}
         self._tissue_bboxes = tissue_bboxes.bounding_boxes
         self._crop_size = crop_size
-        self._cache_dir = cache_dir
         self._rotate_slices = rotate_slices
         self._rotation_angles = rotation_angles
         self._subject_slice_fraction = subject_slice_fraction
@@ -142,7 +135,7 @@ class SubjectSliceDataset(Dataset):
         self._index_map.clear()
         for subject in self._all_subjects:
             valid_slices = self._valid_slices_cache[subject.subject_id]
-            
+
             # Sample slices based on fraction
             if self._subject_slice_fraction < 1.0:
                 num_to_sample = max(1, int(len(valid_slices) * self._subject_slice_fraction))
@@ -156,52 +149,14 @@ class SubjectSliceDataset(Dataset):
                     sampled_slices = valid_slices
             else:
                 sampled_slices = valid_slices
-            
+
             for slice_idx in sampled_slices:
                 for orientation in self._orientations:
                     self._index_map.append((subject, slice_idx, orientation))
 
-    def preload_subjects(self, subject_ids: Optional[set[str]] = None):
-        """Load subjects' volumes and warps into RAM.
-
-        Args:
-            subject_ids: If provided, only load these subjects.
-                         If None, load all subjects.
-        """
-        subjects_to_load = [
-            s for s in self._all_subjects
-            if (subject_ids is None or s.subject_id in subject_ids)
-            and s.subject_id not in self._preloaded_volumes
-        ]
-        logger.info(f"Preloading {len(subjects_to_load)} subjects from {self._cache_dir}")
-        for i, subject in enumerate(subjects_to_load):
-            sid = subject.subject_id
-            vol_path = self._cache_dir / "volumes" / f"{sid}.npy"
-            warp_path = self._cache_dir / "warps" / f"{sid}_warp.npy"
-            with timed():
-                self._preloaded_volumes[sid] = np.load(str(vol_path))
-            with timed():
-                self._preloaded_warps[sid] = np.load(str(warp_path))
-            self._preloaded_affines[sid] = Affine.from_ants_file(
-                subject.ls_to_template_affine_matrix_path
-            )
-            logger.info(f"Preloaded {i+1}/{len(subjects_to_load)}: {sid}")
-        logger.info("Subjects preloaded into RAM")
-
-    def filter_to_subjects(self, subject_ids: set[str]):
-        """Filter index map to only include entries for the given subjects.
-
-        Used by worker_init_fn so each worker only serves its shard.
-        """
-        self._index_map = [
-            (s, idx, o) for s, idx, o in self._index_map
-            if s.subject_id in subject_ids
-        ]
-        self._epoch_length = len(self._index_map)
-
     def resample_slices(self):
         """Resample slices for a new epoch.
-        
+
         Call this at the start of each epoch to randomly sample a new set of slices
         based on the subject_slice_fraction.
         """
@@ -213,14 +168,25 @@ class SubjectSliceDataset(Dataset):
     def __len__(self) -> int:
         return self._epoch_length
 
-    @timed_func
     def __getitem__(self, index: int) -> PatchSample:
         if index >= len(self._index_map):
             raise IndexError(f"Index {index} out of range for dataset of size {len(self._index_map)}")
         subject, slice_idx, orientation = self._index_map[index]
-        self._ensure_subject_loaded(subject)
         spec = SliceSampleSpec(metadata=subject, slice_idx=slice_idx, orientation=orientation)
         return self._load_slice(spec=spec)
+
+    def _open_tensorstore(self, path: str) -> tensorstore.TensorStore:
+        """Open a tensorstore array for reading."""
+        return tensorstore.open(
+            spec={
+                'driver': 'auto',
+                'kvstore': create_kvstore(
+                    path=path,
+                    aws_credentials_method=self._aws_credentials_method,
+                ),
+            },
+            read=True,
+        ).result()
 
     def _load_slice(self, spec: SliceSampleSpec) -> PatchSample:
         metadata = spec.metadata
@@ -238,47 +204,95 @@ class SubjectSliceDataset(Dataset):
         patch_height = bbox.height
         patch_width = bbox.width
 
-
-        coordinate_grid = self._get_coordinate_grid(
-            experiment_meta=metadata,
-            start_y=start_y,
-            start_x=start_x,
-            height=patch_height,
-            width=patch_width,
-            slice_axis=slice_axis,
-            fixed_index_value=spec.slice_idx,
-            orientation=spec.orientation,
-            subject_bboxes=self._tissue_bboxes[metadata.subject_id],
-        )
+        # Open tensorstore for volume and template points
+        volume_path = f"{metadata.stitched_volume_path}/{metadata.registration_downsample}"
+        volume_store = self._open_tensorstore(volume_path)
+        tp_store = self._open_tensorstore(metadata.get_template_points_path())
 
         if self._rotate_slices:
-            # Interpolate volume at rotated coordinate locations
-            # coordinate_grid: (n_points, 3), map_coordinates needs (3, n_points)
-            coords_for_interp = coordinate_grid.T
-            # Volume shape: (C, T, D0, D1, D2) - sample from spatial dims
-            volume_3d = self._volume[0, 0]
-            with timed():
-                interpolated_flat = map_coordinates_cropped(
-                    volume=volume_3d,
+            coordinate_grid = self._get_coordinate_grid(
+                experiment_meta=metadata,
+                start_y=start_y,
+                start_x=start_x,
+                height=patch_height,
+                width=patch_width,
+                slice_axis=slice_axis,
+                fixed_index_value=spec.slice_idx,
+                orientation=spec.orientation,
+                subject_bboxes=self._tissue_bboxes[metadata.subject_id],
+            )
+            
+            # Rotated case: read a 3D slab and interpolate
+            coords = coordinate_grid  # (n_points, 3)
+
+            # Compute bounding box of the coordinates in volume space
+            mins = np.floor(coords.min(axis=0)).astype(int)
+            maxs = np.ceil(coords.max(axis=0)).astype(int) + 1  # +1 for interpolation margin
+
+            # Clamp to volume bounds
+            vol_shape = metadata.registered_shape
+            mins = np.clip(mins, 0, [s - 1 for s in vol_shape])
+            maxs = np.clip(maxs, mins + 1, vol_shape)
+
+            # Read slab from tensorstore
+            vol_slab = np.array(
+                volume_store[0, 0,
+                    mins[0]:maxs[0],
+                    mins[1]:maxs[1],
+                    mins[2]:maxs[2],
+                ].read().result()
+            )
+            tp_slab = np.array(
+                tp_store[0, 0,
+                    mins[0]:maxs[0],
+                    mins[1]:maxs[1],
+                    mins[2]:maxs[2],
+                    :,
+                ].read().result()
+            )
+
+            # Shift coordinates to slab-local space
+            local_coords = coords - mins[np.newaxis, :]
+            coords_for_interp = local_coords.T  # (3, n_points)
+
+            interpolated_flat = map_coordinates_cropped(
+                volume=vol_slab,
+                coords=coords_for_interp,
+                order=1,
+                mode='constant',
+                cval=0.0,
+            )
+            data_patch = interpolated_flat.reshape(patch_height, patch_width).astype("float32")
+
+            # Interpolate template points (3 channels)
+            tp_channels = []
+            for c in range(3):
+                tp_c = map_coordinates_cropped(
+                    volume=tp_slab[..., c],
                     coords=coords_for_interp,
-                    order=1,  # linear interpolation
+                    order=1,
                     mode='constant',
                     cval=0.0,
                 )
-            data_patch = interpolated_flat.reshape(patch_height, patch_width).astype("float32")
+                tp_channels.append(tp_c)
+            template_patch = np.stack(tp_channels, axis=-1).reshape(patch_height, patch_width, 3)
         else:
-            spatial_slices = [0, 0, slice(None), slice(None), slice(None)]
-            spatial_slices[2 + slice_axis.dimension] = spec.slice_idx
-            spatial_slices[2 + y_axis.dimension] = slice(start_y, start_y + patch_height)
-            spatial_slices[2 + x_axis.dimension] = slice(start_x, start_x + patch_width)
-            data_patch = self._volume[tuple(spatial_slices)].astype("float32")
+            # Non-rotated case: read a single slice crop directly
+            slices = [0, 0, slice(None), slice(None), slice(None)]
+            slices[2 + slice_axis.dimension] = spec.slice_idx
+            slices[2 + y_axis.dimension] = slice(start_y, start_y + patch_height)
+            slices[2 + x_axis.dimension] = slice(start_x, start_x + patch_width)
 
-        template_patch = self._get_template_points(
-            point_grid=coordinate_grid,
-            patch_height=patch_height,
-            patch_width=patch_width,
-            experiment_meta=metadata,
-        )
+            data_patch = np.array(
+                volume_store[tuple(slices)].read().result()
+            ).astype("float32")
+
+            # Template points: same spatial slicing + all 3 coords
+            # tp_store shape: (C, T, D0, D1, D2, 3)
+            tp_slices = list(slices) + [slice(None)]  # add : for the 3 coord channels
+            template_patch = np.array(
+                tp_store[tuple(tp_slices)].read().result()
+            )  # (H, W, 3)
 
         template_patch = map_points_to_right_hemisphere(
             template_points=template_patch,
@@ -366,37 +380,6 @@ class SubjectSliceDataset(Dataset):
             eval_shape=eval_shape,
         )
 
-    @timed_func
-    def _get_template_points(
-        self,
-        point_grid: np.ndarray,
-        patch_height: int,
-        patch_width: int,
-        experiment_meta: SubjectMetadata,
-    ) -> np.ndarray:
-
-        with timed():
-            points = transform_points_to_template_space(
-                points=point_grid,
-                input_volume_shape=self._volume.shape[2:],
-                acquisition_axes=experiment_meta.axes,
-                ls_template_info=self._template_parameters,
-                registration_downsample=experiment_meta.registration_downsample
-            )
-
-        with timed():
-            template_points = apply_transforms_to_points(
-                points=points,
-                template_parameters=self._template_parameters,
-                cached_affine=self._cached_affine,
-                warp=self._warp,
-            )
-
-        with timed():
-            template_points = template_points.reshape((patch_height, patch_width, 3))
-
-        return template_points
-
     def _get_shape_after_resize(self, replay: dict, original_shape: tuple[int, int]) -> tuple[int, int]:
         """
         Compute the image shape after resize transforms (Resample, LongestMaxSize).
@@ -429,42 +412,6 @@ class SubjectSliceDataset(Dataset):
                 break
 
         return (h, w)
-
-    def _ensure_subject_loaded(self, metadata: SubjectMetadata):
-        subject_id = metadata.subject_id
-        if self._loaded_subject_id == subject_id:
-            return
-
-        # Fast path: use preloaded data (no disk I/O)
-        if subject_id in self._preloaded_volumes:
-            self._volume = self._preloaded_volumes[subject_id]
-            self._warp = self._preloaded_warps[subject_id]
-            self._cached_affine = self._preloaded_affines[subject_id]
-            self._loaded_subject_id = subject_id
-            return
-
-        # Fallback: load from disk (for val or when preload not used)
-        logger.debug(f"Loading subject {subject_id} from {self._cache_dir}")
-
-        vol_path = self._cache_dir / "volumes" / f"{subject_id}.npy"
-        warp_path = self._cache_dir / "warps" / f"{subject_id}_warp.npy"
-
-        for p in (vol_path, warp_path):
-            if not p.exists():
-                raise FileNotFoundError(
-                    f"Expected cached file at {p}. "
-                    "Precompute with cache_volume_and_warp_numpy.py."
-                )
-
-        with timed():
-            self._volume = np.load(str(vol_path), mmap_mode="r")
-        with timed():
-            self._warp = np.load(str(warp_path), mmap_mode="r")
-        with timed():
-            self._cached_affine = Affine.from_ants_file(metadata.ls_to_template_affine_matrix_path)
-
-        logger.debug(f"Subject {subject_id} loaded: vol={self._volume.shape} warp={self._warp.shape}")
-        self._loaded_subject_id = subject_id
 
     def _get_coordinate_grid(
         self,

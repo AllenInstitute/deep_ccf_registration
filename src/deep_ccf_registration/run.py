@@ -13,7 +13,7 @@ import torch
 import torch.distributed as dist
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 
-from torch.utils.data import DataLoader, IterableDataset
+from torch.utils.data import DataLoader
 from contextlib import nullcontext
 from loguru import logger
 import json
@@ -29,55 +29,6 @@ from deep_ccf_registration.metadata import SubjectMetadata, TissueBoundingBoxes,
     SubjectRotationAngle
 from deep_ccf_registration.models import UNetWithRegressionHeads
 from deep_ccf_registration.train import train
-from deep_ccf_registration.utils.logging_utils import ProgressLogger
-
-class ShardedIterableDataset(IterableDataset):
-    """Wraps a SubjectSliceDataset so each worker iterates only its own
-    subject shard. No oversampling — each sample is yielded exactly once.
-
-    On init in a worker (via __iter__), subjects are assigned round-robin
-    to workers. Each worker preloads its shard, filters to those subjects,
-    shuffles, and yields.
-    """
-
-    def __init__(self, map_dataset):
-        self._map_dataset = map_dataset
-        self._initialized = False
-
-    @property
-    def dataset(self):
-        """Access the underlying map-style dataset."""
-        return self._map_dataset
-
-    def __iter__(self):
-        info = torch.utils.data.get_worker_info()
-        ds = self._map_dataset
-
-        if info is not None:
-            # Multi-worker: shard subjects
-            worker_id = info.id
-            num_workers = info.num_workers
-
-            if not self._initialized:
-                all_sids = [s.subject_id for s in ds._all_subjects]
-                my_sids = set(all_sids[worker_id::num_workers])
-                ds.preload_subjects(subject_ids=my_sids)
-                ds.filter_to_subjects(subject_ids=my_sids)
-                self._initialized = True
-
-            # Shuffle index map each iteration
-            indices = list(range(len(ds._index_map)))
-            np.random.shuffle(indices)
-        else:
-            # Single-process: iterate everything
-            indices = list(range(len(ds._index_map)))
-            np.random.shuffle(indices)
-
-        for idx in indices:
-            yield ds[idx]
-
-    def __len__(self):
-        return len(self._map_dataset)
 
 
 def create_dataloader(
@@ -94,10 +45,7 @@ def create_dataloader(
     include_tissue_mask: bool = False,
 ):
     """
-    Create a dataloader using SubjectSliceDataset.
-
-    When num_workers > 0 for training, wraps in ShardedIterableDataset
-    so each worker loads and serves only its subject shard (no oversampling).
+    Create a dataloader using SubjectSliceDataset (Map-style).
 
     Returns a DataLoader that yields collated batch dicts.
     """
@@ -120,7 +68,7 @@ def create_dataloader(
         rotation_angles=rotation_angles,
     )
 
-    map_dataset = SubjectSliceDataset(
+    dataset = SubjectSliceDataset(
         subjects=metadata,
         template_parameters=template_parameters,
         is_train=is_train,
@@ -131,39 +79,26 @@ def create_dataloader(
         transform=transform,
         include_tissue_mask=include_tissue_mask,
         ccf_annotations=ccf_annotations,
-        cache_dir=config.cache_dir,
+        aws_credentials_method=config.tensorstore_aws_credentials_method,
         rotate_slices=config.data_augmentation.rotate_slices and is_train,
         is_debug=config.debug,
         debug_slice_idx=config.debug_slice_idx,
         subject_slice_fraction=config.subject_slice_fraction,
     )
 
-    effective_num_workers = num_workers if is_train else 0
-
-    if effective_num_workers > 0:
-        dataset = ShardedIterableDataset(map_dataset)
-    else:
-        dataset = map_dataset
-
     dataloader = DataLoader(
         dataset=dataset,
         batch_size=batch_size,
-        shuffle=isinstance(dataset, SubjectSliceDataset),  # only map-style
-        num_workers=effective_num_workers,
+        shuffle=True,
+        # using 0 workers (main process) for eval,
+        # to keep mem usage lower
+        num_workers=num_workers if is_train else 0,
         collate_fn=collate_patch_samples,
         pin_memory=device == 'cuda',
-        persistent_workers=is_train and effective_num_workers > 0,
+        persistent_workers=is_train and num_workers > 0
     )
 
     return dataloader
-
-
-def _unwrap_dataset(dataset):
-    """Get the underlying SubjectSliceDataset, unwrapping ShardedIterableDataset if needed."""
-    if isinstance(dataset, ShardedIterableDataset):
-        return dataset.dataset
-    return dataset
-
 
 logger.remove()
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -344,27 +279,19 @@ def main(config_path: Path):
         ),
     )
 
-    # Determine whether to use subject cycling or stage everything upfront
-    use_subject_cycling = (
-        config.subject_cache_size is not None
-        and config.subject_cache_size < len(train_metadata)
+    train_dataloader = create_dataloader(
+        metadata=train_metadata,
+        tissue_bboxes=tissue_bboxes,
+        rotation_angles=rotation_angles,
+        config=config,
+        batch_size=config.batch_size,
+        num_workers=config.num_workers,
+        ls_template_parameters=ls_template_parameters,
+        is_train=True,
+        ccf_annotations=ccf_annotations,
+        include_tissue_mask=config.predict_tissue_mask,
+        device=device,
     )
-
-    if not use_subject_cycling:
-        train_dataloader = create_dataloader(
-            metadata=train_metadata,
-            tissue_bboxes=tissue_bboxes,
-            rotation_angles=rotation_angles,
-            config=config,
-            batch_size=config.batch_size,
-            num_workers=config.num_workers,
-            ls_template_parameters=ls_template_parameters,
-            is_train=True,
-            ccf_annotations=ccf_annotations,
-            include_tissue_mask=config.predict_tissue_mask,
-            device=device,
-        )
-
     val_dataloader = create_dataloader(
         metadata=val_metadata,
         tissue_bboxes=tissue_bboxes,
@@ -481,34 +408,6 @@ def main(config_path: Path):
     else:
         mlflow_run = nullcontext()
 
-    # Common kwargs for train() calls
-    train_kwargs = dict(
-        val_dataloader=val_dataloader,
-        model=model,
-        optimizer=opt,
-        val_dataset=val_dataloader.dataset,
-        model_weights_out_dir=config.model_weights_out_dir,
-        learning_rate=config.learning_rate,
-        eval_interval=config.eval_interval,
-        patience=config.patience,
-        min_delta=config.min_delta,
-        autocast_context=autocast_context,
-        scaler=scaler,
-        device=device,
-        eval_iters=config.eval_iters,
-        is_debug=config.debug,
-        ls_template_parameters=ls_template_parameters,
-        ccf_annotations=ccf_annotations,
-        val_viz_samples=config.val_viz_samples,
-        exclude_background_pixels=config.exclude_background_pixels,
-        lr_scheduler=config.lr_scheduler,
-        normalize_target_points=config.normalize_template_points,
-        predict_tissue_mask=config.predict_tissue_mask,
-        gradient_accumulation_steps=config.gradient_accumulation_steps,
-        grad_clip_max_norm=config.grad_clip_max_norm,
-        warmup_steps=config.warmup_steps,
-    )
-
     with mlflow_run:
         if is_main_process() and not config.resume_mlflow_run_id:
             # Only log params on new runs (not resume)
@@ -523,90 +422,40 @@ def main(config_path: Path):
         # Restore original seeded state
         random.setstate(state)
 
-        if use_subject_cycling:
-            logger.info(f"Subject cycling: {config.subject_cache_size} subjects per group")
-
-            all_train = list(train_metadata)
-            n = config.subject_cache_size
-            current_step = start_step
-            current_best_val_loss = start_best_val_loss
-            current_patience = start_patience_counter
-            current_sched_state = scheduler_state_dict
-            done = False
-            overall_progress = ProgressLogger(
-                desc='Training', total=config.max_iters, log_every=20,
-            )
-
-            while current_step < config.max_iters and not done:
-                random.shuffle(all_train)
-                groups = [all_train[i:i + n] for i in range(0, len(all_train), n)]
-
-                for group_idx, group in enumerate(groups):
-                    logger.info(f"Subject group {group_idx + 1}/{len(groups)}: "
-                                f"{len(group)} subjects, step {current_step}")
-
-                    train_dl = create_dataloader(
-                        metadata=group,
-                        tissue_bboxes=tissue_bboxes,
-                        rotation_angles=rotation_angles,
-                        config=config,
-                        batch_size=config.batch_size,
-                        num_workers=config.num_workers,
-                        ls_template_parameters=ls_template_parameters,
-                        is_train=True,
-                        ccf_annotations=ccf_annotations,
-                        include_tissue_mask=config.predict_tissue_mask,
-                        device=device,
-                    )
-
-                    # One pass through this group's data
-                    group_max_iters = min(
-                        current_step + len(train_dl),
-                        config.max_iters,
-                    )
-
-                    result = train(
-                        train_dataloader=train_dl,
-                        max_iters=group_max_iters,
-                        train_dataset=_unwrap_dataset(train_dl.dataset),
-                        start_step=current_step,
-                        start_best_val_loss=current_best_val_loss,
-                        start_patience_counter=current_patience,
-                        scheduler_state_dict=current_sched_state,
-                        progress_logger=overall_progress,
-                        **train_kwargs,
-                    )
-
-                    current_step = result["global_step"]
-                    current_best_val_loss = result["best_val_loss"]
-                    current_patience = result["patience_counter"]
-                    current_sched_state = result["scheduler_state_dict"]
-
-                    # Clean up dataloader workers before next group
-                    del train_dl
-
-                    if current_step >= config.max_iters:
-                        done = True
-                        break
-                    if current_patience >= config.patience:
-                        done = True
-                        break
-
-            best_val_loss = current_best_val_loss
-
-        else:
-            # Original path: single train() call with all subjects
-            result = train(
-                train_dataloader=train_dataloader,
-                max_iters=config.max_iters,
-                train_dataset=_unwrap_dataset(train_dataloader.dataset),
-                start_step=start_step,
-                start_best_val_loss=start_best_val_loss,
-                start_patience_counter=start_patience_counter,
-                scheduler_state_dict=scheduler_state_dict,
-                **train_kwargs,
-            )
-            best_val_loss = result["best_val_loss"]
+        best_val_loss = train(
+            train_dataloader=train_dataloader,
+            val_dataloader=val_dataloader,
+            model=model,
+            optimizer=opt,
+            max_iters=config.max_iters,
+            train_dataset=train_dataloader.dataset,
+            val_dataset=val_dataloader.dataset,
+            model_weights_out_dir=config.model_weights_out_dir,
+            learning_rate=config.learning_rate,
+            eval_interval=config.eval_interval,
+            patience=config.patience,
+            min_delta=config.min_delta,
+            autocast_context=autocast_context,
+            scaler=scaler,
+            device=device,
+            eval_iters=config.eval_iters,
+            is_debug=config.debug,
+            ls_template_parameters=ls_template_parameters,
+            ccf_annotations=ccf_annotations,
+            val_viz_samples=config.val_viz_samples,
+            exclude_background_pixels=config.exclude_background_pixels,
+            lr_scheduler=config.lr_scheduler,
+            normalize_target_points=config.normalize_template_points,
+            predict_tissue_mask=config.predict_tissue_mask,
+            gradient_accumulation_steps=config.gradient_accumulation_steps,
+            grad_clip_max_norm=config.grad_clip_max_norm,
+            warmup_steps=config.warmup_steps,
+            # Resume state from checkpoint
+            start_step=start_step,
+            start_best_val_loss=start_best_val_loss,
+            start_patience_counter=start_patience_counter,
+            scheduler_state_dict=scheduler_state_dict,
+        )
 
     if is_main_process():
         logger.info("=" * 60)

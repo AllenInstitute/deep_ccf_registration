@@ -35,6 +35,28 @@ class SubjectMetadata(BaseModel):
     sagittal_midline: Optional[int] = None
     ls_to_template_inverse_warp_path_original: Path
     ls_to_template_affine_matrix_path: Path
+    # Path to precomputed template points zarr (from scripts/create_point_map.py)
+    template_points_path: Optional[str | Path] = None
+
+    def get_template_points_path(self) -> str:
+        """
+        If template_points_path is not passed, infer it from the stitched_path root prefix
+        """
+        if self.template_points_path is not None:
+            return str(self.template_points_path)
+        # Extract the prefix from stitched_volume_path
+        # e.g., s3://aind-open-data/SmartSPIM_806624_2025-08-27_15-42-18_stitched_2025-08-29_22-47-08/image_tile_fusing/OMEZarr/Ex_639_Em_680.zarr
+        # extract: SmartSPIM_806624_2025-08-27_15-42-18_stitched_2025-08-29_22-47-08
+        stitched_path = str(self.stitched_volume_path)
+        if stitched_path.startswith('s3://'):
+            parts = stitched_path.split('/')
+            prefix = parts[3]
+        else:
+            raise ValueError(
+                'template_points_path not passed and stitched_volume_path is not an s3 uri. '
+                'Cannot infer template_points_path'
+            )
+        return f"s3://marmot-development-802451596237-us-west-2/smartspim-registration/{prefix}/{self.subject_id}_template_points.zarr"
 
     def get_slice_shape(self, orientation: SliceOrientation):
         axes_except_slice = [ax for ax in self.axes if ax != self.get_slice_axis(orientation=orientation)]

@@ -125,12 +125,6 @@ class TrainConfig(BaseModel):
     debug_start_x: Optional[int] = None
     debug_slice_idx: Optional[int] = None
 
-    # base directory containing /volumes and /warps caches
-    cache_dir: Path = Path('/data')
-    # Number of train subjects to load into RAM and train at a time.
-    # None = load all subjects at once (default).
-    subject_cache_size: Optional[int] = None
-
     tmp_path: Path = Path('/tmp')
 
     data_augmentation: DataAugmentationConfig

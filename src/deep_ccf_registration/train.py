@@ -408,7 +408,6 @@ def train(
         scheduler_state_dict: Optional[dict] = None,
         train_dataset = None,
         val_dataset = None,
-        progress_logger: Optional[ProgressLogger] = None,
 ):
     """
     Train slice registration model
@@ -444,6 +443,7 @@ def train(
     """
     os.makedirs(model_weights_out_dir, exist_ok=True)
 
+    progress_logger = None
     calc_coord_loss = MSE(reduction='mean')
     best_val_loss = start_best_val_loss
     patience_counter = start_patience_counter
@@ -730,12 +730,7 @@ def train(
                         if is_main_process():
                             mlflow.log_metric("final_best_val_rmse", best_val_loss)
 
-                        return {
-                            "best_val_loss": best_val_loss,
-                            "global_step": global_step,
-                            "patience_counter": patience_counter,
-                            "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
-                        }
+                        return best_val_loss
 
                     # Reset train losses for next eval period
                     point_losses = []
@@ -749,9 +744,4 @@ def train(
 
                     if is_main_process():
                         mlflow.log_metric("final_best_val_rmse", best_val_loss)
-                    return {
-                        "best_val_loss": best_val_loss,
-                        "global_step": global_step,
-                        "patience_counter": patience_counter,
-                        "scheduler_state_dict": scheduler.state_dict() if scheduler else None,
-                    }
+                    return best_val_loss
