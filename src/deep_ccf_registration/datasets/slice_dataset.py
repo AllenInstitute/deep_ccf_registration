@@ -404,8 +404,12 @@ class SubjectSliceDataset(Dataset):
             raise FileNotFoundError(
                 f"Expected cached volume at {npy_path}. Precompute with cache_volume_and_warp_numpy.py."
             )
-        logger.debug(f"Loading volume from cache: {npy_path}")
-        return np.load(str(npy_path), mmap_mode="r")
+        logger.debug(f"Loading volume into RAM from cache: {npy_path}")
+        # Load fully into RAM — when rotate_slices is enabled, the volume is
+        # sampled via map_coordinates_cropped with random 3D access patterns
+        # (oblique slices). Mmap causes expensive page faults on every sample.
+        # Only one subject's volume is held at a time.
+        return np.load(str(npy_path))
 
     def _load_warp(self, metadata: SubjectMetadata) -> np.ndarray:
         npy_cache_path = self._cache_dir / "warps" / f"{metadata.subject_id}_warp.npy"
@@ -413,8 +417,12 @@ class SubjectSliceDataset(Dataset):
             raise FileNotFoundError(
                 f"Expected cached warp at {npy_cache_path}. Precompute with cache_volume_and_warp_numpy.py."
             )
-        logger.debug(f"Loading warp from cache: {npy_cache_path}")
-        return np.load(str(npy_cache_path), mmap_mode="r")
+        logger.debug(f"Loading warp into RAM from cache: {npy_cache_path}")
+        # Load fully into RAM (not mmap) — warp is accessed via random 3D
+        # subvolume slicing in map_coordinates_cropped, and mmap causes
+        # expensive page faults on every sample. Only one subject's warp is
+        # held in memory at a time, so the footprint is manageable.
+        return np.load(str(npy_cache_path))
 
     def _get_coordinate_grid(
         self,

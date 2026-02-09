@@ -7,7 +7,6 @@ import aind_smartspim_transform_utils
 import numpy as np
 from aind_smartspim_transform_utils.utils.utils import get_orientation, \
     convert_to_ants_space, convert_from_ants_space
-from concurrent.futures import ThreadPoolExecutor
 from scipy.ndimage import map_coordinates
 
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
@@ -171,19 +170,18 @@ def apply_transforms_to_points(
 
     with timed():
         coords = affine_transformed_voxels.T
-        # Parallel interpolation - map_coordinates releases the GIL
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = [
-                executor.submit(
-                    map_coordinates_cropped,
+        displacements = np.stack(
+            [
+                map_coordinates_cropped(
                     warp[i],
                     coords,
                     order=1,
                     mode="nearest",
                 )
                 for i in range(3)
-            ]
-            displacements = np.stack([f.result() for f in futures], axis=-1)
+            ],
+            axis=-1,
+        )
 
     with timed():
         # apply displacement vector to affine transformed points
