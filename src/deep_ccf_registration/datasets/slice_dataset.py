@@ -486,10 +486,35 @@ class SubjectSliceDataset(Dataset):
             local_cache_path = self._local_cache_dir / "volumes" / f"{metadata.subject_id}.npy"
             local_cache_path.parent.mkdir(parents=True, exist_ok=True)
 
-            if not local_cache_path.exists():
-                logger.info(f"Copying volume to local cache: {metadata.subject_id}")
-                import shutil
-                shutil.copy2(npy_path, local_cache_path)
+            # Use file locking to prevent concurrent copies by multiple workers
+            lock_path = local_cache_path.with_suffix('.lock')
+
+            import fcntl
+            import shutil
+            import os
+
+            # Acquire lock
+            with open(lock_path, 'w') as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+                # Check if file exists and is valid
+                needs_copy = False
+                if not local_cache_path.exists():
+                    needs_copy = True
+                else:
+                    # Validate file size matches source
+                    if local_cache_path.stat().st_size != npy_path.stat().st_size:
+                        logger.warning(f"Local cache file size mismatch, recopying: {metadata.subject_id}")
+                        needs_copy = True
+
+                if needs_copy:
+                    logger.info(f"Copying volume to local cache: {metadata.subject_id}")
+                    # Copy to temp file first, then atomic rename
+                    temp_path = local_cache_path.with_suffix('.tmp')
+                    shutil.copy2(npy_path, temp_path)
+                    os.rename(temp_path, local_cache_path)
+
+                # Lock is released when exiting context
 
             logger.debug(f"Loading volume from local cache: {local_cache_path}")
             return np.load(str(local_cache_path), mmap_mode="r")
@@ -509,10 +534,35 @@ class SubjectSliceDataset(Dataset):
             local_cache_path = self._local_cache_dir / "warps" / f"{metadata.subject_id}_warp.npy"
             local_cache_path.parent.mkdir(parents=True, exist_ok=True)
 
-            if not local_cache_path.exists():
-                logger.info(f"Copying warp to local cache: {metadata.subject_id}")
-                import shutil
-                shutil.copy2(npy_cache_path, local_cache_path)
+            # Use file locking to prevent concurrent copies by multiple workers
+            lock_path = local_cache_path.with_suffix('.lock')
+
+            import fcntl
+            import shutil
+            import os
+
+            # Acquire lock
+            with open(lock_path, 'w') as lock_file:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+
+                # Check if file exists and is valid
+                needs_copy = False
+                if not local_cache_path.exists():
+                    needs_copy = True
+                else:
+                    # Validate file size matches source
+                    if local_cache_path.stat().st_size != npy_cache_path.stat().st_size:
+                        logger.warning(f"Local cache warp size mismatch, recopying: {metadata.subject_id}")
+                        needs_copy = True
+
+                if needs_copy:
+                    logger.info(f"Copying warp to local cache: {metadata.subject_id}")
+                    # Copy to temp file first, then atomic rename
+                    temp_path = local_cache_path.with_suffix('.tmp')
+                    shutil.copy2(npy_cache_path, temp_path)
+                    os.rename(temp_path, local_cache_path)
+
+                # Lock is released when exiting context
 
             logger.debug(f"Loading warp from local cache: {local_cache_path}")
             return np.load(str(local_cache_path), mmap_mode="r")
