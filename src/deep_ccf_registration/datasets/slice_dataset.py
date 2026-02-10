@@ -87,6 +87,7 @@ class SubjectSliceDataset(Dataset):
         debug_slice_idx: Optional[int] = None,
         subject_slice_fraction: float = 0.25,
         subject_group_size: Optional[int] = None,
+        local_cache_dir: Optional[Path] = None,
     ):
         if include_tissue_mask and ccf_annotations is None:
             raise ValueError("include_tissue_mask=True requires ccf_annotations")
@@ -105,6 +106,7 @@ class SubjectSliceDataset(Dataset):
         self._tissue_bboxes = tissue_bboxes.bounding_boxes
         self._crop_size = crop_size
         self._cache_dir = cache_dir
+        self._local_cache_dir = local_cache_dir
         self._rotate_slices = rotate_slices
         self._rotation_angles = rotation_angles
         self._subject_slice_fraction = subject_slice_fraction
@@ -478,8 +480,22 @@ class SubjectSliceDataset(Dataset):
             raise FileNotFoundError(
                 f"Expected cached volume at {npy_path}. Precompute with cache_volume_and_warp_numpy.py."
             )
-        logger.debug(f"Loading volume from cache: {npy_path}")
-        return np.load(str(npy_path), mmap_mode="r")
+
+        # Use fast local cache if available and subject grouping is enabled
+        if self._subject_group_size is not None and self._local_cache_dir is not None:
+            local_cache_path = self._local_cache_dir / "volumes" / f"{metadata.subject_id}.npy"
+            local_cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+            if not local_cache_path.exists():
+                logger.info(f"Copying volume to local cache: {metadata.subject_id}")
+                import shutil
+                shutil.copy2(npy_path, local_cache_path)
+
+            logger.debug(f"Loading volume from local cache: {local_cache_path}")
+            return np.load(str(local_cache_path), mmap_mode="r")
+        else:
+            logger.debug(f"Loading volume from cache: {npy_path}")
+            return np.load(str(npy_path), mmap_mode="r")
 
     def _load_warp(self, metadata: SubjectMetadata) -> np.ndarray:
         npy_cache_path = self._cache_dir / "warps" / f"{metadata.subject_id}_warp.npy"
@@ -487,8 +503,22 @@ class SubjectSliceDataset(Dataset):
             raise FileNotFoundError(
                 f"Expected cached warp at {npy_cache_path}. Precompute with cache_volume_and_warp_numpy.py."
             )
-        logger.debug(f"Loading warp from cache: {npy_cache_path}")
-        return np.load(str(npy_cache_path), mmap_mode="r")
+
+        # Use fast local cache if available and subject grouping is enabled
+        if self._subject_group_size is not None and self._local_cache_dir is not None:
+            local_cache_path = self._local_cache_dir / "warps" / f"{metadata.subject_id}_warp.npy"
+            local_cache_path.parent.mkdir(parents=True, exist_ok=True)
+
+            if not local_cache_path.exists():
+                logger.info(f"Copying warp to local cache: {metadata.subject_id}")
+                import shutil
+                shutil.copy2(npy_cache_path, local_cache_path)
+
+            logger.debug(f"Loading warp from local cache: {local_cache_path}")
+            return np.load(str(local_cache_path), mmap_mode="r")
+        else:
+            logger.debug(f"Loading warp from cache: {npy_cache_path}")
+            return np.load(str(npy_cache_path), mmap_mode="r")
 
     def _get_coordinate_grid(
         self,

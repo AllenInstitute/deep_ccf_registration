@@ -128,8 +128,12 @@ class TrainConfig(BaseModel):
     debug_start_x: Optional[int] = None
     debug_slice_idx: Optional[int] = None
 
-    # base directory containing /volumes and /warps caches
+    # base directory containing /volumes and /warps caches (e.g., EFS)
     cache_dir: Path = Path('/data')
+
+    # local cache directory for fast access (e.g., EBS, local SSD, /tmp)
+    # When subject_group_size is set, files are copied here on first read
+    local_cache_dir: Optional[Path] = Path('/tmp/deep_ccf_cache')
 
     tmp_path: Path = Path('/tmp')
 
