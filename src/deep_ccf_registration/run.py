@@ -88,7 +88,7 @@ def create_dataloader(
 
     # With subject grouping, workers will only load subjects from the current group
     # Each worker gets a copy of the dataset with the same _current_group_subjects
-    use_workers = num_workers if is_train else 0
+    num_workers = num_workers if is_train else 0
 
     dataloader = DataLoader(
         dataset=dataset,
@@ -96,12 +96,12 @@ def create_dataloader(
         shuffle=True,
         # using 0 workers (main process) for eval,
         # to keep mem usage lower
-        num_workers=use_workers,
+        num_workers=num_workers,
         collate_fn=collate_patch_samples,
         pin_memory=device == 'cuda',
-        persistent_workers=is_train and use_workers > 0,
+        persistent_workers=is_train and num_workers > 0,
         # try get around issue "unable to allocate shared memory(shm) for file"
-        multiprocessing_context='spawn'
+        multiprocessing_context='spawn' if is_train and num_workers > 0 else None,
     )
 
     return dataloader
