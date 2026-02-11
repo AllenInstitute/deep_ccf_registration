@@ -71,6 +71,7 @@ def main(resample_to_fixed_resolution: int = None):
     config.data_augmentation.apply_grid_distortion = False
     config.seed = None
     config.debug_slice_idx = 709
+    config.debug = True
 
     config.patch_size = (512, 512)
     config.resample_to_fixed_resolution = resample_to_fixed_resolution

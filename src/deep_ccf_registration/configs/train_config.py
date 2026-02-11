@@ -138,3 +138,4 @@ class TrainConfig(BaseModel):
     tmp_path: Path = Path('/tmp')
 
     data_augmentation: DataAugmentationConfig
+    map_points_to_right_hemisphere: bool = True

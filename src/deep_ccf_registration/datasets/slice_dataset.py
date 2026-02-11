@@ -88,6 +88,7 @@ class SubjectSliceDataset(Dataset):
         subject_slice_fraction: float = 0.25,
         subject_group_size: Optional[int] = None,
         local_cache_dir: Optional[Path] = None,
+        map_points_to_right_hemisphere: bool = True
     ):
         if include_tissue_mask and ccf_annotations is None:
             raise ValueError("include_tissue_mask=True requires ccf_annotations")
@@ -110,6 +111,7 @@ class SubjectSliceDataset(Dataset):
         self._rotate_slices = rotate_slices
         self._rotation_angles = rotation_angles
         self._subject_slice_fraction = subject_slice_fraction
+        self._map_points_to_right_hemisphere = map_points_to_right_hemisphere
 
         # Precompute valid slices per subject (needed before grouping setup)
         self._valid_slices_cache: dict[str, list[int]] = {}
@@ -313,10 +315,11 @@ class SubjectSliceDataset(Dataset):
             experiment_meta=metadata,
         )
 
-        template_patch = map_points_to_right_hemisphere(
-            template_points=template_patch,
-            template_parameters=self._template_parameters,
-        )
+        if self._map_points_to_right_hemisphere:
+            template_patch = map_points_to_right_hemisphere(
+                template_points=template_patch,
+                template_parameters=self._template_parameters,
+            )
 
         tissue_mask = None
         if self._include_tissue_mask and self._ccf_annotations is not None:

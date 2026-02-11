@@ -85,6 +85,7 @@ def create_dataloader(
         subject_slice_fraction=config.subject_slice_fraction,
         subject_group_size=config.subject_group_size if is_train else None,
         local_cache_dir=config.local_cache_dir,
+        map_points_to_right_hemisphere=config.map_points_to_right_hemisphere
     )
 
     # With subject grouping, workers will only load subjects from the current group
