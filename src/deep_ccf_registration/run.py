@@ -526,6 +526,6 @@ def split_train_val_test(
     return train_metadata, val_metadata, test_metadata
 
 if __name__ == "__main__":
-    torch.multiprocessing.set_sharing_strategy('file_system')
+    torch.multiprocessing.set_start_method('spawn', force=True)
     multiprocessing.set_start_method('spawn', force=True)   # tensorstore complains "fork" not allowed
     main()
