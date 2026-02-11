@@ -1,3 +1,4 @@
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -90,7 +91,8 @@ class SubjectSliceDataset(Dataset):
         debug_slice_idx: Optional[int] = None,
         subject_slice_fraction: float = 0.25,
         map_points_to_right_hemisphere: bool = True,
-        aws_credentials_method: Optional[str] = None
+        aws_credentials_method: Optional[str] = None,
+        tmp_dir: Path = Path('/tmp'),
     ):
         if include_tissue_mask and ccf_annotations is None:
             raise ValueError("include_tissue_mask=True requires ccf_annotations")
@@ -109,16 +111,20 @@ class SubjectSliceDataset(Dataset):
         self._subject_slice_fraction = subject_slice_fraction
         self._map_points_to_right_hemisphere = map_points_to_right_hemisphere
         self._subjects = subjects
+        self._subjects_by_id = {s.subject_id: s for s in subjects}
         self._volumes = self._read_volumes()
         self._warps = self._read_warps(aws_credentials_method=aws_credentials_method)
         self._is_debug = is_debug
         self._debug_slice_idx = debug_slice_idx
 
+        # SQLite database for index map
+        self._db_path = tmp_dir / "subject_metadata.db"
+        self._db_path.parent.mkdir(parents=True, exist_ok=True)
+
         # Build flat index mapping for map-style access
-        self._index_map: list[tuple[SubjectMetadata, int, SliceOrientation]] = []
         self._build_index_map()
-        self._epoch_length = len(self._index_map)
-        logger.info(f"Dataset initialized with {len(self._index_map)} total samples")
+        self._epoch_length = self._get_index_map_length()
+        logger.info(f"Dataset initialized with {self._epoch_length} total samples")
 
     def _read_volumes(self):
         volumes = {}
@@ -152,12 +158,41 @@ class SubjectSliceDataset(Dataset):
             warps[subject.subject_id] = warp
         return warps
 
-    def _build_index_map(self):
-        """Build or rebuild the index map with slice sampling."""
-        self._index_map.clear()
+    def _get_db_connection(self) -> sqlite3.Connection:
+        return sqlite3.connect(str(self._db_path))
 
+    def _get_index_map_length(self) -> int:
+        with self._get_db_connection() as conn:
+            return conn.execute("SELECT COUNT(*) FROM index_map").fetchone()[0]
+
+    def _get_index_map_entry(self, index: int) -> tuple[SubjectMetadata, int, SliceOrientation]:
+        with self._get_db_connection() as conn:
+            row = conn.execute(
+                "SELECT subject_id, slice_idx, orientation FROM index_map WHERE idx = ?",
+                (index,)
+            ).fetchone()
+        if row is None:
+            raise IndexError(f"Index {index} out of range")
+        subject_id, slice_idx, orientation_value = row
+        return self._subjects_by_id[subject_id], slice_idx, SliceOrientation(orientation_value)
+
+    def _build_index_map(self) -> None:
+        """Build or rebuild the index map with slice sampling, stored in SQLite."""
         bboxes = pd.read_parquet(self._tissue_bboxes_path).set_index('subject_id')
 
+        conn = self._get_db_connection()
+        conn.execute("DROP TABLE IF EXISTS index_map")
+        conn.execute(
+            "CREATE TABLE index_map ("
+            "  idx INTEGER PRIMARY KEY,"
+            "  subject_id TEXT NOT NULL,"
+            "  slice_idx INTEGER NOT NULL,"
+            "  orientation TEXT NOT NULL"
+            ")"
+        )
+
+        idx = 0
+        rows = []
         for subject in self._subjects:
             subject_bboxes = bboxes.loc[subject.subject_id]
             valid_slices = subject_bboxes['index'].tolist()
@@ -184,7 +219,15 @@ class SubjectSliceDataset(Dataset):
 
             for slice_idx in sampled_slices:
                 for orientation in self._orientations:
-                    self._index_map.append((subject, slice_idx, orientation))
+                    rows.append((idx, subject.subject_id, slice_idx, orientation.value))
+                    idx += 1
+
+        conn.executemany(
+            "INSERT INTO index_map (idx, subject_id, slice_idx, orientation) VALUES (?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+        conn.close()
 
     def resample_slices(self):
         """Resample slices for a new epoch.
@@ -194,16 +237,14 @@ class SubjectSliceDataset(Dataset):
         """
         if self._subject_slice_fraction < 1.0:
             self._build_index_map()
-            self._epoch_length = len(self._index_map)
+            self._epoch_length = self._get_index_map_length()
             logger.info(f"Resampled slices: {self._epoch_length} total samples across {len(self._subjects)} subjects")
 
     def __len__(self) -> int:
         return self._epoch_length
 
     def __getitem__(self, index: int) -> PatchSample:
-        if index >= len(self._index_map):
-            raise IndexError(f"Index {index} out of range for dataset of size {len(self._index_map)}")
-        subject, slice_idx, orientation = self._index_map[index]
+        subject, slice_idx, orientation = self._get_index_map_entry(index)
         spec = SliceSampleSpec(metadata=subject, slice_idx=slice_idx, orientation=orientation)
 
         metadata = spec.metadata
