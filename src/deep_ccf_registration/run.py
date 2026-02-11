@@ -98,10 +98,8 @@ def create_dataloader(
         # to keep mem usage lower
         num_workers=num_workers,
         collate_fn=collate_patch_samples,
-        pin_memory=device == 'cuda',
-        persistent_workers=is_train and num_workers > 0,
-        # try get around issue "unable to allocate shared memory(shm) for file"
-        multiprocessing_context='spawn' if is_train and num_workers > 0 else None,
+        pin_memory=False,
+        persistent_workers=num_workers > 0,
     )
 
     return dataloader
