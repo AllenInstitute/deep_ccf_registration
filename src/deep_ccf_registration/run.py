@@ -98,7 +98,7 @@ def create_dataloader(
         # to keep mem usage lower
         num_workers=num_workers,
         collate_fn=collate_patch_samples,
-        pin_memory=False,
+        pin_memory=device == 'cuda',
         persistent_workers=num_workers > 0,
     )
 
@@ -526,5 +526,6 @@ def split_train_val_test(
     return train_metadata, val_metadata, test_metadata
 
 if __name__ == "__main__":
+    torch.multiprocessing.set_sharing_strategy('file_system')
     multiprocessing.set_start_method('spawn', force=True)   # tensorstore complains "fork" not allowed
     main()
