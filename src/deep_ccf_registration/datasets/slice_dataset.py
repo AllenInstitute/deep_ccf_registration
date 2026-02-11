@@ -1,7 +1,9 @@
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 import tensorstore
 from loguru import logger
 from scipy.ndimage import map_coordinates
@@ -14,7 +16,7 @@ from deep_ccf_registration.datasets.transforms import map_points_to_right_hemisp
 from deep_ccf_registration.datasets.utils.template_points import transform_points_to_template_space, apply_transforms_to_points, Affine
 from deep_ccf_registration.datasets.utils.interpolation import map_coordinates_cropped
 from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, TissueBoundingBoxes, \
-    AcquisitionAxis, RotationAngles, SubjectRotationAngle
+    AcquisitionAxis, RotationAngles, SubjectRotationAngle, TissueBoundingBox
 from deep_ccf_registration.utils.logging_utils import timed, timed_func
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 
@@ -76,7 +78,7 @@ class SubjectSliceDataset(Dataset):
         subjects: list[SubjectMetadata],
         template_parameters: TemplateParameters,
         is_train: bool,
-        tissue_bboxes: TissueBoundingBoxes,
+        tissue_bboxes_path: Path,
         rotation_angles: RotationAngles,
         orientations: list[SliceOrientation],
         crop_size: Optional[tuple[int, int]] = None,
@@ -100,7 +102,7 @@ class SubjectSliceDataset(Dataset):
         self._orientations = orientations
 
         self._cached_affine: Optional[Affine] = None
-        self._tissue_bboxes = tissue_bboxes.bounding_boxes
+        self._tissue_bboxes_path = tissue_bboxes_path
         self._crop_size = crop_size
         self._rotate_slices = rotate_slices
         self._rotation_angles = rotation_angles
@@ -109,28 +111,8 @@ class SubjectSliceDataset(Dataset):
         self._subjects = subjects
         self._volumes = self._read_volumes()
         self._warps = self._read_warps(aws_credentials_method=aws_credentials_method)
-
-        # Precompute valid slices per subject (needed before grouping setup)
-        self._valid_slices_cache: dict[str, list[int]] = {}
-        for s in subjects:
-            bboxes = self._tissue_bboxes[s.subject_id]
-            valid = [i for i, b in enumerate(bboxes) if b is not None]
-            self._valid_slices_cache[s.subject_id] = valid
-
         self._is_debug = is_debug
-
-        # Debug mode: restrict to a single slice per subject
-        if is_debug:
-            for subject_id, valid_slices in self._valid_slices_cache.items():
-                if debug_slice_idx is not None:
-                    if debug_slice_idx in valid_slices:
-                        self._valid_slices_cache[subject_id] = [debug_slice_idx]
-                    else:
-                        # Fall back to middle slice if debug_slice_idx not valid
-                        self._valid_slices_cache[subject_id] = [valid_slices[len(valid_slices) // 2]]
-                else:
-                    # Default debug: use middle slice
-                    self._valid_slices_cache[subject_id] = [valid_slices[len(valid_slices) // 2]]
+        self._debug_slice_idx = debug_slice_idx
 
         # Build flat index mapping for map-style access
         self._index_map: list[tuple[SubjectMetadata, int, SliceOrientation]] = []
@@ -174,22 +156,31 @@ class SubjectSliceDataset(Dataset):
         """Build or rebuild the index map with slice sampling."""
         self._index_map.clear()
 
-        for subject in self._subjects:
-            valid_slices = self._valid_slices_cache[subject.subject_id]
+        bboxes = pd.read_parquet(self._tissue_bboxes_path).set_index('subject_id')
 
-            # Sample slices based on fraction
-            if self._subject_slice_fraction < 1.0:
-                num_to_sample = max(1, int(len(valid_slices) * self._subject_slice_fraction))
-                if num_to_sample < len(valid_slices):
-                    sampled_slices = np.random.choice(
-                        valid_slices,
-                        size=num_to_sample,
-                        replace=False
-                    ).tolist()
+        for subject in self._subjects:
+            subject_bboxes = bboxes.loc[subject.subject_id]
+            valid_slices = subject_bboxes['index'].tolist()
+
+            if self._is_debug:
+                if self._debug_slice_idx is not None:
+                    sampled_slices = [self._debug_slice_idx]
+                else:
+                    sampled_slices = [valid_slices[len(valid_slices) // 2]]
+            else:
+                # Sample slices based on fraction
+                if self._subject_slice_fraction < 1.0:
+                    num_to_sample = max(1, int(len(valid_slices) * self._subject_slice_fraction))
+                    if num_to_sample < len(valid_slices):
+                        sampled_slices = np.random.choice(
+                            valid_slices,
+                            size=num_to_sample,
+                            replace=False
+                        ).tolist()
+                    else:
+                        sampled_slices = valid_slices
                 else:
                     sampled_slices = valid_slices
-            else:
-                sampled_slices = valid_slices
 
             for slice_idx in sampled_slices:
                 for orientation in self._orientations:
@@ -219,12 +210,12 @@ class SubjectSliceDataset(Dataset):
 
         slice_axis = metadata.get_slice_axis(spec.orientation)
 
-        bbox = self._tissue_bboxes[metadata.subject_id][spec.slice_idx]
-
-        start_y = bbox.y
-        start_x = bbox.x
-        patch_height = bbox.height
-        patch_width = bbox.width
+        subject_bboxes = pd.read_parquet(self._tissue_bboxes_path, filters=[("subject_id", "==", metadata.subject_id)])
+        bbox = subject_bboxes[subject_bboxes['index'] == spec.slice_idx].iloc[0]
+        start_y = bbox['y']
+        start_x = bbox['x']
+        patch_height = bbox['height']
+        patch_width = bbox['width']
 
         coordinate_grid = self._get_coordinate_grid(
             experiment_meta=metadata,
@@ -235,7 +226,7 @@ class SubjectSliceDataset(Dataset):
             slice_axis=slice_axis,
             fixed_index_value=spec.slice_idx,
             orientation=spec.orientation,
-            subject_bboxes=self._tissue_bboxes[metadata.subject_id],
+            tissue_slices_indices=subject_bboxes['index'].tolist(),
         )
 
         if self._rotate_slices:
@@ -251,6 +242,12 @@ class SubjectSliceDataset(Dataset):
                 patch_width=patch_width,
                 experiment_meta=metadata,
                 spec=spec,
+                bbox=TissueBoundingBox(
+                    y=bbox['y'],
+                    x=bbox['x'],
+                    width=bbox['width'],
+                    height=bbox['height']
+                )
             )
 
         template_points = self._get_template_points(
@@ -354,6 +351,7 @@ class SubjectSliceDataset(Dataset):
         patch_height: int,
         patch_width: int,
         spec: SliceSampleSpec,
+        bbox: TissueBoundingBox,
     ) -> np.ndarray:
         slice_axis = experiment_meta.get_slice_axis(orientation=spec.orientation)
         axes = sorted(experiment_meta.axes, key=lambda axis: axis.dimension)
@@ -361,8 +359,6 @@ class SubjectSliceDataset(Dataset):
         if len(in_plane_axes) != 2:
             raise ValueError("Expected exactly two in-plane axes")
         y_axis, x_axis = in_plane_axes
-
-        bbox = self._tissue_bboxes[experiment_meta.subject_id][spec.slice_idx]
 
         start_y = bbox.y
         start_x = bbox.x
@@ -472,8 +468,8 @@ class SubjectSliceDataset(Dataset):
         width: int,
         fixed_index_value: int,
         slice_axis: AcquisitionAxis,
+        tissue_slices_indices: list[int],
         orientation: Optional[SliceOrientation] = None,
-        subject_bboxes: Optional[list] = None,
 
     ):
         if self._rotate_slices:
@@ -485,9 +481,8 @@ class SubjectSliceDataset(Dataset):
             )
 
             # Compute tissue depth range from bounding boxes
-            tissue_slices = [i for i, x in enumerate(subject_bboxes) if x is not None]
-            tissue_min = min(tissue_slices)
-            tissue_max = max(tissue_slices)
+            tissue_min = min(tissue_slices_indices)
+            tissue_max = max(tissue_slices_indices)
             bounded_x_range, bounded_y_range = compute_bounded_rotation_ranges(
                 slice_idx=fixed_index_value,
                 patch_height=height,

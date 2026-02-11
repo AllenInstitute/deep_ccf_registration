@@ -32,7 +32,7 @@ from deep_ccf_registration.train import train
 
 def create_dataloader(
     metadata: list[SubjectMetadata],
-    tissue_bboxes: TissueBoundingBoxes,
+    tissue_bboxes_path: Path,
     rotation_angles: RotationAngles,
     config: TrainConfig,
     is_train: bool,
@@ -71,7 +71,7 @@ def create_dataloader(
         subjects=metadata,
         template_parameters=template_parameters,
         is_train=is_train,
-        tissue_bboxes=tissue_bboxes,
+        tissue_bboxes_path=tissue_bboxes_path,
         rotation_angles=rotation_angles,
         orientations=[config.orientation] if config.orientation is not None else [],
         crop_size=config.patch_size,
@@ -157,6 +157,25 @@ def _get_git_commit_from_package(package_name="deep-ccf-registration"):
     commit = direct_url["vcs_info"]["commit_id"]
     url = direct_url["url"]
     return commit, url
+
+def _convert_tissue_bboxes_to_parquet(config: TrainConfig, bboxes: TissueBoundingBoxes):
+    rows = []
+    for key, boxes in bboxes.bounding_boxes.items():
+        for i, box in enumerate(boxes):
+            if box is not None:
+                rows.append({
+                    "subject_id": key,
+                    "index": i,
+                    "y": box.y,
+                    "x": box.x,
+                    "width": box.width,
+                    "height": box.height,
+                })
+
+    df = pd.DataFrame(rows)
+    path = config.tmp_path / "tissue_bounding_boxes.parquet"
+    df.to_parquet(config.tmp_path / "tissue_bounding_boxes.parquet", index=False)
+    return path
 
 @click.command()
 @click.option(
@@ -256,7 +275,7 @@ def main(config_path: Path):
 
     # write ccf_annotations to memmap. this avoids RAM overhead of multiple workers
     # spawning with a copy of this data
-    ccf_annotations_path = Path(tempfile.mktemp(suffix='.npy', dir=config.tmp_path))
+    ccf_annotations_path = config.tmp_path / 'ccf_annotations.npy'
     np.save(ccf_annotations_path, ccf_annotations)
     del ccf_annotations
     ccf_annotations = np.load(ccf_annotations_path, mmap_mode='r')
@@ -264,6 +283,10 @@ def main(config_path: Path):
     with open(config.tissue_bounding_boxes_path) as f:
         tissue_bboxes = json.load(f)
     tissue_bboxes = TissueBoundingBoxes(bounding_boxes=tissue_bboxes)
+
+    # convert tissue_bboxes to parquet so we can load a single subject at a time
+    # and don't need to store all in memory
+    tissue_bboxes_parquet_path = _convert_tissue_bboxes_to_parquet(config=config, bboxes=tissue_bboxes)
 
     with open(config.rotation_angles_path) as f:
         rotation_angles = pd.read_csv(f).set_index('subject_id')
@@ -285,7 +308,7 @@ def main(config_path: Path):
 
     train_dataloader = create_dataloader(
         metadata=train_metadata,
-        tissue_bboxes=tissue_bboxes,
+        tissue_bboxes_path=tissue_bboxes_parquet_path,
         rotation_angles=rotation_angles,
         config=config,
         batch_size=config.batch_size,
@@ -298,7 +321,7 @@ def main(config_path: Path):
     )
     val_dataloader = create_dataloader(
         metadata=val_metadata,
-        tissue_bboxes=tissue_bboxes,
+        tissue_bboxes_path=tissue_bboxes_parquet_path,
         config=config,
         batch_size=config.batch_size,
         num_workers=min(2, config.num_workers),
@@ -526,6 +549,5 @@ def split_train_val_test(
     return train_metadata, val_metadata, test_metadata
 
 if __name__ == "__main__":
-    torch.multiprocessing.set_start_method('spawn', force=True)
     multiprocessing.set_start_method('spawn', force=True)   # tensorstore complains "fork" not allowed
     main()
