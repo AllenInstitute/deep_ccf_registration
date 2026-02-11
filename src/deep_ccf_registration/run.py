@@ -84,7 +84,6 @@ def create_dataloader(
         subject_slice_fraction=config.subject_slice_fraction,
         map_points_to_right_hemisphere=config.map_points_to_right_hemisphere,
         aws_credentials_method=config.tensorstore_aws_credentials_method,
-        tmp_dir=config.tmp_path,
     )
 
     # With subject grouping, workers will only load subjects from the current group
@@ -162,7 +161,16 @@ def _get_git_commit_from_package(package_name="deep-ccf-registration"):
 def _convert_tissue_bboxes_to_parquet(config: TrainConfig, bboxes: TissueBoundingBoxes):
     rows = []
     for key, boxes in bboxes.bounding_boxes.items():
-        for i, box in enumerate(boxes):
+        # Find the contiguous range [first_valid, last_valid] and fill any
+        # gaps with a dummy 1x1 bbox. Only one subject has a gap in practice.
+        valid_indices = [i for i, box in enumerate(boxes) if box is not None]
+        if not valid_indices:
+            continue
+        first_valid = valid_indices[0]
+        last_valid = valid_indices[-1]
+        valid_set = set(valid_indices)
+        for i in range(first_valid, last_valid + 1):
+            box = boxes[i] if i in valid_set else None
             if box is not None:
                 rows.append({
                     "subject_id": key,
@@ -171,6 +179,16 @@ def _convert_tissue_bboxes_to_parquet(config: TrainConfig, bboxes: TissueBoundin
                     "x": box.x,
                     "width": box.width,
                     "height": box.height,
+                })
+            else:
+                # Dummy bbox to keep slice range contiguous
+                rows.append({
+                    "subject_id": key,
+                    "index": i,
+                    "y": 0,
+                    "x": 0,
+                    "width": 1,
+                    "height": 1,
                 })
 
     df = pd.DataFrame(rows)
