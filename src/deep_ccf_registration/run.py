@@ -78,26 +78,17 @@ def create_dataloader(
         transform=transform,
         include_tissue_mask=include_tissue_mask,
         ccf_annotations=ccf_annotations,
-        cache_dir=config.cache_dir,
         rotate_slices=config.data_augmentation.rotate_slices and is_train,
         is_debug=config.debug,
         debug_slice_idx=config.debug_slice_idx,
         subject_slice_fraction=config.subject_slice_fraction,
-        subject_group_size=config.subject_group_size if is_train else None,
-        local_cache_dir=config.local_cache_dir,
-        map_points_to_right_hemisphere=config.map_points_to_right_hemisphere
+        map_points_to_right_hemisphere=config.map_points_to_right_hemisphere,
+        aws_credentials_method=config.tensorstore_aws_credentials_method,
     )
 
     # With subject grouping, workers will only load subjects from the current group
     # Each worker gets a copy of the dataset with the same _current_group_subjects
     use_workers = num_workers if is_train else 0
-
-    if config.subject_group_size is not None and num_workers > 0 and is_train:
-        logger.info(
-            f"Subject grouping is enabled (group_size={config.subject_group_size}) with "
-            f"{num_workers} workers. Each worker will only load subjects from the current group "
-            f"(max {config.subject_group_size} subjects total across all workers via memmap)."
-        )
 
     dataloader = DataLoader(
         dataset=dataset,

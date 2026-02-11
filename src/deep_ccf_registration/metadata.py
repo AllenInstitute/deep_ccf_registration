@@ -33,6 +33,7 @@ class SubjectMetadata(BaseModel):
     # The index that splits the 2 hemispheres in voxels the same dim as the sagittal axis in the registered volume
     # obtained via `get_input_space_midline.py`
     sagittal_midline: Optional[int] = None
+    ls_to_template_inverse_warp_path: Optional[str] = None
     ls_to_template_inverse_warp_path_original: Path
     ls_to_template_affine_matrix_path: Path
 
@@ -74,6 +75,17 @@ class SubjectMetadata(BaseModel):
             raise NotImplementedError(f'{orientation} not supported')
         return slice_axis
 
+    def get_warp_path(self) -> str:
+        """
+        If warp_path is not passed, infer it from the stitched_path root prefix
+
+        :return:
+        """
+        if self.ls_to_template_inverse_warp_path is not None:
+            warp_path = self.ls_to_template_inverse_warp_path
+        else:
+            warp_path = f"s3://marmot-development-802451596237-us-west-2/smartspim-registration/warps/{self.subject_id}_warp.zarr"
+        return warp_path
 
 class TissueBoundingBox(BaseModel):
     """

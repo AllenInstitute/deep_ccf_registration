@@ -1,8 +1,8 @@
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import tensorstore
 from loguru import logger
 from scipy.ndimage import map_coordinates
 from torch.utils.data import Dataset
@@ -16,6 +16,8 @@ from deep_ccf_registration.datasets.utils.interpolation import map_coordinates_c
 from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, TissueBoundingBoxes, \
     AcquisitionAxis, RotationAngles, SubjectRotationAngle
 from deep_ccf_registration.utils.logging_utils import timed, timed_func
+from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
+
 
 @dataclass(frozen=True)
 class PatchSample:
@@ -81,58 +83,41 @@ class SubjectSliceDataset(Dataset):
         transform: Optional[callable] = None,
         include_tissue_mask: bool = False,
         ccf_annotations: Optional[np.ndarray] = None,
-        cache_dir: Path = Path('/data'),
         rotate_slices: bool = False,
         is_debug: bool = False,
         debug_slice_idx: Optional[int] = None,
         subject_slice_fraction: float = 0.25,
-        subject_group_size: Optional[int] = None,
-        local_cache_dir: Optional[Path] = None,
-        map_points_to_right_hemisphere: bool = True
+        map_points_to_right_hemisphere: bool = True,
+        aws_credentials_method: Optional[str] = None
     ):
         if include_tissue_mask and ccf_annotations is None:
             raise ValueError("include_tissue_mask=True requires ccf_annotations")
 
-        self._all_subjects = subjects
         self._template_parameters = template_parameters
         self._transform = transform
         self._include_tissue_mask = include_tissue_mask
         self._ccf_annotations = ccf_annotations
         self._orientations = orientations
 
-        self._loaded_subject_id: Optional[str] = None
-        self._volume: Optional[np.ndarray] = None
-        self._warp: Optional[np.ndarray] = None
         self._cached_affine: Optional[Affine] = None
         self._tissue_bboxes = tissue_bboxes.bounding_boxes
         self._crop_size = crop_size
-        self._cache_dir = cache_dir
-        self._local_cache_dir = local_cache_dir
         self._rotate_slices = rotate_slices
         self._rotation_angles = rotation_angles
         self._subject_slice_fraction = subject_slice_fraction
         self._map_points_to_right_hemisphere = map_points_to_right_hemisphere
+        self._subjects = subjects
+        self._volumes = self._read_volumes()
+        self._warps = self._read_warps(aws_credentials_method=aws_credentials_method)
 
         # Precompute valid slices per subject (needed before grouping setup)
         self._valid_slices_cache: dict[str, list[int]] = {}
-        for s in self._all_subjects:
+        for s in subjects:
             bboxes = self._tissue_bboxes[s.subject_id]
             valid = [i for i, b in enumerate(bboxes) if b is not None]
             self._valid_slices_cache[s.subject_id] = valid
 
-        # Subject grouping setup
-        self._subject_group_size = subject_group_size
-        if subject_group_size is not None:
-            # Shuffle subjects once at initialization
-            self._subject_groups = self._create_subject_groups(subjects, subject_group_size)
-            self._current_group_idx = 0
-            self._current_group_subjects = self._subject_groups[self._current_group_idx]
-            logger.info(f"Created {len(self._subject_groups)} subject groups of size ~{subject_group_size}")
-            self._log_current_group_info()
-        else:
-            self._subject_groups = None
-            self._current_group_idx = None
-            self._current_group_subjects = self._all_subjects
+        self._is_debug = is_debug
 
         # Debug mode: restrict to a single slice per subject
         if is_debug:
@@ -153,69 +138,43 @@ class SubjectSliceDataset(Dataset):
         self._epoch_length = len(self._index_map)
         logger.info(f"Dataset initialized with {len(self._index_map)} total samples")
 
-    def _create_subject_groups(self, subjects: list[SubjectMetadata], group_size: int) -> list[list[SubjectMetadata]]:
-        """Divide subjects into groups of specified size."""
-        shuffled = subjects.copy()
-        np.random.shuffle(shuffled)
-        groups = []
-        for i in range(0, len(shuffled), group_size):
-            groups.append(shuffled[i:i + group_size])
-        return groups
+    def _read_volumes(self):
+        volumes = {}
+        for subject in self._subjects:
+            volume = tensorstore.open(
+                spec={
+                    "driver": "auto",
+                    "kvstore": create_kvstore(
+                        path=str(subject.stitched_volume_path) + "/3",
+                        aws_credentials_method="anonymous",
+                    ),
+                },
+                read=True,
+            ).result()
+            volumes[subject.subject_id] = volume
+        return volumes
 
-    def _log_current_group_info(self):
-        """Log detailed information about the current subject group."""
-        if self._subject_groups is None:
-            return
-
-        subject_ids = [s.subject_id for s in self._current_group_subjects]
-        logger.info(
-            f"Group {self._current_group_idx}/{len(self._subject_groups)-1}: "
-            f"{len(self._current_group_subjects)} subjects - {', '.join(subject_ids)}"
-        )
-
-        # Log slice counts per subject
-        for subject in self._current_group_subjects:
-            valid_slices = self._valid_slices_cache[subject.subject_id]
-            if self._subject_slice_fraction < 1.0:
-                num_to_sample = max(1, int(len(valid_slices) * self._subject_slice_fraction))
-                sampled = min(num_to_sample, len(valid_slices))
-            else:
-                sampled = len(valid_slices)
-            logger.debug(
-                f"  {subject.subject_id}: {sampled}/{len(valid_slices)} slices "
-                f"(fraction={self._subject_slice_fraction:.2f})"
-            )
-
-    def switch_to_next_group(self):
-        """Switch to the next group of subjects. Wraps around to group 0 after the last group."""
-        if self._subject_groups is None:
-            logger.warning("Subject grouping is not enabled. Ignoring switch_to_next_group call.")
-            return
-
-        # Clear loaded subject to free memory
-        self._loaded_subject_id = None
-        self._volume = None
-        self._warp = None
-        self._cached_affine = None
-
-        # Move to next group
-        self._current_group_idx = (self._current_group_idx + 1) % len(self._subject_groups)
-        self._current_group_subjects = self._subject_groups[self._current_group_idx]
-
-        # Rebuild index map for new group
-        self._build_index_map()
-        self._epoch_length = len(self._index_map)
-
-        logger.info(f"Switched to group {self._current_group_idx}, total samples: {len(self._index_map)}")
-        self._log_current_group_info()
+    def _read_warps(self, aws_credentials_method: Optional[str] = None):
+        warps = {}
+        for subject in self._subjects:
+            warp = tensorstore.open(
+                spec={
+                    "driver": "auto",
+                    "kvstore": create_kvstore(
+                        path=subject.get_warp_path(),
+                        aws_credentials_method=aws_credentials_method,
+                    ),
+                },
+                read=True,
+            ).result()
+            warps[subject.subject_id] = warp
+        return warps
 
     def _build_index_map(self):
         """Build or rebuild the index map with slice sampling."""
         self._index_map.clear()
-        # Use current group subjects if grouping is enabled, otherwise use all subjects
-        subjects_to_use = self._current_group_subjects
 
-        for subject in subjects_to_use:
+        for subject in self._subjects:
             valid_slices = self._valid_slices_cache[subject.subject_id]
 
             # Sample slices based on fraction
@@ -245,7 +204,7 @@ class SubjectSliceDataset(Dataset):
         if self._subject_slice_fraction < 1.0:
             self._build_index_map()
             self._epoch_length = len(self._index_map)
-            logger.info(f"Resampled slices: {self._epoch_length} total samples across {len(self._all_subjects)} subjects")
+            logger.info(f"Resampled slices: {self._epoch_length} total samples across {len(self._subjects)} subjects")
 
     def __len__(self) -> int:
         return self._epoch_length
@@ -254,18 +213,11 @@ class SubjectSliceDataset(Dataset):
         if index >= len(self._index_map):
             raise IndexError(f"Index {index} out of range for dataset of size {len(self._index_map)}")
         subject, slice_idx, orientation = self._index_map[index]
-        self._ensure_subject_loaded(subject)
         spec = SliceSampleSpec(metadata=subject, slice_idx=slice_idx, orientation=orientation)
-        return self._load_slice(spec=spec)
 
-    def _load_slice(self, spec: SliceSampleSpec) -> PatchSample:
         metadata = spec.metadata
+
         slice_axis = metadata.get_slice_axis(spec.orientation)
-        axes = sorted(metadata.axes, key=lambda axis: axis.dimension)
-        in_plane_axes = [ax for ax in axes if ax.dimension != slice_axis.dimension]
-        if len(in_plane_axes) != 2:
-            raise ValueError("Expected exactly two in-plane axes")
-        y_axis, x_axis = in_plane_axes
 
         bbox = self._tissue_bboxes[metadata.subject_id][spec.slice_idx]
 
@@ -273,7 +225,6 @@ class SubjectSliceDataset(Dataset):
         start_x = bbox.x
         patch_height = bbox.height
         patch_width = bbox.width
-
 
         coordinate_grid = self._get_coordinate_grid(
             experiment_meta=metadata,
@@ -288,27 +239,21 @@ class SubjectSliceDataset(Dataset):
         )
 
         if self._rotate_slices:
-            # Interpolate volume at rotated coordinate locations
-            # coordinate_grid: (n_points, 3), map_coordinates needs (3, n_points)
-            coords_for_interp = coordinate_grid.T
-            # Volume shape: (C, T, D0, D1, D2) - sample from spatial dims
-            volume_3d = self._volume[0, 0]
-            interpolated_flat = map_coordinates_cropped(
-                volume=volume_3d,
-                coords=coords_for_interp,
-                order=1,  # linear interpolation
-                mode='constant',
-                cval=0.0,
+            input_slice = self._get_rotated_slice(
+                point_grid=coordinate_grid,
+                experiment_meta=metadata,
+                patch_width=patch_width,
+                patch_height=patch_height
             )
-            data_patch = interpolated_flat.reshape(patch_height, patch_width).astype("float32")
         else:
-            spatial_slices = [0, 0, slice(None), slice(None), slice(None)]
-            spatial_slices[2 + slice_axis.dimension] = spec.slice_idx
-            spatial_slices[2 + y_axis.dimension] = slice(start_y, start_y + patch_height)
-            spatial_slices[2 + x_axis.dimension] = slice(start_x, start_x + patch_width)
-            data_patch = self._volume[tuple(spatial_slices)].astype("float32")
+            input_slice = self._get_slice(
+                patch_height=patch_height,
+                patch_width=patch_width,
+                experiment_meta=metadata,
+                spec=spec,
+            )
 
-        template_patch = self._get_template_points(
+        template_points = self._get_template_points(
             point_grid=coordinate_grid,
             patch_height=patch_height,
             patch_width=patch_width,
@@ -316,8 +261,8 @@ class SubjectSliceDataset(Dataset):
         )
 
         if self._map_points_to_right_hemisphere:
-            template_patch = map_points_to_right_hemisphere(
-                template_points=template_patch,
+            template_points = map_points_to_right_hemisphere(
+                template_points=template_points,
                 template_parameters=self._template_parameters,
             )
 
@@ -325,14 +270,14 @@ class SubjectSliceDataset(Dataset):
         if self._include_tissue_mask and self._ccf_annotations is not None:
             tissue_mask = _get_tissue_mask(
                 annotations=self._ccf_annotations,
-                template_patch=template_patch,
+                template_patch=template_points,
                 template_parameters=self._template_parameters,
             )
 
         # Store original template points before transforms for eval
-        original_template_points = template_patch.copy()
+        original_template_points = template_points.copy()
         original_tissue_mask = tissue_mask.copy() if tissue_mask is not None else None
-        original_shape = (data_patch.shape[0], data_patch.shape[1])
+        original_shape = (input_slice.shape[0], input_slice.shape[1])
 
         pad_top, pad_bottom, pad_left, pad_right = 0, 0, 0, 0
         eval_template_points = None
@@ -340,8 +285,8 @@ class SubjectSliceDataset(Dataset):
         eval_shape = None
         if self._transform is not None:
             transforms = self._transform(
-                image=data_patch,
-                template_coords=template_patch,
+                image=input_slice,
+                template_coords=template_points,
                 mask=tissue_mask,
                 slice_axis=slice_axis,
                 acquisition_axes=metadata.axes,
@@ -350,8 +295,8 @@ class SubjectSliceDataset(Dataset):
                 subject_id=metadata.subject_id,
                 slice_idx=spec.slice_idx,
             )
-            data_patch = transforms["image"]
-            template_patch = transforms["template_coords"]
+            input_slice = transforms["image"]
+            template_points = transforms["template_coords"]
             tissue_mask = transforms["mask"]
 
             # Get the shape after resize transforms (before crop/pad)
@@ -387,8 +332,8 @@ class SubjectSliceDataset(Dataset):
             slice_idx=spec.slice_idx,
             start_y=start_y,
             start_x=start_x,
-            data=data_patch,
-            template_points=template_patch,
+            data=input_slice,
+            template_points=template_points,
             dataset_idx=metadata.subject_id,
             orientation=spec.orientation.value,
             subject_id=metadata.subject_id,
@@ -403,6 +348,58 @@ class SubjectSliceDataset(Dataset):
         )
 
     @timed_func
+    def _get_slice(
+        self,
+        experiment_meta: SubjectMetadata,
+        patch_height: int,
+        patch_width: int,
+        spec: SliceSampleSpec,
+    ) -> np.ndarray:
+        slice_axis = experiment_meta.get_slice_axis(orientation=spec.orientation)
+        axes = sorted(experiment_meta.axes, key=lambda axis: axis.dimension)
+        in_plane_axes = [ax for ax in axes if ax.dimension != slice_axis.dimension]
+        if len(in_plane_axes) != 2:
+            raise ValueError("Expected exactly two in-plane axes")
+        y_axis, x_axis = in_plane_axes
+
+        bbox = self._tissue_bboxes[experiment_meta.subject_id][spec.slice_idx]
+
+        start_y = bbox.y
+        start_x = bbox.x
+
+        spatial_slices = [0, 0, slice(None), slice(None), slice(None)]
+        spatial_slices[2 + slice_axis.dimension] = spec.slice_idx
+        spatial_slices[2 + y_axis.dimension] = slice(start_y, start_y + patch_height)
+        spatial_slices[2 + x_axis.dimension] = slice(start_x, start_x + patch_width)
+        data_patch = self._volumes[experiment_meta.subject_id][
+            tuple(spatial_slices)].read().result().astype("float32")
+        return data_patch
+
+    @timed_func
+    def _get_rotated_slice(
+        self,
+        point_grid: np.ndarray,
+        experiment_meta: SubjectMetadata,
+        patch_height: int,
+        patch_width: int,
+    ) -> np.ndarray:
+        # Interpolate volume at rotated coordinate locations
+        # coordinate_grid: (n_points, 3), map_coordinates needs (3, n_points)
+        coords_for_interp = point_grid.T
+        # Volume shape: (C, T, D0, D1, D2) - sample from spatial dims
+        volume_3d = self._volumes[experiment_meta.subject_id][0, 0]
+        interpolated_flat = map_coordinates_cropped(
+            volume=volume_3d,
+            coords=coords_for_interp,
+            order=1,  # linear interpolation
+            mode='constant',
+            cval=0.0,
+        )
+        data_patch = interpolated_flat.reshape(patch_height, patch_width).astype("float32")
+
+        return data_patch
+
+    @timed_func
     def _get_template_points(
         self,
         point_grid: np.ndarray,
@@ -414,7 +411,7 @@ class SubjectSliceDataset(Dataset):
         with timed():
             points = transform_points_to_template_space(
                 points=point_grid,
-                input_volume_shape=self._volume.shape[2:],
+                input_volume_shape=self._volumes[experiment_meta.subject_id].shape[2:],
                 acquisition_axes=experiment_meta.axes,
                 ls_template_info=self._template_parameters,
                 registration_downsample=experiment_meta.registration_downsample
@@ -424,8 +421,8 @@ class SubjectSliceDataset(Dataset):
             template_points = apply_transforms_to_points(
                 points=points,
                 template_parameters=self._template_parameters,
-                cached_affine=self._cached_affine,
-                warp=self._warp,
+                affine=Affine.from_ants_file(affine_path=experiment_meta.ls_to_template_affine_matrix_path),
+                warp=self._warps[experiment_meta.subject_id],
             )
 
         with timed():
@@ -464,114 +461,7 @@ class SubjectSliceDataset(Dataset):
             elif "Crop" in t_name:
                 break
 
-        return (h, w)
-
-    def _ensure_subject_loaded(self, metadata: SubjectMetadata):
-        subject_id = metadata.subject_id
-        if self._loaded_subject_id == subject_id:
-            return
-        logger.debug(f"Loading full volume for subject {subject_id}")
-        self._volume = self._load_full_volume(metadata)
-        logger.debug(f"Loading warp for subject {subject_id}")
-        self._warp = self._load_warp(metadata=metadata)
-        self._cached_affine = Affine.from_ants_file(metadata.ls_to_template_affine_matrix_path)
-        self._loaded_subject_id = subject_id
-
-    def _load_full_volume(self, metadata: SubjectMetadata) -> np.ndarray:
-        npy_path = self._cache_dir / "volumes" / f"{metadata.subject_id}.npy"
-        if not npy_path.exists():
-            raise FileNotFoundError(
-                f"Expected cached volume at {npy_path}. Precompute with cache_volume_and_warp_numpy.py."
-            )
-
-        # Use fast local cache if available and subject grouping is enabled
-        if self._subject_group_size is not None and self._local_cache_dir is not None:
-            local_cache_path = self._local_cache_dir / "volumes" / f"{metadata.subject_id}.npy"
-            local_cache_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Use file locking to prevent concurrent copies by multiple workers
-            lock_path = local_cache_path.with_suffix('.lock')
-
-            import fcntl
-            import shutil
-            import os
-
-            # Acquire lock
-            with open(lock_path, 'w') as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-
-                # Check if file exists and is valid
-                needs_copy = False
-                if not local_cache_path.exists():
-                    needs_copy = True
-                else:
-                    # Validate file size matches source
-                    if local_cache_path.stat().st_size != npy_path.stat().st_size:
-                        logger.warning(f"Local cache file size mismatch, recopying: {metadata.subject_id}")
-                        needs_copy = True
-
-                if needs_copy:
-                    logger.info(f"Copying volume to local cache: {metadata.subject_id}")
-                    # Copy to temp file first, then atomic rename
-                    temp_path = local_cache_path.with_suffix('.tmp')
-                    shutil.copy2(npy_path, temp_path)
-                    os.rename(temp_path, local_cache_path)
-
-                # Lock is released when exiting context
-
-            logger.debug(f"Loading volume from local cache: {local_cache_path}")
-            return np.load(str(local_cache_path), mmap_mode="r")
-        else:
-            logger.debug(f"Loading volume from cache: {npy_path}")
-            return np.load(str(npy_path), mmap_mode="r")
-
-    def _load_warp(self, metadata: SubjectMetadata) -> np.ndarray:
-        npy_cache_path = self._cache_dir / "warps" / f"{metadata.subject_id}_warp.npy"
-        if not npy_cache_path.exists():
-            raise FileNotFoundError(
-                f"Expected cached warp at {npy_cache_path}. Precompute with cache_volume_and_warp_numpy.py."
-            )
-
-        # Use fast local cache if available and subject grouping is enabled
-        if self._subject_group_size is not None and self._local_cache_dir is not None:
-            local_cache_path = self._local_cache_dir / "warps" / f"{metadata.subject_id}_warp.npy"
-            local_cache_path.parent.mkdir(parents=True, exist_ok=True)
-
-            # Use file locking to prevent concurrent copies by multiple workers
-            lock_path = local_cache_path.with_suffix('.lock')
-
-            import fcntl
-            import shutil
-            import os
-
-            # Acquire lock
-            with open(lock_path, 'w') as lock_file:
-                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
-
-                # Check if file exists and is valid
-                needs_copy = False
-                if not local_cache_path.exists():
-                    needs_copy = True
-                else:
-                    # Validate file size matches source
-                    if local_cache_path.stat().st_size != npy_cache_path.stat().st_size:
-                        logger.warning(f"Local cache warp size mismatch, recopying: {metadata.subject_id}")
-                        needs_copy = True
-
-                if needs_copy:
-                    logger.info(f"Copying warp to local cache: {metadata.subject_id}")
-                    # Copy to temp file first, then atomic rename
-                    temp_path = local_cache_path.with_suffix('.tmp')
-                    shutil.copy2(npy_cache_path, temp_path)
-                    os.rename(temp_path, local_cache_path)
-
-                # Lock is released when exiting context
-
-            logger.debug(f"Loading warp from local cache: {local_cache_path}")
-            return np.load(str(local_cache_path), mmap_mode="r")
-        else:
-            logger.debug(f"Loading warp from cache: {npy_cache_path}")
-            return np.load(str(npy_cache_path), mmap_mode="r")
+        return h, w
 
     def _get_coordinate_grid(
         self,

@@ -5,10 +5,10 @@ from pathlib import Path
 import ants
 import aind_smartspim_transform_utils
 import numpy as np
+import tensorstore
 from aind_smartspim_transform_utils.utils.utils import get_orientation, \
     convert_to_ants_space, convert_from_ants_space
 from concurrent.futures import ThreadPoolExecutor
-from scipy.ndimage import map_coordinates
 
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.metadata import AcquisitionAxis
@@ -130,8 +130,8 @@ def scale_points(points: np.ndarray, scaling: list[float]) -> np.ndarray:
 
 def apply_transforms_to_points(
     points: np.ndarray,
-    cached_affine: Affine,
-    warp: np.ndarray,
+    affine: Affine,
+    warp: tensorstore.TensorStore,
     template_parameters: TemplateParameters,
 ) -> np.ndarray:
     """
@@ -144,7 +144,7 @@ def apply_transforms_to_points(
     ----------
     points : np.ndarray
         Points in physical input space to be transformed.
-    cached_affine : Affine
+    affine : Affine
         Pre-computed inverse affine transform.
     warp : CxHxWxD displacement vector for each voxel in HxWxD template
     template_parameters : AntsImageParameters
@@ -159,7 +159,7 @@ def apply_transforms_to_points(
     # this returns points in physical space
 
     with timed():
-        affine_transformed_points = cached_affine.apply_inverse(points)
+        affine_transformed_points = affine.apply_inverse(points)
 
     # convert physical points to voxels,
     # so we can index into the displacement field
@@ -169,21 +169,14 @@ def apply_transforms_to_points(
             physical_pts=affine_transformed_points
         )
 
+    coords = affine_transformed_voxels.T
     with timed():
-        coords = affine_transformed_voxels.T
-        # Parallel interpolation - map_coordinates releases the GIL
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            futures = [
-                executor.submit(
-                    map_coordinates_cropped,
-                    warp[i],
-                    coords,
-                    order=1,
-                    mode="nearest",
-                )
-                for i in range(3)
-            ]
-            displacements = np.stack([f.result() for f in futures], axis=-1)
+        displacements = map_coordinates_cropped(
+            volume=warp,
+            coords=coords,
+            order=1,
+            mode='nearest'
+        )
 
     with timed():
         # apply displacement vector to affine transformed points
