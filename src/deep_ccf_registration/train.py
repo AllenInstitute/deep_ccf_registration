@@ -408,6 +408,7 @@ def train(
         scheduler_state_dict: Optional[dict] = None,
         train_dataset = None,
         val_dataset = None,
+        train_sampler = None,
 ):
     """
     Train slice registration model
@@ -506,16 +507,12 @@ def train(
 
     progress_logger = None
     batch_counter = 0
-    epoch_in_group = 0  # Track epochs within current subject group
+    epoch = 0
 
     while True:
-        # Switch to next group or resample slices at the start of each epoch
-        if train_dataset is not None:
-            if hasattr(train_dataset, '_subject_group_size') and train_dataset._subject_group_size is not None:
-                # Switch groups after each epoch through the current group
-                if epoch_in_group > 0:  # Don't switch before first epoch
-                    train_dataset.switch_to_next_group()
-                epoch_in_group += 1
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+        epoch += 1
 
         model.train()
         losses = []

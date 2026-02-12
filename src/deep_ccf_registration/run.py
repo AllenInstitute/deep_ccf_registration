@@ -14,6 +14,7 @@ import torch.distributed as dist
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
 
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from contextlib import nullcontext
 from loguru import logger
 import json
@@ -42,6 +43,7 @@ def create_dataloader(
     ls_template_parameters: TemplateParameters,
     ccf_annotations: np.ndarray,
     include_tissue_mask: bool = False,
+    world_size: int = 1,
 ):
     """
     Create a dataloader using SubjectSliceDataset (Map-style).
@@ -86,23 +88,29 @@ def create_dataloader(
         num_input_channels=3 if config.model.encoder_weights == 'imagenet' else 1,
     )
 
-    # With subject grouping, workers will only load subjects from the current group
-    # Each worker gets a copy of the dataset with the same _current_group_subjects
     num_workers = num_workers if is_train else 0
+
+    if world_size > 1:
+        sampler = DistributedSampler(dataset, shuffle=is_train)
+        shuffle = False
+    else:
+        sampler = None
+        shuffle = is_train
 
     dataloader = DataLoader(
         dataset=dataset,
         batch_size=batch_size,
-        shuffle=True,
+        shuffle=shuffle,
+        sampler=sampler,
         # using 0 workers (main process) for eval,
         # to keep mem usage lower
         num_workers=num_workers,
         collate_fn=collate_patch_samples,
-        pin_memory=device == 'cuda',
+        pin_memory=True,
         persistent_workers=num_workers > 0,
     )
 
-    return dataloader
+    return dataloader, sampler
 
 logger.remove()
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
@@ -188,6 +196,15 @@ def main(config_path: Path):
 
     # Setup DDP if running in distributed mode
     ddp_device, world_size = setup_ddp()
+
+    # Offset random seeds by rank so each process has different randomness
+    # (e.g. in dataset __getitem__ which uses np.random)
+    rank = int(os.environ.get('RANK', 0))
+    torch.manual_seed(seed=config.seed + rank)
+    np.random.seed(config.seed + rank)
+    random.seed(config.seed + rank)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed=config.seed + rank)
 
     if ddp_device is not None:
         # DDP mode - use the assigned device
@@ -277,7 +294,7 @@ def main(config_path: Path):
         ),
     )
 
-    train_dataloader = create_dataloader(
+    train_dataloader, train_sampler = create_dataloader(
         metadata=train_metadata,
         tissue_bboxes_path=config.tissue_bounding_boxes_path,
         rotation_angles=rotation_angles,
@@ -289,8 +306,9 @@ def main(config_path: Path):
         ccf_annotations=ccf_annotations,
         include_tissue_mask=config.predict_tissue_mask,
         device=device,
+        world_size=world_size,
     )
-    val_dataloader = create_dataloader(
+    val_dataloader, _ = create_dataloader(
         metadata=val_metadata,
         tissue_bboxes_path=config.tissue_bounding_boxes_path,
         config=config,
@@ -302,6 +320,7 @@ def main(config_path: Path):
         include_tissue_mask=config.predict_tissue_mask,
         device=device,
         rotation_angles=rotation_angles,
+        world_size=world_size,
     )
 
     logger.info(f"Train subjects: {len(train_metadata)}")
@@ -428,6 +447,7 @@ def main(config_path: Path):
             max_iters=config.max_iters,
             train_dataset=train_dataloader.dataset,
             val_dataset=val_dataloader.dataset,
+            train_sampler=train_sampler,
             model_weights_out_dir=config.model_weights_out_dir,
             learning_rate=config.learning_rate,
             eval_interval=config.eval_interval,
