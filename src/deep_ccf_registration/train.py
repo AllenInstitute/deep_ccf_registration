@@ -473,7 +473,9 @@ def train(
 
     # Setup learning rate scheduler
     if lr_scheduler == LRScheduler.ReduceLROnPlateau:
-        main_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer, patience=patience)
+        # set to patience-1 since patience is early stopping patience so we try to reduce and run
+        # for another training interval before validating again
+        main_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer=optimizer, patience=patience-1)
         if scheduler_state_dict is not None:
             main_scheduler.load_state_dict(scheduler_state_dict)
             logger.info("Restored scheduler state from checkpoint")
