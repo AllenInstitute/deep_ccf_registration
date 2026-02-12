@@ -679,7 +679,7 @@ def train(
 
                     # Step ReduceLROnPlateau with reduced val loss
                     if main_scheduler is not None and lr_scheduler == LRScheduler.ReduceLROnPlateau:
-                        main_scheduler.step(metrics=val_metrics['val_point_loss'])
+                        main_scheduler.step(metrics=val_metrics['val_loss'])
 
                     current_lr = optimizer.param_groups[0]['lr']
 
