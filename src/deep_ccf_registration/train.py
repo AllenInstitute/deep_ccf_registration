@@ -516,10 +516,6 @@ def train(
                 if epoch_in_group > 0:  # Don't switch before first epoch
                     train_dataset.switch_to_next_group()
                 epoch_in_group += 1
-            elif train_dataset._subject_slice_fraction < 1.0:
-                # Resample slices at epoch boundary when not using grouping
-                if batch_counter > 0:
-                    train_dataset.resample_slices()
 
         model.train()
         losses = []
@@ -634,8 +630,6 @@ def train(
 
                 # Periodic evaluation
                 if global_step % eval_interval == 0:
-                    if val_dataset is not None:
-                        val_dataset.resample_slices()
                     logger.info(f"Evaluating at step {global_step}")
                     if is_debug:
                         # evaluate train too

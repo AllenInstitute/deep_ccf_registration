@@ -63,8 +63,6 @@ class TrainConfig(BaseModel):
     normalize_template_points: bool = True
     batch_size: int = Field(32, gt=0)
     num_workers: int = Field(0, ge=0)
-    # Fraction of slices to randomly sample per subject per epoch (0.0 < x <= 1.0)
-    subject_slice_fraction: float = Field(0.25, gt=0.0, le=1.0)
     exclude_background_pixels: bool = False
     predict_tissue_mask: bool = True
     dataloader_prefetch_factor: Optional[int] = None

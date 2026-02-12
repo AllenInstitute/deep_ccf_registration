@@ -1,5 +1,3 @@
-import os
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -91,10 +89,8 @@ class SubjectSliceDataset(Dataset):
         rotate_slices: bool = False,
         is_debug: bool = False,
         debug_slice_idx: Optional[int] = None,
-        subject_slice_fraction: float = 0.25,
         map_points_to_right_hemisphere: bool = True,
         aws_credentials_method: Optional[str] = None,
-        tmp_dir: Path = Path('/tmp'),
         num_input_channels: int = 1
     ):
         if include_tissue_mask and ccf_annotations is None:
@@ -110,7 +106,6 @@ class SubjectSliceDataset(Dataset):
         self._crop_size = crop_size
         self._rotate_slices = rotate_slices
         self._rotation_angles = rotation_angles
-        self._subject_slice_fraction = subject_slice_fraction
         self._map_points_to_right_hemisphere = map_points_to_right_hemisphere
         self._subjects = subjects
         self._volumes = self._read_volumes()
@@ -119,13 +114,9 @@ class SubjectSliceDataset(Dataset):
         self._debug_slice_idx = debug_slice_idx
         self._num_input_channels = num_input_channels
 
-        self._db_path = tmp_dir / f"subject_metadata_{'train' if is_train else 'val'}.db"
-        self._db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._init_subjects_table()
-
-        n_samples = self._sample_slices()
-        self._epoch_length = n_samples
-        logger.info(f"Dataset initialized with {n_samples} total samples")
+        self._subject_slice_ranges = self._build_slice_ranges()
+        self._epoch_length = sum(stop - start for _, start, stop in self._subject_slice_ranges)
+        logger.info(f"Dataset initialized with {self._epoch_length} total samples")
 
     def _read_volumes(self):
         volumes = {}
@@ -159,113 +150,32 @@ class SubjectSliceDataset(Dataset):
             warps[subject.subject_id] = warp
         return warps
 
-    def _init_subjects_table(self) -> None:
-        """Write subject metadata to SQLite as JSON for later lookup."""
-        conn = sqlite3.connect(str(self._db_path))
-        conn.execute("DROP TABLE IF EXISTS subjects")
-        conn.execute(
-            "CREATE TABLE subjects ("
-            "  subject_id TEXT PRIMARY KEY,"
-            "  metadata_json TEXT NOT NULL"
-            ")"
-        )
-
-        subjects = {x.subject_id: x for x in self._subjects}
-        conn.executemany(
-            "INSERT INTO subjects (subject_id, metadata_json) VALUES (?, ?)",
-            [(s_id, s.model_dump_json()) for s_id, s in subjects.items()],
-        )
-        conn.commit()
-        conn.close()
-
-    def _get_subject(self, subject_id: str) -> SubjectMetadata:
-        conn = sqlite3.connect(str(self._db_path))
-        row = conn.execute(
-            "SELECT metadata_json FROM subjects WHERE subject_id = ?",
-            (subject_id,),
-        ).fetchone()
-        conn.close()
-        if row is None:
-            raise KeyError(f"Subject {subject_id} not found")
-        return SubjectMetadata.model_validate_json(row[0])
-
-    def _sample_slices(self) -> int:
-        """Sample slice indices per subject and write to SQLite.
-
-        Reads the parquet to get valid slice ranges, applies debug logic or
-        subject_slice_fraction sampling, and writes the result to the
-        sampled_slices table. Sets self._epoch_length.
-        """
+    def _build_slice_ranges(self) -> list[tuple[SubjectMetadata, int, int]]:
+        """Build (subject, start, stop) ranges of valid tissue slice indices."""
         bboxes = pd.read_parquet(self._tissue_bboxes_path).set_index('subject_id')
-
-        conn = sqlite3.connect(str(self._db_path))
-        conn.execute("DROP TABLE IF EXISTS sampled_slices")
-        conn.execute(
-            "CREATE TABLE sampled_slices ("
-            "  idx INTEGER PRIMARY KEY,"
-            "  subject_id TEXT NOT NULL,"
-            "  slice_idx INTEGER NOT NULL"
-            ")"
-        )
-
-        idx = 0
-        rows = []
+        ranges = []
         for subject in self._subjects:
             subject_bboxes = bboxes.loc[subject.subject_id]
             valid_slices = sorted(subject_bboxes['index'].tolist())
-
             if self._is_debug:
                 if self._debug_slice_idx is not None:
-                    sampled = [self._debug_slice_idx]
+                    debug_idx = self._debug_slice_idx
                 else:
-                    sampled = [valid_slices[len(valid_slices) // 2]]
-            elif self._subject_slice_fraction < 1.0:
-                n = max(1, int(len(valid_slices) * self._subject_slice_fraction))
-                if n < len(valid_slices):
-                    sampled = np.random.choice(
-                        valid_slices, size=n, replace=False
-                    ).tolist()
-                else:
-                    sampled = valid_slices
+                    debug_idx = valid_slices[len(valid_slices) // 2]
+                ranges.append((subject, debug_idx, debug_idx + 1))
             else:
-                sampled = valid_slices
-
-            for slice_idx in sampled:
-                rows.append((idx, subject.subject_id, slice_idx))
-                idx += 1
-
-        conn.executemany(
-            "INSERT INTO sampled_slices (idx, subject_id, slice_idx) VALUES (?, ?, ?)",
-            rows,
-        )
-        conn.commit()
-        conn.close()
-
-        return idx
+                ranges.append((subject, valid_slices[0], valid_slices[-1] + 1))
+        return ranges
 
     def _resolve_index(self, index: int) -> tuple[SubjectMetadata, int]:
-        """Look up (subject, slice_idx) for a flat dataset index from SQLite."""
-        conn = sqlite3.connect(str(self._db_path))
-        row = conn.execute(
-            "SELECT subject_id, slice_idx FROM sampled_slices WHERE idx = ?",
-            (index,),
-        ).fetchone()
-        conn.close()
-        if row is None:
-            raise IndexError(f"Index {index} out of range for dataset of size {self._epoch_length}")
-        subject_id, slice_idx = row
-        return self._get_subject(subject_id), slice_idx
-
-    def resample_slices(self):
-        """Resample slices for a new epoch.
-
-        Call this at the start of each epoch to randomly sample a new set of
-        slices based on the subject_slice_fraction.
-        """
-        if self._subject_slice_fraction < 1.0:
-            n_samples = self._sample_slices()
-            self._epoch_length = n_samples
-            logger.info(f"Resampled slices: {n_samples} total samples across {len(self._subjects)} subjects")
+        """Map a flat dataset index to (subject, random_slice_idx)."""
+        remaining = index
+        for subject, start, stop in self._subject_slice_ranges:
+            n = stop - start
+            if remaining < n:
+                return subject, np.random.randint(start, stop)
+            remaining -= n
+        raise IndexError(f"Index {index} out of range for dataset of size {self._epoch_length}")
 
     def __len__(self) -> int:
         return self._epoch_length
