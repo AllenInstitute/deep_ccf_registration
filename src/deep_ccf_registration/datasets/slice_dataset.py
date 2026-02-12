@@ -202,15 +202,18 @@ class SubjectSliceDataset(Dataset):
             tissue_slices_indices=subject_bboxes['index'].tolist(),
         )
 
+        volume = self._read_volume(subject=metadata)
+
         if self._rotate_slices:
             input_slice = self._get_rotated_slice(
+                volume=volume,
                 point_grid=coordinate_grid,
-                experiment_meta=metadata,
                 patch_width=patch_width,
                 patch_height=patch_height
             )
         else:
             input_slice = self._get_slice(
+                volume=volume,
                 patch_height=patch_height,
                 patch_width=patch_width,
                 experiment_meta=metadata,
@@ -228,6 +231,7 @@ class SubjectSliceDataset(Dataset):
             patch_height=patch_height,
             patch_width=patch_width,
             experiment_meta=metadata,
+            volume=volume,
         )
 
         if self._map_points_to_right_hemisphere:
@@ -323,6 +327,7 @@ class SubjectSliceDataset(Dataset):
     @timed_func
     def _get_slice(
         self,
+        volume: tensorstore.TensorStore,
         experiment_meta: SubjectMetadata,
         patch_height: int,
         patch_width: int,
@@ -343,15 +348,15 @@ class SubjectSliceDataset(Dataset):
         spatial_slices[2 + slice_axis.dimension] = spec.slice_idx
         spatial_slices[2 + y_axis.dimension] = slice(start_y, start_y + patch_height)
         spatial_slices[2 + x_axis.dimension] = slice(start_x, start_x + patch_width)
-        data_patch = self._read_volume(subject=experiment_meta)[
+        data_patch = volume[
             tuple(spatial_slices)].read().result().astype("float32")
         return data_patch
 
     @timed_func
     def _get_rotated_slice(
         self,
+        volume: tensorstore.TensorStore,
         point_grid: np.ndarray,
-        experiment_meta: SubjectMetadata,
         patch_height: int,
         patch_width: int,
     ) -> np.ndarray:
@@ -359,7 +364,7 @@ class SubjectSliceDataset(Dataset):
         # coordinate_grid: (n_points, 3), map_coordinates needs (3, n_points)
         coords_for_interp = point_grid.T
         # Volume shape: (C, T, D0, D1, D2) - sample from spatial dims
-        volume_3d = self._read_volume(subject=experiment_meta)[0, 0]
+        volume_3d = volume[0, 0]
         interpolated_flat = map_coordinates_cropped(
             volume=volume_3d,
             coords=coords_for_interp,
@@ -374,6 +379,7 @@ class SubjectSliceDataset(Dataset):
     @timed_func
     def _get_template_points(
         self,
+        volume: tensorstore.TensorStore,
         point_grid: np.ndarray,
         patch_height: int,
         patch_width: int,
@@ -383,7 +389,7 @@ class SubjectSliceDataset(Dataset):
         with timed():
             points = transform_points_to_template_space(
                 points=point_grid,
-                input_volume_shape=self._volumes[experiment_meta.subject_id].shape[2:],
+                input_volume_shape=volume.shape[2:],
                 acquisition_axes=experiment_meta.axes,
                 ls_template_info=self._template_parameters,
                 registration_downsample=experiment_meta.registration_downsample
