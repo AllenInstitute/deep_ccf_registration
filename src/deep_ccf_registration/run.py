@@ -193,6 +193,7 @@ def _convert_tissue_bboxes_to_parquet(config: TrainConfig, bboxes: TissueBoundin
 
     df = pd.DataFrame(rows)
     path = config.tmp_path / "tissue_bounding_boxes.parquet"
+    os.makedirs(path, exist_ok=True)
     df.to_parquet(path, index=False, partition_cols=["subject_id"])
     return path
 
