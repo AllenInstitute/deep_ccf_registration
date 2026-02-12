@@ -206,15 +206,13 @@ def main(config_path: Path):
             logger.info(f"DDP training with {world_size} GPUs")
 
     # Setup mixed precision
-    if config.mixed_precision and device == "cuda":
+    if config.mixed_precision:
         autocast_context = torch.cuda.amp.autocast()
         scaler = torch.cuda.amp.GradScaler()
         logger.info("Mixed precision training enabled with GradScaler")
     else:
         autocast_context = nullcontext()
         scaler = None
-        if config.mixed_precision and device != "cuda":
-            logger.warning("Mixed precision only supported on CUDA, disabling")
 
     # Load light sheet template
     logger.info(f"Loading light sheet template from: {config.ls_template_path}")
