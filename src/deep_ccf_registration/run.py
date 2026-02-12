@@ -84,6 +84,7 @@ def create_dataloader(
         subject_slice_fraction=config.subject_slice_fraction,
         map_points_to_right_hemisphere=config.map_points_to_right_hemisphere,
         aws_credentials_method=config.tensorstore_aws_credentials_method,
+        tmp_dir=config.tmp_path,
     )
 
     # With subject grouping, workers will only load subjects from the current group
