@@ -108,50 +108,44 @@ class SubjectSliceDataset(Dataset):
         self._rotation_angles = rotation_angles
         self._map_points_to_right_hemisphere = map_points_to_right_hemisphere
         self._subjects = subjects
-        self._volumes = self._read_volumes()
-        self._warps = self._read_warps(aws_credentials_method=aws_credentials_method)
         self._is_debug = is_debug
         self._debug_slice_idx = debug_slice_idx
         self._num_input_channels = num_input_channels
+        self._aws_credentials_method = aws_credentials_method
 
         self._subject_slice_ranges = self._build_slice_ranges()
         self._epoch_length = sum(stop - start for _, start, stop in self._subject_slice_ranges)
         logger.info(f"Dataset initialized with {self._epoch_length} total samples")
 
-    def _read_volumes(self):
-        volumes = {}
-        for subject in self._subjects:
-            volume = tensorstore.open(
-                spec={
-                    "driver": "auto",
-                    "kvstore": create_kvstore(
-                        path=str(subject.stitched_volume_path) + "/3",
-                        aws_credentials_method="anonymous",
-                    ),
-                },
-                read=True,
-            ).result()
-            volumes[subject.subject_id] = volume
-        return volumes
+    def _read_volume(self, subject: SubjectMetadata) -> tensorstore.TensorStore:
+        volume = tensorstore.open(
+            spec={
+                "driver": "auto",
+                "kvstore": create_kvstore(
+                    path=str(subject.stitched_volume_path) + "/3",
+                    aws_credentials_method="anonymous",
+                ),
+            },
+            read=True,
+        ).result()
+        return volume
 
-    def _read_warps(self, aws_credentials_method: Optional[str] = None):
-        warps = {}
-        for subject in self._subjects:
-            warp = tensorstore.open(
-                spec={
-                    "driver": "auto",
-                    "kvstore": create_kvstore(
-                        path=subject.get_warp_path(),
-                        aws_credentials_method=aws_credentials_method,
-                    ),
-                },
-                read=True,
-            ).result()
-            warps[subject.subject_id] = warp
-        return warps
+    def _read_warp(self, subject: SubjectMetadata):
+        warp = tensorstore.open(
+            spec={
+                "driver": "auto",
+                "kvstore": create_kvstore(
+                    path=subject.get_warp_path(),
+                    aws_credentials_method=self._aws_credentials_method,
+                ),
+            },
+            read=True,
+        ).result()
+        return warp
 
     def _build_slice_ranges(self) -> list[tuple[SubjectMetadata, int, int]]:
         """Build (subject, start, stop) ranges of valid tissue slice indices."""
+        logger.info('building slice ranges')
         bboxes = pd.read_parquet(self._tissue_bboxes_path)
         slice_stats = bboxes.groupby('subject_id')['index'].agg(['min', 'max', 'median'])
         ranges = []
@@ -349,7 +343,7 @@ class SubjectSliceDataset(Dataset):
         spatial_slices[2 + slice_axis.dimension] = spec.slice_idx
         spatial_slices[2 + y_axis.dimension] = slice(start_y, start_y + patch_height)
         spatial_slices[2 + x_axis.dimension] = slice(start_x, start_x + patch_width)
-        data_patch = self._volumes[experiment_meta.subject_id][
+        data_patch = self._read_volume(subject=experiment_meta)[
             tuple(spatial_slices)].read().result().astype("float32")
         return data_patch
 
@@ -365,7 +359,7 @@ class SubjectSliceDataset(Dataset):
         # coordinate_grid: (n_points, 3), map_coordinates needs (3, n_points)
         coords_for_interp = point_grid.T
         # Volume shape: (C, T, D0, D1, D2) - sample from spatial dims
-        volume_3d = self._volumes[experiment_meta.subject_id][0, 0]
+        volume_3d = self._read_volume(subject=experiment_meta)[0, 0]
         interpolated_flat = map_coordinates_cropped(
             volume=volume_3d,
             coords=coords_for_interp,
@@ -400,7 +394,7 @@ class SubjectSliceDataset(Dataset):
                 points=points,
                 template_parameters=self._template_parameters,
                 affine=Affine.from_ants_file(affine_path=experiment_meta.ls_to_template_affine_matrix_path),
-                warp=self._warps[experiment_meta.subject_id],
+                warp=self._read_warp(subject=experiment_meta),
             )
 
         with timed():
