@@ -8,6 +8,7 @@ import mlflow
 import numpy as np
 import pandas as pd
 import torch
+import torch.distributed as dist
 from matplotlib import pyplot as plt
 from monai.metrics import DiceMetric
 from segmentation_models_pytorch import Unet
@@ -20,6 +21,15 @@ from loguru import logger
 def is_main_process() -> bool:
     """Check if this is the main process (rank 0) for logging/mlflow."""
     return int(os.environ.get('RANK', 0)) == 0
+
+
+def _reduce_mean(val: float, device: str) -> float:
+    """Average a scalar across all DDP ranks. No-op if not distributed."""
+    if not dist.is_initialized():
+        return val
+    t = torch.tensor(val, device=device, dtype=torch.float64)
+    dist.all_reduce(t, op=dist.ReduceOp.AVG)
+    return t.item()
 
 from deep_ccf_registration.configs.train_config import LRScheduler, TrainConfig
 from deep_ccf_registration.datasets.transforms import get_template_point_normalization_inverse
@@ -265,14 +275,14 @@ def _evaluate(
                         if j < viz_sample_count:
                             viz_samples[j] = sample_data
 
-    val_loss = np.mean(losses)
-    val_rmse = np.mean(rmses)
-    val_rmse_registration_res = np.mean(registration_res_rmses) if registration_res_rmses else None
+    val_loss = _reduce_mean(np.mean(losses), device)
+    val_rmse = _reduce_mean(np.mean(rmses), device)
+    val_rmse_registration_res = _reduce_mean(np.mean(registration_res_rmses), device) if registration_res_rmses else None
 
     if predict_tissue_mask:
-        val_point_loss = np.mean(point_losses)
-        val_tissue_mask_loss = np.mean(tissue_mask_losses)
-        val_tissue_mask_dice = np.mean(tissue_mask_dice_metric.aggregate().item())
+        val_point_loss = _reduce_mean(np.mean(point_losses), device)
+        val_tissue_mask_loss = _reduce_mean(np.mean(tissue_mask_losses), device)
+        val_tissue_mask_dice = _reduce_mean(np.mean(tissue_mask_dice_metric.aggregate().item()), device)
     else:
         val_point_loss = val_loss
         val_tissue_mask_dice = None
@@ -560,11 +570,15 @@ def train(
                 loss = loss / gradient_accumulation_steps
 
             # Backward pass with optional gradient scaling for mixed precision
-            if scaler is not None:
-                scaler.scale(loss).backward()
-            else:
-                loss.backward()
+            # Skip gradient sync on intermediate accumulation steps (DDP only)
             accumulation_step += 1
+            sync_gradients = (accumulation_step % gradient_accumulation_steps == 0)
+            no_sync = model.no_sync() if (hasattr(model, 'no_sync') and not sync_gradients) else nullcontext()
+            with no_sync:
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                else:
+                    loss.backward()
 
             # Unscale for logging
             point_losses.append(point_loss.item())
@@ -600,10 +614,9 @@ def train(
                 if warmup_scheduler is not None and global_step <= warmup_steps:
                     warmup_scheduler.step()
                 # Step main scheduler after warmup
+                # (ReduceLROnPlateau is stepped at eval time with reduced val loss)
                 elif main_scheduler is not None:
-                    if lr_scheduler == LRScheduler.ReduceLROnPlateau:
-                        main_scheduler.step(metrics=point_loss.item())
-                    elif lr_scheduler in (LRScheduler.CosineAnnealingWarmRestarts, LRScheduler.CosineAnnealingLR):
+                    if lr_scheduler in (LRScheduler.CosineAnnealingWarmRestarts, LRScheduler.CosineAnnealingLR):
                         main_scheduler.step()
 
                 train_metrics = {
@@ -627,7 +640,8 @@ def train(
 
                 # Periodic evaluation
                 if global_step % eval_interval == 0:
-                    logger.info(f"Evaluating at step {global_step}")
+                    if is_main_process():
+                        logger.info(f"Evaluating at step {global_step}")
                     if is_debug:
                         # evaluate train too
                         _evaluate(
@@ -663,6 +677,10 @@ def train(
                         predict_tissue_mask=predict_tissue_mask,
                     )
 
+                    # Step ReduceLROnPlateau with reduced val loss
+                    if main_scheduler is not None and lr_scheduler == LRScheduler.ReduceLROnPlateau:
+                        main_scheduler.step(metrics=val_metrics['val_point_loss'])
+
                     current_lr = optimizer.param_groups[0]['lr']
 
                     metrics = {
@@ -691,22 +709,27 @@ def train(
                     if predict_tissue_mask:
                         log_msg += f' | Train point loss: {point_loss.item():.6f} | val point loss: {val_metrics["val_point_loss"]:.6f} | Val tissue mask dice: {val_metrics["val_tissue_mask_dice"]:.6f}'
 
-                    logger.info(log_msg)
+                    if is_main_process():
+                        logger.info(log_msg)
 
                     checkpoint_path = Path(model_weights_out_dir) / f"{global_step}.pt"
-                    torch.save(
-                        obj={
-                            'global_step': global_step,
-                            'model_state_dict': model.state_dict(),
-                            'optimizer_state_dict': optimizer.state_dict(),
-                            'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
-                            'best_val_loss': best_val_loss,
-                            'patience_counter': patience_counter,
-                            'val_rmse': val_metrics['val_rmse'],
-                            'lr': scheduler.get_last_lr() if scheduler is not None else learning_rate
-                        },
-                        f=checkpoint_path,
-                    )
+                    model_state = model.module.state_dict() if hasattr(model, 'module') else model.state_dict()
+                    if is_main_process():
+                        torch.save(
+                            obj={
+                                'global_step': global_step,
+                                'model_state_dict': model_state,
+                                'optimizer_state_dict': optimizer.state_dict(),
+                                'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+                                'best_val_loss': best_val_loss,
+                                'patience_counter': patience_counter,
+                                'val_rmse': val_metrics['val_rmse'],
+                                'lr': scheduler.get_last_lr() if scheduler is not None else learning_rate
+                            },
+                            f=checkpoint_path,
+                        )
+                    if dist.is_initialized():
+                        dist.barrier()
 
                     # Check for improvement
                     if val_metrics['val_loss'] < best_val_loss - min_delta:
@@ -717,16 +740,18 @@ def train(
                             mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
                             mlflow.log_metric("best_val_loss", best_val_loss, step=global_step)
 
-                        logger.info(f"New best model saved! Val loss: {best_val_loss:.6f}")
+                        if is_main_process():
+                            logger.info(f"New best model saved! Val loss: {best_val_loss:.6f}")
                     else:
                         patience_counter += 1
-                        logger.info(f"No improvement. Patience: {patience_counter}/{patience}")
+                        if is_main_process():
+                            logger.info(f"No improvement. Patience: {patience_counter}/{patience}")
 
                     # Early stopping
                     if patience_counter >= patience:
-                        logger.info(f"\nEarly stopping triggered after {global_step} steps")
-                        logger.info(f"Best validation RMSE: {best_val_loss:.6f}")
                         if is_main_process():
+                            logger.info(f"\nEarly stopping triggered after {global_step} steps")
+                            logger.info(f"Best validation RMSE: {best_val_loss:.6f}")
                             mlflow.log_metric("final_best_val_rmse", best_val_loss)
 
                         return best_val_loss
@@ -738,9 +763,8 @@ def train(
                     model.train()
 
                 if global_step == max_iters:
-                    logger.info(
-                        f"\nTraining completed! Best validation RMSE: {best_val_loss:.6f}")
-
                     if is_main_process():
+                        logger.info(
+                            f"\nTraining completed! Best validation RMSE: {best_val_loss:.6f}")
                         mlflow.log_metric("final_best_val_rmse", best_val_loss)
                     return best_val_loss
