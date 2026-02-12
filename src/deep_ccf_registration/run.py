@@ -158,45 +158,6 @@ def _get_git_commit_from_package(package_name="deep-ccf-registration"):
     url = direct_url["url"]
     return commit, url
 
-def _convert_tissue_bboxes_to_parquet(config: TrainConfig, bboxes: TissueBoundingBoxes):
-    rows = []
-    for key, boxes in bboxes.bounding_boxes.items():
-        # Find the contiguous range [first_valid, last_valid] and fill any
-        # gaps with a dummy 1x1 bbox. Only one subject has a gap in practice.
-        valid_indices = [i for i, box in enumerate(boxes) if box is not None]
-        if not valid_indices:
-            continue
-        first_valid = valid_indices[0]
-        last_valid = valid_indices[-1]
-        valid_set = set(valid_indices)
-        for i in range(first_valid, last_valid + 1):
-            box = boxes[i] if i in valid_set else None
-            if box is not None:
-                rows.append({
-                    "subject_id": key,
-                    "index": i,
-                    "y": box.y,
-                    "x": box.x,
-                    "width": box.width,
-                    "height": box.height,
-                })
-            else:
-                # Dummy bbox to keep slice range contiguous
-                rows.append({
-                    "subject_id": key,
-                    "index": i,
-                    "y": 0,
-                    "x": 0,
-                    "width": 1,
-                    "height": 1,
-                })
-
-    df = pd.DataFrame(rows)
-    path = config.tmp_path / "tissue_bounding_boxes.parquet"
-    os.makedirs(path, exist_ok=True)
-    df.to_parquet(path, index=False, partition_cols=["subject_id"])
-    return path
-
 @click.command()
 @click.option(
     "--config-path",
@@ -300,14 +261,6 @@ def main(config_path: Path):
     del ccf_annotations
     ccf_annotations = np.load(ccf_annotations_path, mmap_mode='r')
 
-    with open(config.tissue_bounding_boxes_path) as f:
-        tissue_bboxes = json.load(f)
-    tissue_bboxes = TissueBoundingBoxes(bounding_boxes=tissue_bboxes)
-
-    # convert tissue_bboxes to parquet so we can load a single subject at a time
-    # and don't need to store all in memory
-    tissue_bboxes_parquet_path = _convert_tissue_bboxes_to_parquet(config=config, bboxes=tissue_bboxes)
-
     with open(config.rotation_angles_path) as f:
         rotation_angles = pd.read_csv(f).set_index('subject_id')
     rotation_angles = RotationAngles(
@@ -328,7 +281,7 @@ def main(config_path: Path):
 
     train_dataloader = create_dataloader(
         metadata=train_metadata,
-        tissue_bboxes_path=tissue_bboxes_parquet_path,
+        tissue_bboxes_path=config.tissue_bounding_boxes_path,
         rotation_angles=rotation_angles,
         config=config,
         batch_size=config.batch_size,
@@ -341,7 +294,7 @@ def main(config_path: Path):
     )
     val_dataloader = create_dataloader(
         metadata=val_metadata,
-        tissue_bboxes_path=tissue_bboxes_parquet_path,
+        tissue_bboxes_path=config.tissue_bounding_boxes_path,
         config=config,
         batch_size=config.batch_size,
         num_workers=min(2, config.num_workers),
