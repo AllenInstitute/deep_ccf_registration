@@ -152,19 +152,19 @@ class SubjectSliceDataset(Dataset):
 
     def _build_slice_ranges(self) -> list[tuple[SubjectMetadata, int, int]]:
         """Build (subject, start, stop) ranges of valid tissue slice indices."""
-        bboxes = pd.read_parquet(self._tissue_bboxes_path).set_index('subject_id')
+        bboxes = pd.read_parquet(self._tissue_bboxes_path)
+        slice_stats = bboxes.groupby('subject_id')['index'].agg(['min', 'max', 'median'])
         ranges = []
         for subject in self._subjects:
-            subject_bboxes = bboxes.loc[subject.subject_id]
-            valid_slices = sorted(subject_bboxes['index'].tolist())
+            row = slice_stats.loc[subject.subject_id]
             if self._is_debug:
                 if self._debug_slice_idx is not None:
                     debug_idx = self._debug_slice_idx
                 else:
-                    debug_idx = valid_slices[len(valid_slices) // 2]
+                    debug_idx = int(row['median'])
                 ranges.append((subject, debug_idx, debug_idx + 1))
             else:
-                ranges.append((subject, valid_slices[0], valid_slices[-1] + 1))
+                ranges.append((subject, int(row['min']), int(row['max']) + 1))
         return ranges
 
     def _resolve_index(self, index: int) -> tuple[SubjectMetadata, int]:
