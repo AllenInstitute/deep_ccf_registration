@@ -85,6 +85,7 @@ def create_dataloader(
         map_points_to_right_hemisphere=config.map_points_to_right_hemisphere,
         aws_credentials_method=config.tensorstore_aws_credentials_method,
         tmp_dir=config.tmp_path,
+        num_input_channels=3 if config.model.encoder_weights == 'imagenet' else 1,
     )
 
     # With subject grouping, workers will only load subjects from the current group
@@ -357,7 +358,7 @@ def main(config_path: Path):
     logger.info(f"Val subjects: {len(val_metadata)}")
 
     model = UNetWithRegressionHeads(
-        in_channels=1,
+        in_channels=3 if config.model.encoder_weights == 'imagenet' else 1,
         out_coords=3,
         include_tissue_mask=config.predict_tissue_mask,
         use_positional_encoding=config.use_positional_encoding,

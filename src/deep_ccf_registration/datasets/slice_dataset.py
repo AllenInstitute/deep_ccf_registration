@@ -1,3 +1,4 @@
+import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,6 +95,7 @@ class SubjectSliceDataset(Dataset):
         map_points_to_right_hemisphere: bool = True,
         aws_credentials_method: Optional[str] = None,
         tmp_dir: Path = Path('/tmp'),
+        num_input_channels: int = 1
     ):
         if include_tissue_mask and ccf_annotations is None:
             raise ValueError("include_tissue_mask=True requires ccf_annotations")
@@ -104,7 +106,6 @@ class SubjectSliceDataset(Dataset):
         self._ccf_annotations = ccf_annotations
         self._orientations = orientations
 
-        self._cached_affine: Optional[Affine] = None
         self._tissue_bboxes_path = tissue_bboxes_path
         self._crop_size = crop_size
         self._rotate_slices = rotate_slices
@@ -116,13 +117,15 @@ class SubjectSliceDataset(Dataset):
         self._warps = self._read_warps(aws_credentials_method=aws_credentials_method)
         self._is_debug = is_debug
         self._debug_slice_idx = debug_slice_idx
+        self._num_input_channels = num_input_channels
 
         self._db_path = tmp_dir / f"subject_metadata_{'train' if is_train else 'val'}.db"
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_subjects_table()
 
-        self._sample_slices()
-        logger.info(f"Dataset initialized with {self._epoch_length} total samples")
+        n_samples = self._sample_slices()
+        self._epoch_length = n_samples
+        logger.info(f"Dataset initialized with {n_samples} total samples")
 
     def _read_volumes(self):
         volumes = {}
@@ -166,9 +169,11 @@ class SubjectSliceDataset(Dataset):
             "  metadata_json TEXT NOT NULL"
             ")"
         )
+
+        subjects = {x.subject_id: x for x in self._subjects}
         conn.executemany(
             "INSERT INTO subjects (subject_id, metadata_json) VALUES (?, ?)",
-            [(s.subject_id, s.model_dump_json()) for s in self._subjects],
+            [(s_id, s.model_dump_json()) for s_id, s in subjects.items()],
         )
         conn.commit()
         conn.close()
@@ -184,7 +189,7 @@ class SubjectSliceDataset(Dataset):
             raise KeyError(f"Subject {subject_id} not found")
         return SubjectMetadata.model_validate_json(row[0])
 
-    def _sample_slices(self) -> None:
+    def _sample_slices(self) -> int:
         """Sample slice indices per subject and write to SQLite.
 
         Reads the parquet to get valid slice ranges, applies debug logic or
@@ -235,7 +240,8 @@ class SubjectSliceDataset(Dataset):
         )
         conn.commit()
         conn.close()
-        self._epoch_length = idx
+
+        return idx
 
     def _resolve_index(self, index: int) -> tuple[SubjectMetadata, int]:
         """Look up (subject, slice_idx) for a flat dataset index from SQLite."""
@@ -257,8 +263,9 @@ class SubjectSliceDataset(Dataset):
         slices based on the subject_slice_fraction.
         """
         if self._subject_slice_fraction < 1.0:
-            self._sample_slices()
-            logger.info(f"Resampled slices: {self._epoch_length} total samples across {len(self._subjects)} subjects")
+            n_samples = self._sample_slices()
+            self._epoch_length = n_samples
+            logger.info(f"Resampled slices: {n_samples} total samples across {len(self._subjects)} subjects")
 
     def __len__(self) -> int:
         return self._epoch_length
@@ -332,6 +339,9 @@ class SubjectSliceDataset(Dataset):
                 template_patch=template_points,
                 template_parameters=self._template_parameters,
             )
+
+        if self._num_input_channels != 1:
+            input_slice = np.stack([input_slice] * self._num_input_channels, axis=-1)
 
         # Store original template points before transforms for eval
         original_template_points = template_points.copy()
