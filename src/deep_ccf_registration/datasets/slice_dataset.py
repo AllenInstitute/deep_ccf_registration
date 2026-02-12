@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+
 import numpy as np
 import pandas as pd
 import tensorstore
@@ -116,7 +117,7 @@ class SubjectSliceDataset(Dataset):
         self._is_debug = is_debug
         self._debug_slice_idx = debug_slice_idx
 
-        self._db_path = tmp_dir / "subject_metadata.db"
+        self._db_path = tmp_dir / f"subject_metadata_{'train' if is_train else 'val'}.db"
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_subjects_table()
 
