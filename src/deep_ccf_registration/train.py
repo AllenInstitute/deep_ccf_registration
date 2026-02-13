@@ -507,8 +507,7 @@ def train(
     if warmup_steps > 0:
         warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer=optimizer,
-            start_factor=1e-6,  # Start from near-zero LR
-            end_factor=1.0,
+            start_factor=learning_rate/10,
             total_iters=warmup_steps,
         )
         logger.info(f"Using linear warmup for {warmup_steps} steps")
