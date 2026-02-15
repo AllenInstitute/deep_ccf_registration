@@ -8,11 +8,13 @@ import pandas as pd
 import torch
 from matplotlib import pyplot as plt
 from monai.metrics import DiceMetric
+from scipy.ndimage import map_coordinates
 from torch.nn import functional as F
 
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
-from deep_ccf_registration.datasets.transforms import get_template_point_normalization_inverse
-from deep_ccf_registration.utils.metrics import MSE
+from deep_ccf_registration.datasets.transforms import get_template_point_normalization_inverse, \
+    physical_to_index_space
+from deep_ccf_registration.utils.metrics import MSE, SparseDiceMetric
 from deep_ccf_registration.utils.ddp import is_main_process, reduce_mean
 from deep_ccf_registration.utils.visualization import viz_sample
 
@@ -47,6 +49,7 @@ def evaluate(
     total_viz_candidates = 0  # Track total samples seen for reservoir sampling
     eval_records = []
     tissue_mask_dice_metric = DiceMetric(num_classes=2, include_background=False)
+    ccf_annotations_dice_metric = SparseDiceMetric(class_ids=np.unique(ccf_annotations))
 
     with torch.no_grad():
         for i, batch in enumerate(dataloader):
@@ -109,49 +112,19 @@ def evaluate(
 
             rmse = MSE()(pred=pred_points, target=target_template_points, mask=masks).sqrt()
 
-            # Compute RMSE against eval targets at original resolution
-            # Targets are NOT interpolated, predictions ARE upsampled to match
             if "eval_template_points" in batch and "eval_shapes" in batch:
-                eval_targets = batch["eval_template_points"].to(device)
-                eval_pad_masks = batch["eval_pad_masks"].to(device)
-                eval_shapes = batch["eval_shapes"]
-
-                if predict_tissue_mask and "eval_tissue_masks" in batch:
-                    eval_tissue_masks = batch["eval_tissue_masks"].to(device)
-
-                for si in range(pred_points.shape[0]):
-                    eval_shape = eval_shapes[si]
-                    if eval_shape is None:
-                        continue
-
-                    eval_h, eval_w = eval_shape
-
-                    # Get the valid (non-padded) region of predictions
-                    pad_mask_i = pad_masks[si]
-                    valid_h = int(pad_mask_i.any(dim=1).sum())
-                    valid_w = int(pad_mask_i.any(dim=0).sum())
-
-                    # Crop out padding from predictions before upsampling
-                    pred_content = pred_points[si:si+1, :, :valid_h, :valid_w]
-
-                    # Upsample unpadded predictions to eval resolution
-                    pred_upsampled = F.interpolate(
-                        pred_content,
-                        size=(eval_h, eval_w),
-                        mode="bilinear",
-                        align_corners=False
-                    )
-
-                    # Get eval target and mask for this sample
-                    eval_target_i = eval_targets[si:si+1, :, :eval_h, :eval_w]
-
-                    if predict_tissue_mask:
-                        eval_mask_i = eval_tissue_masks[si:si+1, :eval_h, :eval_w]
-                    else:
-                        eval_mask_i = eval_pad_masks[si:si+1, :eval_h, :eval_w]
-
-                    rmse_full_res = MSE()(pred=pred_upsampled, target=eval_target_i, mask=eval_mask_i).sqrt()
-                    registration_res_rmses += rmse_full_res.cpu().tolist()
+                rmse_full_res, ccf_annotations_dice_metric = _eval_full_res(
+                    batch=batch,
+                    device=device,
+                    predict_tissue_mask=predict_tissue_mask,
+                    pred_points=pred_points,
+                    pred_tissue_mask=pred_tissue_mask,
+                    pad_masks=pad_masks,
+                    ccf_annotations_dice_metric=ccf_annotations_dice_metric,
+                    ccf_annotations=ccf_annotations,
+                    ls_template_parameters=ls_template_parameters,
+                )
+                registration_res_rmses += rmse_full_res
 
             if predict_tissue_mask:
                 tissue_mask_dice_metric(y_pred=pred_tissue_mask.unsqueeze(1), y=tissue_masks.unsqueeze(1))
@@ -257,4 +230,114 @@ def evaluate(
         "val_rmse": val_rmse,
         "val_rmse_registration_res": val_rmse_registration_res,
         "val_tissue_mask_dice": val_tissue_mask_dice,
+        "val_ccf_annotation_dice": ccf_annotations_dice_metric.compute()
     }
+
+def _update_dice_metric(
+    dice_metric: SparseDiceMetric,
+    ccf_annotations: np.ndarray,
+    gt_physical_space_points: np.ndarray,
+    pred_physical_space: np.ndarray,
+    template_parameters: TemplateParameters,
+    pred_mask: Optional[np.ndarray] = None,
+):
+    gt_points_index_space = physical_to_index_space(
+        physical_pts=np.transpose(gt_physical_space_points, (1, 2, 0)),
+        template_parameters=template_parameters,
+    )
+
+    pred_points_index_space = physical_to_index_space(
+        physical_pts=np.transpose(pred_physical_space, (1, 2, 0)),
+        template_parameters=template_parameters,
+    )
+
+    gt_ccf_annotations = map_coordinates(
+        input=ccf_annotations,
+        # 3, N
+        coordinates=np.transpose(gt_points_index_space, (2, 0, 1)).view(3, -1),
+        order=0,
+        mode='nearest'
+    )
+    pred_ccf_annotations = map_coordinates(
+        input=ccf_annotations,
+        coordinates=np.transpose(pred_points_index_space, (2, 0, 1)).view(3, -1),
+        order=0,
+        mode='nearest'
+    )
+
+    if pred_mask is not None:
+        pred_ccf_annotations[np.where(~pred_mask.flatten().astype('bool'))] = 0
+
+    dice_metric.update(pred=pred_ccf_annotations, target=gt_ccf_annotations)
+
+def _eval_full_res(
+    batch: dict[str, Any],
+    device: str,
+    predict_tissue_mask: bool,
+    pred_points: torch.Tensor,
+    pad_masks: torch.Tensor,
+    ccf_annotations_dice_metric: SparseDiceMetric,
+    ccf_annotations: np.ndarray,
+    ls_template_parameters: TemplateParameters,
+    pred_tissue_mask: Optional[torch.Tensor] = None,
+):
+    full_res_targets = batch["eval_template_points"].to(device)
+    full_res_pad_masks = batch["eval_pad_masks"].to(device)
+    full_res_shapes = batch["eval_shapes"]
+
+    if predict_tissue_mask and "eval_tissue_masks" in batch:
+        full_res_tissue_masks = batch["eval_tissue_masks"].to(device)
+    else:
+        full_res_tissue_masks = None
+
+    batch_rmse = []
+    for sample_idx in range(pred_points.shape[0]):
+        full_res_shape = full_res_shapes[sample_idx]
+
+        full_res_h, full_res_w = full_res_shape
+
+        # Get the valid (non-padded) region of predictions
+        pad_mask_i = pad_masks[sample_idx]
+        valid_h = int(pad_mask_i.any(dim=1).sum())
+        valid_w = int(pad_mask_i.any(dim=0).sum())
+
+        # Crop out padding from predictions before upsampling
+        pred_points = pred_points[sample_idx:sample_idx + 1, :, :valid_h, :valid_w]
+        if predict_tissue_mask:
+            pred_tissue_mask = pred_tissue_mask[sample_idx:sample_idx + 1, :valid_h, :valid_w]
+            pred_tissue_mask = F.interpolate(
+                pred_tissue_mask.unsqueeze(1).float(),
+                size=(full_res_h, full_res_w),
+                mode="nearest",
+            )
+
+        # Upsample unpadded predictions to eval resolution
+        pred_points = F.interpolate(
+            pred_points,
+            size=(full_res_h, full_res_w),
+            mode="bilinear",
+            align_corners=False
+        )
+
+        # Get eval target and mask for this sample
+        eval_target_i = full_res_targets[sample_idx:sample_idx + 1, :, :full_res_h, :full_res_w]
+
+        if predict_tissue_mask:
+            gt_full_res_mask = full_res_tissue_masks[sample_idx:sample_idx + 1, :full_res_h, :full_res_w]
+        else:
+            gt_full_res_mask = full_res_pad_masks[sample_idx:sample_idx + 1, :full_res_h, :full_res_w]
+
+        rmse_full_res = MSE()(pred=pred_points, target=eval_target_i, mask=gt_full_res_mask).sqrt()
+        batch_rmse += rmse_full_res.cpu().tolist()
+        _update_dice_metric(
+            dice_metric=ccf_annotations_dice_metric,
+            ccf_annotations=ccf_annotations,
+            # [0] to remove batch index (only 1 sample)
+            gt_physical_space_points=eval_target_i[0],
+            pred_physical_space=pred_points[0],
+            # [0] to remove channel index (only 1 channel)
+            pred_mask=pred_tissue_mask[0, 0].cpu().numpy() if predict_tissue_mask else None,
+            template_parameters=ls_template_parameters,
+        )
+
+    return batch_rmse, ccf_annotations_dice_metric
