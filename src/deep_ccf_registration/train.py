@@ -174,6 +174,7 @@ def train(
             input_images = batch["input_images"].to(device)
             target_template_points = batch["target_template_points"].to(device)
             pad_masks = batch["pad_masks"].to(device)
+            orientations = batch["orientations"]
 
             if predict_tissue_mask:
                 tissue_masks = batch["tissue_masks"].to(device)
@@ -197,7 +198,12 @@ def train(
                         pred_template_points = model_out
                         mask = pad_masks
                         tissue_mask_loss = None
-                point_loss = calc_coord_loss(pred=pred_template_points, target=target_template_points, mask=mask)
+                point_loss = calc_coord_loss(
+                    pred=pred_template_points,
+                    target=target_template_points,
+                    mask=mask,
+                    orientations=orientations
+                )
                 if predict_tissue_mask:
                     loss = point_loss + tissue_mask_loss_weight * tissue_mask_loss
                 else:

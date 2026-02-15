@@ -12,8 +12,7 @@ from torch.utils.data import Dataset
 
 from deep_ccf_registration.datasets.aquisition_meta import AcquisitionDirection
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
-from deep_ccf_registration.datasets.transforms import map_points_to_right_hemisphere, \
-    apply_crop_pad_to_original, get_subject_rotation_range
+from deep_ccf_registration.datasets.transforms import apply_crop_pad_to_original, get_subject_rotation_range
 from deep_ccf_registration.datasets.utils.template_points import transform_points_to_template_space, apply_transforms_to_points, Affine
 from deep_ccf_registration.datasets.utils.interpolation import map_coordinates_cropped
 from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, TissueBoundingBoxes, \
@@ -90,7 +89,6 @@ class SubjectSliceDataset(Dataset):
         rotate_slices: bool = False,
         is_debug: bool = False,
         debug_slice_idx: Optional[int] = None,
-        map_points_to_right_hemisphere: bool = True,
         aws_credentials_method: Optional[str] = None,
         num_input_channels: int = 1
     ):
@@ -107,7 +105,6 @@ class SubjectSliceDataset(Dataset):
         self._crop_size = crop_size
         self._rotate_slices = rotate_slices
         self._rotation_angles = rotation_angles
-        self._map_points_to_right_hemisphere = map_points_to_right_hemisphere
         self._subjects = subjects
         self._is_debug = is_debug
         self._debug_slice_idx = debug_slice_idx
@@ -238,12 +235,6 @@ class SubjectSliceDataset(Dataset):
             experiment_meta=metadata,
             volume=volume,
         )
-
-        if self._map_points_to_right_hemisphere:
-            template_points = map_points_to_right_hemisphere(
-                template_points=template_points,
-                template_parameters=self._template_parameters,
-            )
 
         tissue_mask = None
         if self._include_tissue_mask and self._ccf_annotations is not None:

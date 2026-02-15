@@ -59,6 +59,7 @@ def evaluate(
             input_images = batch["input_images"].to(device)
             target_template_points = batch["target_template_points"].to(device)
             pad_masks = batch["pad_masks"].to(device)
+            orientations = batch['orientations']
 
             if predict_tissue_mask:
                 tissue_masks = batch["tissue_masks"].to(device)
@@ -80,7 +81,12 @@ def evaluate(
                 else:
                     masks = pad_masks
 
-                point_loss = coord_loss(pred=pred_points, target=target_template_points, mask=masks)
+                point_loss = coord_loss(
+                    pred=pred_points,
+                    target=target_template_points,
+                    mask=masks,
+                    orientations=orientations,
+                )
 
                 if predict_tissue_mask:
                     # Mask out padded pixels from tissue mask loss
@@ -141,6 +147,7 @@ def evaluate(
                     'patch_y': int(batch["patch_ys"][sample_idx].item()),
                     'patch_x': int(batch["patch_xs"][sample_idx].item()),
                     'rmse': rmses[record_idx],
+                    "ccf_annotations_dice": ccf_annotations_dice_metric.compute_for_sample_idx(idx=record_idx)
                 })
 
             slice_indices = batch["slice_indices"]

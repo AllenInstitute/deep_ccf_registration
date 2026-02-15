@@ -83,7 +83,6 @@ def create_dataloader(
         rotate_slices=config.data_augmentation.rotate_slices and is_train,
         is_debug=config.debug,
         debug_slice_idx=config.debug_slice_idx,
-        map_points_to_right_hemisphere=config.map_points_to_right_hemisphere,
         aws_credentials_method=config.tensorstore_aws_credentials_method,
         num_input_channels=3 if config.model.encoder_weights == 'imagenet' else 1,
     )

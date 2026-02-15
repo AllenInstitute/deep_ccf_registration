@@ -4,34 +4,37 @@ import numpy as np
 import torch
 from torch import nn
 
+from deep_ccf_registration.datasets.template_meta import TemplateParameters
+from deep_ccf_registration.datasets.transforms import mirror_points
+from deep_ccf_registration.metadata import SliceOrientation
+
 
 class MSE(nn.Module):
-    """
-    Computes root mean squared Euclidean distance between predicted and target points.
-    """
-
-    def __init__(self, coordinate_dim: int = 1, reduction: Optional[str] = None):
-        """
-        Parameters
-        ----------
-        coordinate_dim : int
-            The dimension containing coordinates (default=1 for shape B, C, H, W)
-        """
+    def __init__(self, coordinate_dim: int = 1, reduction: Optional[str] = None,
+                 template_parameters: Optional[TemplateParameters] = None):
         super().__init__()
         self.coordinate_dim = coordinate_dim
         self._reduction = reduction
+        self._template_parameters = template_parameters
 
-    def forward(self, pred: torch.Tensor, target: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
-        Parameters
-        ----------
-        pred : torch.Tensor
-            Predicted coordinates, shape (B, C, H, W)
-        target : torch.Tensor
-            Target coordinates, shape (B, C, H, W)
-        """
+    def forward(self, pred: torch.Tensor, target: torch.Tensor,
+                mask: Optional[torch.Tensor] = None,
+                orientations: Optional[list[SliceOrientation]] = None) -> torch.Tensor:
         squared_errors = (pred - target) ** 2
         per_point_squared_distance = squared_errors.sum(dim=self.coordinate_dim)
+
+        if orientations is not None and self._template_parameters is not None:
+            sagittal_mask = torch.tensor(
+                [o == SliceOrientation.SAGITTAL for o in orientations],
+                device=pred.device, dtype=torch.bool
+            )
+            if sagittal_mask.any():
+                flipped_pred = mirror_points(points=pred, template_parameters=self._template_parameters)
+                flipped_distance = ((flipped_pred - target) ** 2).sum(dim=self.coordinate_dim)
+                min_distance = torch.minimum(per_point_squared_distance, flipped_distance)
+                per_point_squared_distance = torch.where(
+                    sagittal_mask[:, None, None], min_distance, per_point_squared_distance
+                )
 
         if mask is not None:
             if mask.dim() == per_point_squared_distance.dim() + 1:
@@ -39,7 +42,6 @@ class MSE(nn.Module):
             if mask.dim() != per_point_squared_distance.dim():
                 raise ValueError("Mask must have same spatial dimensions as coordinates")
 
-            # Cast to float32 for numerically stable reduction (important for mixed precision)
             mask = mask.to(per_point_squared_distance.device).float()
             squared_errors = per_point_squared_distance.float() * mask
             valid_points = mask.sum(dim=(1, 2)).clamp(min=1.0)
@@ -57,9 +59,8 @@ class SparseDiceMetric:
     which blows up memory when there are 1k+ classes"""
     def __init__(self, class_ids: np.ndarray):
         self.num_classes = len(class_ids)
-        self._sample_scores = []
+        self._sample_scores: list[np.ndarray] = []
         self._label_to_idx = {label: i for i, label in enumerate(class_ids)}
-
 
     def _remap(self, arr: np.ndarray) -> np.ndarray:
         """Mapping the noncontiguous ccf ids to contiguous ones"""
@@ -90,3 +91,6 @@ class SparseDiceMetric:
     def compute(self) -> float:
         """Mean Dice averaged over classes and samples."""
         return float(np.nanmean(self.per_class()))
+
+    def compute_for_sample_idx(self, idx: int) -> float:
+        return float(np.nanmean(self._sample_scores[idx]))
