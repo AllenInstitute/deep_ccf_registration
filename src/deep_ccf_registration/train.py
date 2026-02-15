@@ -94,10 +94,10 @@ def _evaluate(
     max_iters: int,
     denormalize_pred_template_points: bool,
     global_step: int,
+    ccf_annotations: np.ndarray,
+    terminology_path: Path,
     viz_sample_count: int = 10,
     ls_template_parameters: Optional[TemplateParameters] = None,
-    ccf_annotations: Optional[np.ndarray] = None,
-    exclude_background_pixels: bool = False,
     predict_tissue_mask: bool = False,
     is_debug: bool = False,
     tissue_mask_weight: float = 0.1
@@ -114,11 +114,6 @@ def _evaluate(
     viz_samples = []
     total_viz_candidates = 0  # Track total samples seen for reservoir sampling
     eval_records = []
-    enable_viz = (
-        viz_sample_count > 0
-        and ls_template_parameters is not None
-        and ccf_annotations is not None
-    )
     tissue_mask_dice_metric = DiceMetric(num_classes=2, include_background=False)
 
     with torch.no_grad():
@@ -243,37 +238,34 @@ def _evaluate(
                     'rmse': rmses[record_idx],
                 })
 
-            if enable_viz:
-                errors = (pred_points - target_template_points) ** 2
-                slice_indices = batch["slice_indices"]
-                patch_ys = batch["patch_ys"]
-                patch_xs = batch["patch_xs"]
-                subject_ids = batch["subject_ids"]
+            slice_indices = batch["slice_indices"]
+            patch_ys = batch["patch_ys"]
+            patch_xs = batch["patch_xs"]
+            subject_ids = batch["subject_ids"]
 
-                # Reservoir sampling to randomly select viz_sample_count samples
-                for sample_idx in range(input_images.shape[0]):
-                    total_viz_candidates += 1
-                    sample_data = {
-                        "input_image": input_images[sample_idx].squeeze().detach().cpu(),
-                        "pred_coords": pred_points[sample_idx].detach().cpu(),
-                        "gt_coords": target_template_points[sample_idx].detach().cpu(),
-                        "pad_mask": pad_masks[sample_idx].detach().cpu(),
-                        "tissue_mask": tissue_masks[sample_idx].detach().cpu() if predict_tissue_mask else None,
-                        "pred_tissue_masks": F.sigmoid(pred_tissue_mask_logits[sample_idx]).detach().cpu() if predict_tissue_mask else None,
-                        "errors": errors[sample_idx].detach().cpu().numpy(),
-                        "slice_idx": int(slice_indices[sample_idx].item()),
-                        "patch_y": int(patch_ys[sample_idx].item()),
-                        "patch_x": int(patch_xs[sample_idx].item()),
-                        "subject_id": subject_ids[sample_idx],
-                    }
+            # Reservoir sampling to randomly select viz_sample_count samples
+            for sample_idx in range(input_images.shape[0]):
+                total_viz_candidates += 1
+                sample_data = {
+                    "input_image": input_images[sample_idx].squeeze().detach().cpu(),
+                    "pred_coords": pred_points[sample_idx].detach().cpu(),
+                    "gt_coords": target_template_points[sample_idx].detach().cpu(),
+                    "pad_mask": pad_masks[sample_idx].detach().cpu(),
+                    "tissue_mask": tissue_masks[sample_idx].detach().cpu() if predict_tissue_mask else None,
+                    "pred_tissue_masks": F.sigmoid(pred_tissue_mask_logits[sample_idx]).detach().cpu() if predict_tissue_mask else None,
+                    "slice_idx": int(slice_indices[sample_idx].item()),
+                    "patch_y": int(patch_ys[sample_idx].item()),
+                    "patch_x": int(patch_xs[sample_idx].item()),
+                    "subject_id": subject_ids[sample_idx],
+                }
 
-                    if len(viz_samples) < viz_sample_count:
-                        viz_samples.append(sample_data)
-                    else:
-                        # Replace with probability viz_sample_count / total_viz_candidates
-                        j = np.random.randint(0, total_viz_candidates)
-                        if j < viz_sample_count:
-                            viz_samples[j] = sample_data
+                if len(viz_samples) < viz_sample_count:
+                    viz_samples.append(sample_data)
+                else:
+                    # Replace with probability viz_sample_count / total_viz_candidates
+                    j = np.random.randint(0, total_viz_candidates)
+                    if j < viz_sample_count:
+                        viz_samples[j] = sample_data
 
     val_loss = _reduce_mean(np.mean(losses), device)
     val_rmse = _reduce_mean(np.mean(rmses), device)
@@ -288,32 +280,33 @@ def _evaluate(
         val_tissue_mask_dice = None
         val_tissue_mask_loss = None
 
-    if enable_viz and viz_samples:
-        iteration = global_step or 0
-        for idx, sample in enumerate(viz_samples):
-            fig = viz_sample(
-                predicted_template_points=sample["pred_coords"].moveaxis(0, -1).view(-1, 3).cpu().numpy(),
-                predicted_tissue_masks=sample['pred_tissue_masks'].cpu().numpy() if predict_tissue_mask else None,
-                gt_template_points=sample["gt_coords"].moveaxis(0, -1).view(-1, 3).cpu().numpy(),
-                ls_template_info=ls_template_parameters,
-                input_image=sample["input_image"].cpu().numpy(),
-                tissue_mask=sample['tissue_mask'].cpu().numpy() if predict_tissue_mask else None,
-                template_parameters=ls_template_parameters,
-                predict_tissue_mask=predict_tissue_mask,
-                pad_mask=sample['pad_mask'].cpu().numpy(),
+    iteration = global_step or 0
+    for idx, sample in enumerate(viz_samples):
+        fig = viz_sample(
+            predicted_template_points=sample["pred_coords"].moveaxis(0, -1).view(-1, 3).cpu().numpy(),
+            predicted_tissue_masks=sample['pred_tissue_masks'].cpu().numpy() if predict_tissue_mask else None,
+            gt_template_points=sample["gt_coords"].moveaxis(0, -1).view(-1, 3).cpu().numpy(),
+            ls_template_info=ls_template_parameters,
+            input_image=sample["input_image"].cpu().numpy(),
+            tissue_mask=sample['tissue_mask'].cpu().numpy() if predict_tissue_mask else None,
+            template_parameters=ls_template_parameters,
+            predict_tissue_mask=predict_tissue_mask,
+            pad_mask=sample['pad_mask'].cpu().numpy(),
+            ccf_annotations=ccf_annotations,
+            terminology_path=terminology_path,
+        )
+        fig_filename = (
+            f"subject_{sample['subject_id']}_slice_{sample['slice_idx']}"
+            f"_y_{sample['patch_y']}_x_{sample['patch_x']}_step_{iteration}_viz_{idx}.png"
+        )
+        if is_debug:
+            plt.show()
+        if is_main_process():
+            mlflow.log_figure(
+                fig,
+                f"validation_samples/step_{iteration}/{fig_filename}"
             )
-            fig_filename = (
-                f"subject_{sample['subject_id']}_slice_{sample['slice_idx']}"
-                f"_y_{sample['patch_y']}_x_{sample['patch_x']}_step_{iteration}_viz_{idx}.png"
-            )
-            if is_debug:
-                plt.show()
-            if is_main_process():
-                mlflow.log_figure(
-                    fig,
-                    f"validation_samples/step_{iteration}/{fig_filename}"
-                )
-            plt.close(fig)
+        plt.close(fig)
 
     # Log per-sample metrics as CSV (only on main process)
     if is_main_process():
@@ -390,7 +383,9 @@ def train(
         optimizer,
         max_iters: int,
         model_weights_out_dir: Path,
+        ccf_annotations: np.ndarray,
         ls_template_parameters: TemplateParameters,
+        terminology_path: Path,
         normalize_target_points: bool = True,
         learning_rate: float = 0.0001,
         eval_iters: int = 200,
@@ -402,9 +397,7 @@ def train(
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         is_debug: bool = False,
         log_interval: int = 20,
-        ccf_annotations: Optional[np.ndarray] = None,
         val_viz_samples: int = 0,
-        exclude_background_pixels: bool = False,
         predict_tissue_mask: bool = False,
         lr_scheduler: Optional[LRScheduler] = None,
         tissue_mask_loss_weight: float = 0.1,
@@ -416,8 +409,6 @@ def train(
         start_best_val_loss: float = float("inf"),
         start_patience_counter: int = 0,
         scheduler_state_dict: Optional[dict] = None,
-        train_dataset = None,
-        val_dataset = None,
         train_sampler = None,
 ):
     """
@@ -656,10 +647,10 @@ def train(
                             ls_template_parameters=ls_template_parameters,
                             ccf_annotations=ccf_annotations,
                             global_step=global_step,
-                            exclude_background_pixels=exclude_background_pixels,
                             coord_loss=calc_coord_loss,
                             is_debug=is_debug,
                             predict_tissue_mask=predict_tissue_mask,
+                            terminology_path=terminology_path,
                         )
                     val_metrics = _evaluate(
                         dataloader=val_dataloader,
@@ -672,10 +663,11 @@ def train(
                         ls_template_parameters=ls_template_parameters,
                         ccf_annotations=ccf_annotations,
                         global_step=global_step,
-                        exclude_background_pixels=exclude_background_pixels,
                         coord_loss=calc_coord_loss,
                         is_debug=is_debug,
                         predict_tissue_mask=predict_tissue_mask,
+                        terminology_path=terminology_path,
+
                     )
 
                     # Step ReduceLROnPlateau with reduced val loss

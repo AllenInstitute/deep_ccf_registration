@@ -4,6 +4,8 @@ import ants
 import numpy as np
 import pandas as pd
 import torch
+from PIL import ImageColor
+from loguru import logger
 from matplotlib import pyplot as plt
 from skimage.exposure import rescale_intensity
 
@@ -117,15 +119,15 @@ def sample_template_at_points(
 
 def visualize_ccf_annotations(
         annotations: np.ndarray,
-        colormap: dict[int, list],
+        terminology: pd.DataFrame,
         return_image: bool = True
 ) -> np.ndarray:
     """
-    Visualize CCF annotations with official Allen colors.
+    Visualize CCF annotations
 
     Args:
         annotations: (H, W) array of annotation IDs
-        colormap: Optional custom colormap dict. If None, uses Allen official colors.
+        colormap: Optional custom colormap dict
         return_image: If True, returns RGB image. If False, displays with matplotlib.
 
     Returns:
@@ -141,12 +143,10 @@ def visualize_ccf_annotations(
         if ann_id == 0:  # Skip background
             continue
         mask = annotations == ann_id
-        if ann_id in colormap:
-            rgb_image[mask] = colormap[ann_id]
-        else:
-            # Fallback: generate a random color for unmapped IDs
-            np.random.seed(int(ann_id))  # Deterministic color
-            rgb_image[mask] = np.random.randint(50, 255, 3)
+        try:
+            rgb_image[mask] = ImageColor.getcolor(color=terminology.loc[ann_id]['color_hex_triplet'], mode='RGB')
+        except KeyError:
+            logger.warning(f'color for annotation {ann_id} not in terminology')
 
     if not return_image:
         plt.figure(figsize=(10, 10))

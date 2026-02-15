@@ -177,6 +177,7 @@ class SubjectSliceDataset(Dataset):
     def __len__(self) -> int:
         return self._epoch_length
 
+    @timed_func
     def __getitem__(self, index: int) -> PatchSample:
         subject, slice_idx = self._resolve_index(index)
         orientation = self._orientations[np.random.randint(len(self._orientations))]
@@ -186,7 +187,8 @@ class SubjectSliceDataset(Dataset):
 
         slice_axis = metadata.get_slice_axis(spec.orientation)
 
-        subject_bboxes = pd.read_parquet(self._tissue_bboxes_path, filters=[("subject_id", "==", metadata.subject_id)])
+        with timed():
+            subject_bboxes = pd.read_parquet(self._tissue_bboxes_path / f'subject_id={metadata.subject_id}')
         bbox = subject_bboxes[subject_bboxes['index'] == spec.slice_idx].iloc[0]
         start_y = bbox['y']
         start_x = bbox['x']

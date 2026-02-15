@@ -128,3 +128,4 @@ class TrainConfig(BaseModel):
 
     data_augmentation: DataAugmentationConfig
     map_points_to_right_hemisphere: bool = True
+    terminology_path: Path

@@ -242,7 +242,6 @@ def main(config_path: Path):
         shape=ls_template.shape,
         orientation=ls_template_ants_parameters.orientation,
     )
-    del ls_template
 
     # Load dataset metadata
     logger.info(f"Loading dataset metadata from: {config.dataset_meta_path}")
@@ -445,8 +444,6 @@ def main(config_path: Path):
             model=model,
             optimizer=opt,
             max_iters=config.max_iters,
-            train_dataset=train_dataloader.dataset,
-            val_dataset=val_dataloader.dataset,
             train_sampler=train_sampler,
             model_weights_out_dir=config.model_weights_out_dir,
             learning_rate=config.learning_rate,
@@ -461,7 +458,6 @@ def main(config_path: Path):
             ls_template_parameters=ls_template_parameters,
             ccf_annotations=ccf_annotations,
             val_viz_samples=config.val_viz_samples,
-            exclude_background_pixels=config.exclude_background_pixels,
             lr_scheduler=config.lr_scheduler,
             normalize_target_points=config.normalize_template_points,
             predict_tissue_mask=config.predict_tissue_mask,
@@ -474,6 +470,7 @@ def main(config_path: Path):
             start_best_val_loss=start_best_val_loss,
             start_patience_counter=start_patience_counter,
             scheduler_state_dict=scheduler_state_dict,
+            terminology_path=config.terminology_path,
         )
 
     if is_main_process():
