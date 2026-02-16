@@ -110,7 +110,7 @@ def create_dataloader(
         # to keep mem usage lower
         num_workers=num_workers,
         collate_fn=collate_patch_samples,
-        pin_memory=True,
+        pin_memory=False,
         persistent_workers=num_workers > 0,
     )
 
