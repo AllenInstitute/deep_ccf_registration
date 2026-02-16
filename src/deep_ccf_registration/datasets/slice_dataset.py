@@ -95,6 +95,7 @@ class SubjectSliceDataset(Dataset):
         if include_tissue_mask and ccf_annotations_path is None:
             raise ValueError("include_tissue_mask=True requires ccf_annotations_path")
 
+        self._is_train = is_train
         self._template_parameters = template_parameters
         self._transform = transform
         self._include_tissue_mask = include_tissue_mask
@@ -250,10 +251,14 @@ class SubjectSliceDataset(Dataset):
         if self._num_input_channels != 1:
             input_slice = np.stack([input_slice] * self._num_input_channels, axis=-1)
 
-        # Store original template points before transforms for eval
-        original_template_points = template_points.copy()
-        original_tissue_mask = tissue_mask.copy() if tissue_mask is not None else None
-        original_shape = (input_slice.shape[0], input_slice.shape[1])
+        if not self._is_train:
+            original_template_points = template_points.copy()
+            original_tissue_mask = tissue_mask.copy() if tissue_mask is not None else None
+            original_shape = (input_slice.shape[0], input_slice.shape[1])
+        else:
+            original_template_points = None
+            original_tissue_mask = None
+            original_shape = None
 
         pad_top, pad_bottom, pad_left, pad_right = 0, 0, 0, 0
         eval_template_points = None
@@ -275,19 +280,20 @@ class SubjectSliceDataset(Dataset):
             template_points = transforms["template_coords"]
             tissue_mask = transforms["mask"]
 
-            # Get the shape after resize transforms (before crop/pad)
-            # This is needed to scale crop coordinates to original resolution
-            resized_shape = self._get_shape_after_resize(transforms["replay"], original_shape)
+            if not self._is_train:
+                # Get the shape after resize transforms (before crop/pad)
+                # This is needed to scale crop coordinates to original resolution
+                resized_shape = self._get_shape_after_resize(transforms["replay"], original_shape)
 
-            # Apply crop/pad to original points, scaling coordinates appropriately
-            # This allows evaluation at original resolution without interpolating targets
-            eval_template_points, eval_tissue_mask, eval_shape = apply_crop_pad_to_original(
-                template_coords=original_template_points,
-                replay=transforms["replay"],
-                original_shape=original_shape,
-                resized_shape=resized_shape,
-                mask=original_tissue_mask,
-            )
+                # Apply crop/pad to original points, scaling coordinates appropriately
+                # This allows evaluation at original resolution without interpolating targets
+                eval_template_points, eval_tissue_mask, eval_shape = apply_crop_pad_to_original(
+                    template_coords=original_template_points,
+                    replay=transforms["replay"],
+                    original_shape=original_shape,
+                    resized_shape=resized_shape,
+                    mask=original_tissue_mask,
+                )
 
             # Extract padding info from replay
             for t in transforms["replay"]["transforms"]:
