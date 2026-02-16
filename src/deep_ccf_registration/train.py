@@ -12,7 +12,7 @@ import torch.nn.functional as F
 
 from loguru import logger
 
-from deep_ccf_registration.utils.ddp import is_main_process
+from deep_ccf_registration.utils.ddp import is_main_process, get_local_rank
 from deep_ccf_registration.utils.evaluation import evaluate
 
 from deep_ccf_registration.configs.train_config import LRScheduler
@@ -285,7 +285,7 @@ def train(
                 if global_step % eval_interval == 0:
                     # Synchronize all processes before evaluation
                     if dist.is_initialized():
-                        dist.barrier()
+                        dist.barrier(device_ids=[get_local_rank()])
 
                     if is_main_process():
                         logger.info(f"Evaluating at step {global_step}")
@@ -379,7 +379,7 @@ def train(
                             f=checkpoint_path,
                         )
                     if dist.is_initialized():
-                        dist.barrier()
+                        dist.barrier(device_ids=[get_local_rank()])
 
                     # Check for improvement
                     if val_metrics['val_loss'] < best_val_loss - min_delta:

@@ -149,7 +149,7 @@ def setup_ddp() -> tuple[str, int]:
     if world_size > 1:
         # Initialize the process group with extended timeout for long validation runs
         timeout = datetime.timedelta(minutes=60)  # Increase from default 30 min to 60 min
-        dist.init_process_group(backend='nccl', timeout=timeout)
+        dist.init_process_group(backend='nccl', timeout=timeout, device_id=torch.device(f'cuda:{local_rank}'))
         device = f'cuda:{local_rank}'
         torch.cuda.set_device(local_rank)
         if is_main_process():
@@ -290,7 +290,7 @@ def _main(config_path: Path):
 
     # Wait for rank 0 to finish writing before any rank reads
     if dist.is_initialized():
-        dist.barrier()
+        dist.barrier(device_ids=[get_local_rank()])
 
     ccf_annotations = np.load(ccf_annotations_path, mmap_mode='r')
 

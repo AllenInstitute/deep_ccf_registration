@@ -9,6 +9,11 @@ def is_main_process() -> bool:
     return int(os.environ.get('RANK', 0)) == 0
 
 
+def get_local_rank() -> int:
+    """Get the local rank (GPU index on this node)."""
+    return int(os.environ.get('LOCAL_RANK', 0))
+
+
 def reduce_mean(val: float, device: str) -> float:
     """Average a scalar across all DDP ranks. No-op if not distributed."""
     if not dist.is_initialized():
