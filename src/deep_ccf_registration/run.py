@@ -2,6 +2,7 @@ import datetime
 import multiprocessing
 import os
 import sys
+import traceback
 from importlib.metadata import distribution
 from pathlib import Path
 
@@ -12,7 +13,6 @@ import pandas as pd
 import torch
 import torch.distributed as dist
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
-from torch import distributed
 from torch.distributed.elastic.multiprocessing.errors import record
 
 from torch.utils.data import DataLoader
@@ -180,7 +180,15 @@ def _get_git_commit_from_package(package_name="deep-ccf-registration"):
 )
 def main(config_path: Path):
     """Train a model to predict points in light sheet template space given a light sheet image."""
+    try:
+        _main(config_path)
+    except Exception:
+        rank = int(os.environ.get('RANK', 0))
+        logger.error(f"Rank {rank} failed with exception:\n{traceback.format_exc()}")
+        raise
 
+
+def _main(config_path: Path):
     with open(config_path) as f:
         config = json.load(f)
     config = TrainConfig.model_validate(config)
