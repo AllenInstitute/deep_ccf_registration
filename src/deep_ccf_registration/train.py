@@ -283,6 +283,10 @@ def train(
 
                 # Periodic evaluation
                 if global_step % eval_interval == 0:
+                    # Synchronize all processes before evaluation
+                    if dist.is_initialized():
+                        dist.barrier()
+
                     if is_main_process():
                         logger.info(f"Evaluating at step {global_step}")
                     if is_debug:

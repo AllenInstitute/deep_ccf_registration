@@ -1,3 +1,4 @@
+import datetime
 import multiprocessing
 import os
 import sys
@@ -33,9 +34,7 @@ from deep_ccf_registration.models import UNetWithRegressionHeads
 from deep_ccf_registration.train import train
 
 def _record(main_func):
-    if distributed.is_initialized():
-        return record(main_func)
-    return main_func
+    return record(main_func)
 
 def create_dataloader(
     metadata: list[SubjectMetadata],
@@ -148,12 +147,13 @@ def setup_ddp() -> tuple[str, int]:
     local_rank = get_local_rank()
 
     if world_size > 1:
-        # Initialize the process group
-        dist.init_process_group(backend='nccl')
+        # Initialize the process group with extended timeout for long validation runs
+        timeout = datetime.timedelta(minutes=60)  # Increase from default 30 min to 60 min
+        dist.init_process_group(backend='nccl', timeout=timeout)
         device = f'cuda:{local_rank}'
         torch.cuda.set_device(local_rank)
         if is_main_process():
-            logger.info(f"DDP initialized: world_size={world_size}, local_rank={local_rank}")
+            logger.info(f"DDP initialized: world_size={world_size}, local_rank={local_rank}, timeout={timeout}")
     else:
         device = None  # Will be set by config
 
