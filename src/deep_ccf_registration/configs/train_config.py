@@ -112,7 +112,7 @@ class TrainConfig(BaseModel):
     # Gradient clipping (max gradient norm). Set to None to disable.
     grad_clip_max_norm: Optional[float] = 1.0
 
-    # Learning rate warmup steps. Linearly ramps LR from 0 to learning_rate over this many steps.
+    # Learning rate warmup steps. Linearly ramps LR to learning_rate over this many steps.
     warmup_steps: int = 0
 
     use_positional_encoding: bool = False

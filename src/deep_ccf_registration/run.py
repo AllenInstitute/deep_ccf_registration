@@ -1,7 +1,6 @@
 import multiprocessing
 import os
 import sys
-import tempfile
 from importlib.metadata import distribution
 from pathlib import Path
 
@@ -12,6 +11,8 @@ import pandas as pd
 import torch
 import torch.distributed as dist
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
+from torch import distributed
+from torch.distributed.elastic.multiprocessing.errors import record
 
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
@@ -30,6 +31,11 @@ from deep_ccf_registration.metadata import SubjectMetadata, TissueBoundingBoxes,
     SubjectRotationAngle
 from deep_ccf_registration.models import UNetWithRegressionHeads
 from deep_ccf_registration.train import train
+
+def _record(main_func):
+    if distributed.is_initialized():
+        return record(main_func)
+    return main_func
 
 def create_dataloader(
     metadata: list[SubjectMetadata],
@@ -537,4 +543,4 @@ def split_train_val_test(
 
 if __name__ == "__main__":
     multiprocessing.set_start_method('spawn', force=True)   # tensorstore complains "fork" not allowed
-    main()
+    _record(main_func=main)
