@@ -40,7 +40,12 @@ def map_coordinates_cropped(
     with timed():
         logger.debug(f'reading warp with bbox {slice(z0,z1), slice(y0,y1), slice(x0,x1)}')
         if len(volume.shape) == 4:
-            subvol = volume[:, z0:z1, y0:y1, x0:x1].read().result()
+            try:
+                subvol = volume[:, z0:z1, y0:y1, x0:x1].read().result()
+            except IndexError:
+                logger.info(volume)
+                logger.info(f'{z0},{z1},{y0},{y1},{x0},{x1}')
+                raise
         else:
             subvol = volume[z0:z1, y0:y1, x0:x1].read().result()
 
@@ -55,7 +60,7 @@ def map_coordinates_cropped(
                 executor.submit(
                     map_coordinates,
                     subvol[i],
-                    coords,
+                    coords_local,
                     order=order,
                     mode=mode,
                     cval=cval,
