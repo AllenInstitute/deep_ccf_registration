@@ -278,14 +278,20 @@ def _main(config_path: Path):
     logger.info(f"Val subjects: {len(val_metadata)}")
     logger.info(f"Test subjects: {len(test_metadata)}")
 
-    logger.info('loading ccf annotations volume')
-    ccf_annotations = ants.image_read(str(config.ccf_annotations_path)).numpy()
-
-    # write ccf_annotations to memmap. this avoids RAM overhead of multiple workers
-    # spawning with a copy of this data
+    # Write ccf_annotations to memmap. This avoids RAM overhead of multiple workers
+    # spawning with a copy of this data.
     ccf_annotations_path = config.tmp_path / 'ccf_annotations.npy'
-    np.save(ccf_annotations_path, ccf_annotations)
-    del ccf_annotations
+    if is_main_process():
+        logger.info('loading ccf annotations volume')
+        ccf_annotations = ants.image_read(str(config.ccf_annotations_path)).numpy()
+        np.save(ccf_annotations_path, ccf_annotations)
+        del ccf_annotations
+        logger.info('ccf annotations saved to memmap')
+
+    # Wait for rank 0 to finish writing before any rank reads
+    if dist.is_initialized():
+        dist.barrier()
+
     ccf_annotations = np.load(ccf_annotations_path, mmap_mode='r')
 
     with open(config.rotation_angles_path) as f:
