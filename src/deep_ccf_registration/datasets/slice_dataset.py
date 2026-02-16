@@ -85,20 +85,20 @@ class SubjectSliceDataset(Dataset):
         crop_size: Optional[tuple[int, int]] = None,
         transform: Optional[callable] = None,
         include_tissue_mask: bool = False,
-        ccf_annotations: Optional[np.ndarray] = None,
+        ccf_annotations_path: Optional[str] = None,
         rotate_slices: bool = False,
         is_debug: bool = False,
         debug_slice_idx: Optional[int] = None,
         aws_credentials_method: Optional[str] = None,
         num_input_channels: int = 1
     ):
-        if include_tissue_mask and ccf_annotations is None:
-            raise ValueError("include_tissue_mask=True requires ccf_annotations")
+        if include_tissue_mask and ccf_annotations_path is None:
+            raise ValueError("include_tissue_mask=True requires ccf_annotations_path")
 
         self._template_parameters = template_parameters
         self._transform = transform
         self._include_tissue_mask = include_tissue_mask
-        self._ccf_annotations = ccf_annotations
+        self._ccf_annotations_path = ccf_annotations_path
         self._orientations = orientations
 
         self._tissue_bboxes_path = tissue_bboxes_path
@@ -237,9 +237,12 @@ class SubjectSliceDataset(Dataset):
         )
 
         tissue_mask = None
-        if self._include_tissue_mask and self._ccf_annotations is not None:
+        if self._include_tissue_mask and self._ccf_annotations_path is not None:
+            # Re-create memmap every access to avoid memory leak
+            # https://stackoverflow.com/questions/45132940/numpy-memmap-memory-usage-want-to-iterate-once/61472122#61472122
+            ccf_annotations = np.load(self._ccf_annotations_path, mmap_mode='r')
             tissue_mask = _get_tissue_mask(
-                annotations=self._ccf_annotations,
+                annotations=ccf_annotations,
                 template_patch=template_points,
                 template_parameters=self._template_parameters,
             )

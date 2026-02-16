@@ -46,7 +46,7 @@ def create_dataloader(
     num_workers: int,
     device: str,
     ls_template_parameters: TemplateParameters,
-    ccf_annotations: np.ndarray,
+    ccf_annotations_path: str,
     include_tissue_mask: bool = False,
     world_size: int = 1,
 ):
@@ -84,7 +84,7 @@ def create_dataloader(
         crop_size=config.patch_size,
         transform=transform,
         include_tissue_mask=include_tissue_mask,
-        ccf_annotations=ccf_annotations,
+        ccf_annotations_path=ccf_annotations_path,
         rotate_slices=config.data_augmentation.rotate_slices and is_train,
         is_debug=config.debug,
         debug_slice_idx=config.debug_slice_idx,
@@ -110,7 +110,7 @@ def create_dataloader(
         # to keep mem usage lower
         num_workers=num_workers,
         collate_fn=collate_patch_samples,
-        pin_memory=False,
+        pin_memory=True,
         persistent_workers=num_workers > 0,
     )
 
@@ -292,6 +292,7 @@ def _main(config_path: Path):
     if dist.is_initialized():
         dist.barrier(device_ids=[get_local_rank()])
 
+    ccf_annotations_memmap_path = str(ccf_annotations_path)
     ccf_annotations = np.load(ccf_annotations_path, mmap_mode='r')
 
     with open(config.rotation_angles_path) as f:
@@ -321,7 +322,7 @@ def _main(config_path: Path):
         num_workers=config.num_workers,
         ls_template_parameters=ls_template_parameters,
         is_train=True,
-        ccf_annotations=ccf_annotations,
+        ccf_annotations_path=ccf_annotations_memmap_path,
         include_tissue_mask=config.predict_tissue_mask,
         device=device,
         world_size=world_size,
@@ -334,7 +335,7 @@ def _main(config_path: Path):
         num_workers=min(2, config.num_workers),
         ls_template_parameters=ls_template_parameters,
         is_train=False,
-        ccf_annotations=ccf_annotations,
+        ccf_annotations_path=ccf_annotations_memmap_path,
         include_tissue_mask=config.predict_tissue_mask,
         device=device,
         rotation_angles=rotation_angles,
@@ -497,7 +498,8 @@ def _main(config_path: Path):
         logger.info(f"Training completed! Best validation loss: {best_val_loss:.6f}")
         logger.info("=" * 60)
 
-    os.remove(ccf_annotations_path)
+    if is_main_process():
+        os.remove(ccf_annotations_path)
 
     # Cleanup DDP
     if world_size > 1:
