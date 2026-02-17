@@ -193,7 +193,7 @@ class SubjectSliceDataset(Dataset):
         patch_height = bbox['height']
         patch_width = bbox['width']
 
-        coordinate_grid = self._get_coordinate_grid(
+        coordinate_grid, y_rot, x_rot = self._get_coordinate_grid(
             experiment_meta=metadata,
             start_y=start_y,
             start_x=start_x,
@@ -229,13 +229,18 @@ class SubjectSliceDataset(Dataset):
                 )
             )
 
-        template_points = self._get_template_points(
-            point_grid=coordinate_grid,
-            patch_height=patch_height,
-            patch_width=patch_width,
-            experiment_meta=metadata,
-            volume=volume,
-        )
+        try:
+            template_points = self._get_template_points(
+                point_grid=coordinate_grid,
+                patch_height=patch_height,
+                patch_width=patch_width,
+                experiment_meta=metadata,
+                volume=volume,
+            )
+        except IndexError:
+            logger.error('Points completely out of bounds after affine')
+            logger.error(f'index={index}, subject_id={subject.subject_id}, slice_idx={slice_idx}, y_rot={y_rot}, x_rot={x_rot}')
+            raise
 
         tissue_mask = None
         if self._include_tissue_mask and self._ccf_annotations_path is not None:
@@ -520,7 +525,7 @@ class SubjectSliceDataset(Dataset):
                 slice_idx=fixed_index_value,
                 slice_axis=slice_axis,
             )
-        return points
+        return points, y_rot, x_rot
 
     def _get_slice_rotation_ranges(
         self,
