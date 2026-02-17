@@ -295,8 +295,7 @@ def _main(config_path: Path):
     ccf_annotations_memmap_path = str(ccf_annotations_path)
     ccf_annotations = np.load(ccf_annotations_path, mmap_mode='r')
 
-    with open(config.rotation_angles_path) as f:
-        rotation_angles = pd.read_csv(f).set_index('subject_id')
+    rotation_angles = pd.read_csv(config.rotation_angles_path).set_index('subject_id')
     rotation_angles = RotationAngles(
         rotation_angles={x.Index: SubjectRotationAngle(AP_rot=x.AP_rotation, ML_rot=x.ML_rotation, SI_rot=x.SI_rotation) for x in rotation_angles.itertuples(index=True)},
         SI_range=(

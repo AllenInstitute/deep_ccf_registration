@@ -576,58 +576,6 @@ class SubjectSliceDataset(Dataset):
         )
 
 
-# Also expose as standalone for tests
-def get_slice_rotation_ranges(
-    metadata: SubjectMetadata,
-    orientation: SliceOrientation,
-    rotation_angles: Optional[RotationAngles] = None,
-) -> SliceRotationRanges:
-    """Standalone version of _get_slice_rotation_ranges for testing.
-
-    When rotation_angles is not provided, uses hardcoded default ranges.
-    """
-    if rotation_angles is None:
-        # Default ranges for testing
-        AP_rot_range = (-10, 10)
-        SI_rot_range = (-10, 10)
-        ML_rot_range = (-10, 10)
-    else:
-        from deep_ccf_registration.datasets.transforms import get_subject_rotation_range as _get_range
-        subject_rotation = rotation_angles.rotation_angles[metadata.subject_id]
-        AP_rot_range = _get_range(subject_angle=subject_rotation.AP_rot, valid_range=rotation_angles.AP_range)
-        SI_rot_range = _get_range(subject_angle=subject_rotation.SI_rot, valid_range=rotation_angles.SI_range)
-        ML_rot_range = _get_range(subject_angle=subject_rotation.ML_rot, valid_range=rotation_angles.ML_range)
-
-    axes = sorted(metadata.axes, key=lambda x: x.dimension)
-    slice_axis = metadata.get_slice_axis(orientation=orientation)
-    y_axis, x_axis = [axes[i] for i in range(3) if i != slice_axis.dimension]
-
-    if orientation == SliceOrientation.SAGITTAL:
-        direction_to_range = {
-            AcquisitionDirection.SUPERIOR_TO_INFERIOR: SI_rot_range,
-            AcquisitionDirection.INFERIOR_TO_SUPERIOR: SI_rot_range,
-            AcquisitionDirection.ANTERIOR_TO_POSTERIOR: AP_rot_range,
-            AcquisitionDirection.POSTERIOR_TO_ANTERIOR: AP_rot_range,
-        }
-
-        if y_axis.direction not in direction_to_range:
-            raise ValueError(f'unexpected direction for y axis {y_axis.direction}')
-        if x_axis.direction not in direction_to_range:
-            raise ValueError(f'unexpected direction for x axis {x_axis.direction}')
-
-        y_rot_range = direction_to_range[y_axis.direction]
-        x_rot_range = direction_to_range[x_axis.direction]
-        z_rot_range = ML_rot_range
-    else:
-        raise NotImplementedError(f'{orientation} not supported')
-
-    return SliceRotationRanges(
-        x=x_rot_range,
-        y=y_rot_range,
-        z=z_rot_range,
-    )
-
-
 def _get_tissue_mask(
     annotations: np.ndarray,
     template_patch: np.ndarray,
@@ -766,7 +714,7 @@ def compute_bounded_rotation_ranges(
         ratio = max_abs / orig_max_abs
         return orig_range[0] * ratio, orig_range[1] * ratio
 
-    bounded_x = scale_range(desired_x_rot_range, max_abs_x_bounded)
-    bounded_y = scale_range(desired_y_rot_range, max_abs_y_bounded)
+    bounded_x = scale_range(orig_range=desired_x_rot_range, max_abs=max_abs_x_bounded)
+    bounded_y = scale_range(orig_range=desired_y_rot_range, max_abs=max_abs_y_bounded)
 
     return bounded_x, bounded_y

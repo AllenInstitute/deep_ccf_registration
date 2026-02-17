@@ -12,12 +12,14 @@ import torch.nn.functional as F
 
 from loguru import logger
 
+from deep_ccf_registration.models import UNetWithRegressionHeads
 from deep_ccf_registration.utils.ddp import is_main_process, get_local_rank
 from deep_ccf_registration.utils.evaluation import evaluate
 
 from deep_ccf_registration.configs.train_config import LRScheduler
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.utils.logging_utils import timed, ProgressLogger
+from deep_ccf_registration.utils.losses import calc_multi_task_loss
 from deep_ccf_registration.utils.metrics import MSE
 
 
@@ -45,7 +47,6 @@ def train(
         val_viz_samples: int = 0,
         predict_tissue_mask: bool = False,
         lr_scheduler: Optional[LRScheduler] = None,
-        tissue_mask_loss_weight: float = 0.1,
         gradient_accumulation_steps: int = 1,
         grad_clip_max_norm: Optional[float] = 1.0,
         warmup_steps: int = 0,
@@ -205,7 +206,13 @@ def train(
                     orientations=orientations
                 )
                 if predict_tissue_mask:
-                    loss = point_loss + tissue_mask_loss_weight * tissue_mask_loss
+                    # from Kendall et al. 2018 to weight multi-task loss function with different scales
+                    model_module: UNetWithRegressionHeads = model.module if hasattr(model, 'module') else model
+                    loss = calc_multi_task_loss(
+                        model=model_module,
+                        point_loss=point_loss,
+                        tissue_mask_loss=tissue_mask_loss,
+                    )
                 else:
                     loss = point_loss
 
@@ -271,6 +278,9 @@ def train(
                     train_metrics["train/grad_norm"] = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
                 if predict_tissue_mask:
                     train_metrics['train/tissue_mask_loss'] = tissue_mask_loss.item()
+                    model_module = model.module if hasattr(model, 'module') else model
+                    train_metrics['train/log_var_point'] = model_module.log_variance_point_loss.item()
+                    train_metrics['train/log_var_seg'] = model_module.log_variance_tissue_segmentation_loss.item()
 
                 if is_main_process():
                     mlflow.log_metrics(train_metrics, step=global_step)
@@ -278,7 +288,7 @@ def train(
                 if is_main_process():
                     log_msg = f'loss={loss.item() * gradient_accumulation_steps:.3f}'
                     if predict_tissue_mask:
-                        log_msg += f'; point_loss={point_loss.item():.3f}; tissue_mask_loss={tissue_mask_loss.item():.3f}'
+                        log_msg += f'; point_loss={point_loss.item():.3f}; tissue_mask_loss={tissue_mask_loss.item():.3f}; log_var_point={model_module.log_variance_point_loss.item():.3f}; log_var_seg={model_module.log_variance_tissue_segmentation_loss.item():.3f}'
                     progress_logger.log_progress(other=log_msg)
 
                 # Periodic evaluation

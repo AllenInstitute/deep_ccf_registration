@@ -14,6 +14,8 @@ from torch.nn import functional as F
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.datasets.transforms import get_template_point_normalization_inverse, \
     physical_to_index_space
+from deep_ccf_registration.models import UNetWithRegressionHeads
+from deep_ccf_registration.utils.losses import calc_multi_task_loss
 from deep_ccf_registration.utils.metrics import MSE, SparseDiceMetric
 from deep_ccf_registration.utils.ddp import is_main_process, reduce_mean
 from deep_ccf_registration.utils.visualization import viz_sample
@@ -34,7 +36,6 @@ def evaluate(
     ls_template_parameters: Optional[TemplateParameters] = None,
     predict_tissue_mask: bool = False,
     is_debug: bool = False,
-    tissue_mask_weight: float = 0.1
 ) -> dict[str, Any]:
     """
     Evaluate model and report losses/RMSEs.
@@ -95,7 +96,12 @@ def evaluate(
                     )
                     masked_bce = bce_per_pixel * pad_masks
                     tissue_mask_loss = masked_bce.sum() / pad_masks.sum().clamp(min=1.0)
-                    loss = point_loss + tissue_mask_weight * tissue_mask_loss
+                    model_module: UNetWithRegressionHeads = model.module if hasattr(model, 'module') else model
+                    loss = calc_multi_task_loss(
+                        model=model_module,
+                        point_loss=point_loss,
+                        tissue_mask_loss=tissue_mask_loss,
+                    )
                 else:
                     loss = point_loss
                     tissue_mask_loss = None
