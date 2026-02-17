@@ -89,7 +89,6 @@ def create_dataloader(
         is_debug=config.debug,
         debug_slice_idx=config.debug_slice_idx,
         aws_credentials_method=config.tensorstore_aws_credentials_method,
-        num_input_channels=3 if config.model.encoder_weights == 'imagenet' else 1,
     )
 
     num_workers = num_workers if is_train else 0
@@ -345,7 +344,7 @@ def _main(config_path: Path):
     logger.info(f"Val subjects: {len(val_metadata)}")
 
     model = UNetWithRegressionHeads(
-        in_channels=3 if config.model.encoder_weights == 'imagenet' else 1,
+        in_channels=1,
         out_coords=3,
         include_tissue_mask=config.predict_tissue_mask,
         use_positional_encoding=config.use_positional_encoding,

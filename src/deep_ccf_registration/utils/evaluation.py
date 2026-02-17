@@ -36,6 +36,7 @@ def evaluate(
     ls_template_parameters: Optional[TemplateParameters] = None,
     predict_tissue_mask: bool = False,
     is_debug: bool = False,
+    is_train: bool = False
 ) -> dict[str, Any]:
     """
     Evaluate model and report losses/RMSEs.
@@ -153,7 +154,7 @@ def evaluate(
                     'patch_y': int(batch["patch_ys"][sample_idx].item()),
                     'patch_x': int(batch["patch_xs"][sample_idx].item()),
                     'rmse': rmses[record_idx],
-                    "ccf_annotations_dice": ccf_annotations_dice_metric.compute_for_sample_idx(idx=record_idx)
+                    "ccf_annotations_dice": ccf_annotations_dice_metric.compute_for_sample_idx(idx=record_idx) if not is_train else None
                 })
 
             slice_indices = batch["slice_indices"]
@@ -243,7 +244,7 @@ def evaluate(
         "val_rmse": val_rmse,
         "val_rmse_registration_res": val_rmse_registration_res,
         "val_tissue_mask_dice": val_tissue_mask_dice,
-        "val_ccf_annotation_dice": ccf_annotations_dice_metric.compute()
+        "val_ccf_annotation_dice": ccf_annotations_dice_metric.compute() if not is_train else None
     }
 
 def _update_dice_metric(

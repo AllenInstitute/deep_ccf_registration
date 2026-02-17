@@ -316,6 +316,7 @@ def train(
                             is_debug=is_debug,
                             predict_tissue_mask=predict_tissue_mask,
                             terminology_path=terminology_path,
+                            is_train=True,
                         )
                     val_metrics = evaluate(
                         dataloader=val_dataloader,
@@ -332,7 +333,7 @@ def train(
                         is_debug=is_debug,
                         predict_tissue_mask=predict_tissue_mask,
                         terminology_path=terminology_path,
-
+                        is_train=False,
                     )
 
                     # Step ReduceLROnPlateau with reduced val loss
