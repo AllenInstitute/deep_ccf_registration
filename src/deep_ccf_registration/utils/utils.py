@@ -147,6 +147,8 @@ def visualize_ccf_annotations(
             rgb_image[mask] = ImageColor.getcolor(color=terminology.loc[ann_id]['color_hex_triplet'], mode='RGB')
         except KeyError:
             logger.warning(f'color for annotation {ann_id} not in terminology')
+        except ValueError as e:
+            logger.warning(e)
 
     if not return_image:
         plt.figure(figsize=(10, 10))
