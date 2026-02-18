@@ -477,7 +477,7 @@ def build_transform(
     apply_grid_distortion: bool = False
 ):
     transforms: list[Any] = [ImageNormalization()]
-    
+
     if config.model.encoder_weights == 'imagenet':
         transforms.append(Normalize())
 
@@ -603,12 +603,22 @@ def apply_crop_pad_to_original(
     return result_coords, result_mask, eval_shape
 
 
-def physical_to_index_space(physical_pts: torch.Tensor | np.ndarray, template_parameters: TemplateParameters):
+def physical_to_index_space(
+        physical_pts: torch.Tensor | np.ndarray,
+        template_parameters: TemplateParameters,
+        channel_dim: int = 2
+):
     points = physical_pts.clone() if isinstance(physical_pts, torch.Tensor) else physical_pts.copy()
     for dim in range(template_parameters.dims):
-        points[:, :, dim] -= template_parameters.origin[dim]
-        points[:, :, dim] *= template_parameters.direction[dim]
-        points[:, :, dim] /= template_parameters.scale[dim]
+        if channel_dim == 2:
+            points_slice = slice(None, None, dim)
+        elif channel_dim == 1:
+            points_slice = slice(None, dim)
+        else:
+            raise NotImplementedError
+        points[points_slice] -= template_parameters.origin[dim]
+        points[points_slice] *= template_parameters.direction[dim]
+        points[points_slice] /= template_parameters.scale[dim]
     return points
 
 def map_points_to_right_hemisphere(
@@ -656,7 +666,11 @@ def mirror_points(
     points = points.clone() if isinstance(points, torch.Tensor) else points.copy()
 
     # 1. Convert to index space
-    points = physical_to_index_space(physical_pts=points, template_parameters=template_parameters)
+    points = physical_to_index_space(
+        physical_pts=points,
+        template_parameters=template_parameters,
+        channel_dim=1
+    )
 
     # 2. Flip ML in index space
     points[:, 0] = template_parameters.shape[0]-1 - points[:, 0]
