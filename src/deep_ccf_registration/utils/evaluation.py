@@ -113,6 +113,8 @@ def evaluate(
                 if predict_tissue_mask:
                     tissue_mask_losses.append(tissue_mask_loss.item())
 
+            pred_points = pred_points.float()
+
             if denormalize_pred_template_points:
                 pred_points = get_template_point_normalization_inverse(
                     x=pred_points,

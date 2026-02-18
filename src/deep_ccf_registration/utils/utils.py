@@ -142,9 +142,8 @@ def visualize_ccf_annotations(
     for ann_id in unique_ids:
         if ann_id == 0:  # Skip background
             continue
-        mask = annotations == ann_id
         try:
-            rgb_image[mask] = ImageColor.getcolor(color=terminology.loc[ann_id]['color_hex_triplet'], mode='RGB')
+            rgb_image[annotations == ann_id] = ImageColor.getcolor(color=terminology.loc[ann_id]['color_hex_triplet'], mode='RGB')
         except KeyError:
             logger.warning(f'color for annotation {ann_id} not in terminology')
         except ValueError as e:
