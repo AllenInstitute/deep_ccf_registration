@@ -347,8 +347,8 @@ def _eval_full_res(
             dice_metric=ccf_annotations_dice_metric,
             ccf_annotations=ccf_annotations,
             # [0] to remove batch index (only 1 sample)
-            gt_physical_space_points=eval_target_i[0],
-            pred_physical_space=pred_points[0],
+            gt_physical_space_points=eval_target_i[0].cpu().numpy(),
+            pred_physical_space=pred_points[0].cpu().numpy(),
             # [0] to remove channel index (only 1 channel)
             pred_mask=pred_tissue_mask[0, 0].cpu().numpy() if predict_tissue_mask else None,
             template_parameters=ls_template_parameters,
