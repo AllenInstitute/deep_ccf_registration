@@ -10,31 +10,33 @@ from deep_ccf_registration.metadata import SliceOrientation
 
 
 class MSE(nn.Module):
-    def __init__(self, coordinate_dim: int = 1, reduction: Optional[str] = None,
-                 template_parameters: Optional[TemplateParameters] = None):
+    def __init__(self,
+                 template_parameters: TemplateParameters,
+                 coordinate_dim: int = 1,
+                 reduction: Optional[str] = None,
+                 ):
         super().__init__()
         self.coordinate_dim = coordinate_dim
         self._reduction = reduction
         self._template_parameters = template_parameters
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor,
-                mask: Optional[torch.Tensor] = None,
-                orientations: Optional[list[SliceOrientation]] = None) -> torch.Tensor:
+                orientations: list[SliceOrientation],
+                mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         squared_errors = (pred - target) ** 2
         per_point_squared_distance = squared_errors.sum(dim=self.coordinate_dim)
 
-        if orientations is not None and self._template_parameters is not None:
-            sagittal_mask = torch.tensor(
-                [o == SliceOrientation.SAGITTAL for o in orientations],
-                device=pred.device, dtype=torch.bool
+        sagittal_mask = torch.tensor(
+            [SliceOrientation(o) == SliceOrientation.SAGITTAL for o in orientations],
+            device=pred.device, dtype=torch.bool
+        )
+        if sagittal_mask.any():
+            flipped_pred = mirror_points(points=pred, template_parameters=self._template_parameters)
+            flipped_distance = ((flipped_pred - target) ** 2).sum(dim=self.coordinate_dim)
+            min_distance = torch.minimum(per_point_squared_distance, flipped_distance)
+            per_point_squared_distance = torch.where(
+                sagittal_mask[:, None, None], min_distance, per_point_squared_distance
             )
-            if sagittal_mask.any():
-                flipped_pred = mirror_points(points=pred, template_parameters=self._template_parameters)
-                flipped_distance = ((flipped_pred - target) ** 2).sum(dim=self.coordinate_dim)
-                min_distance = torch.minimum(per_point_squared_distance, flipped_distance)
-                per_point_squared_distance = torch.where(
-                    sagittal_mask[:, None, None], min_distance, per_point_squared_distance
-                )
 
         if mask is not None:
             if mask.dim() == per_point_squared_distance.dim() + 1:

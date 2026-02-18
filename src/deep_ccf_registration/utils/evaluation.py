@@ -123,7 +123,12 @@ def evaluate(
                     template_parameters=ls_template_parameters,
                 )
 
-            rmse = MSE()(pred=pred_points, target=target_template_points, mask=masks).sqrt()
+            rmse = MSE(template_parameters=ls_template_parameters)(
+                pred=pred_points,
+                target=target_template_points,
+                mask=masks,
+                orientations=orientations,
+            ).sqrt()
 
             if "eval_template_points" in batch and "eval_shapes" in batch:
                 rmse_full_res, ccf_annotations_dice_metric = _eval_full_res(
@@ -268,13 +273,13 @@ def _update_dice_metric(
     gt_ccf_annotations = map_coordinates(
         input=ccf_annotations,
         # 3, N
-        coordinates=np.transpose(gt_points_index_space, (2, 0, 1)).view(3, -1),
+        coordinates=np.transpose(gt_points_index_space, (2, 0, 1)).reshape(3, -1),
         order=0,
         mode='nearest'
     )
     pred_ccf_annotations = map_coordinates(
         input=ccf_annotations,
-        coordinates=np.transpose(pred_points_index_space, (2, 0, 1)).view(3, -1),
+        coordinates=np.transpose(pred_points_index_space, (2, 0, 1)).reshape(3, -1),
         order=0,
         mode='nearest'
     )
@@ -298,6 +303,7 @@ def _eval_full_res(
     full_res_targets = batch["eval_template_points"].to(device)
     full_res_pad_masks = batch["eval_pad_masks"].to(device)
     full_res_shapes = batch["eval_shapes"]
+    orientations = batch["orientations"]
 
     if predict_tissue_mask and "eval_tissue_masks" in batch:
         full_res_tissue_masks = batch["eval_tissue_masks"].to(device)
@@ -341,7 +347,12 @@ def _eval_full_res(
         else:
             gt_full_res_mask = full_res_pad_masks[sample_idx:sample_idx + 1, :full_res_h, :full_res_w]
 
-        rmse_full_res = MSE()(pred=pred_points, target=eval_target_i, mask=gt_full_res_mask).sqrt()
+        rmse_full_res = MSE(template_parameters=ls_template_parameters)(
+            pred=pred_points,
+            target=eval_target_i,
+            mask=gt_full_res_mask,
+            orientations=orientations,
+        ).sqrt()
         batch_rmse += rmse_full_res.cpu().tolist()
         _update_dice_metric(
             dice_metric=ccf_annotations_dice_metric,

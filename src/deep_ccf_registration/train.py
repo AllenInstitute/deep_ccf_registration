@@ -91,7 +91,7 @@ def train(
     """
     os.makedirs(model_weights_out_dir, exist_ok=True)
 
-    calc_coord_loss = MSE(reduction='mean')
+    calc_coord_loss = MSE(reduction='mean', template_parameters=ls_template_parameters)
     best_val_loss = start_best_val_loss
     patience_counter = start_patience_counter
     global_step = start_step

@@ -639,19 +639,29 @@ def map_points_to_right_hemisphere(
         template_points = mirror_points(points=template_points, template_parameters=template_parameters)
     return template_points
 
-def mirror_points(points: torch.Tensor | np.ndarray, template_parameters: TemplateParameters):
+def mirror_points(
+        points: torch.Tensor | np.ndarray,
+        template_parameters: TemplateParameters
+):
+    """
+    Mirrors points over the SI axis (only relevant for sagittal slices)
+
+    :param points: BxCxHxW
+    :param template_parameters:
+    :return:
+    """
     points = points.clone() if isinstance(points, torch.Tensor) else points.copy()
 
     # 1. Convert to index space
     points = physical_to_index_space(physical_pts=points, template_parameters=template_parameters)
 
     # 2. Flip ML in index space
-    points[:, :, 0] = template_parameters.shape[0]-1 - points[:, :, 0]
+    points[:, 0] = template_parameters.shape[0]-1 - points[:, 0]
 
     # 3. Convert back to physical
     for dim in range(template_parameters.dims):
-        points[:, :, dim] *= template_parameters.scale[dim]
-        points[:, :, dim] *= template_parameters.direction[dim]
-        points[:, :, dim] += template_parameters.origin[dim]
+        points[:, dim] *= template_parameters.scale[dim]
+        points[:, dim] *= template_parameters.direction[dim]
+        points[:, dim] += template_parameters.origin[dim]
 
     return points
