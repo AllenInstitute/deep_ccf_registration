@@ -9,6 +9,7 @@ import torch
 from matplotlib import pyplot as plt
 from monai.metrics import DiceMetric
 from scipy.ndimage import map_coordinates
+from torch import distributed as dist
 from torch.nn import functional as F
 
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
@@ -234,6 +235,12 @@ def evaluate(
             )
         plt.close(fig)
 
+    # Gather per-sample metrics from all ranks
+    if dist.is_initialized():
+        all_eval_records = [None] * dist.get_world_size()
+        dist.all_gather_object(all_eval_records, eval_records)
+        eval_records = [r for rank_records in all_eval_records for r in rank_records]
+
     # Log per-sample metrics as CSV (only on main process)
     if is_main_process():
         metrics_df = pd.DataFrame(eval_records)
@@ -251,7 +258,7 @@ def evaluate(
         "val_rmse": val_rmse,
         "val_rmse_registration_res": val_rmse_registration_res,
         "val_tissue_mask_dice": val_tissue_mask_dice,
-        "val_ccf_annotation_dice": ccf_annotations_dice_metric.compute() if not is_train else None
+        "val_ccf_annotation_dice": reduce_mean(ccf_annotations_dice_metric.compute(), device) if not is_train else None
     }
 
 def _update_dice_metric(
