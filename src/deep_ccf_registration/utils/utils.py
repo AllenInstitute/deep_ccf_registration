@@ -143,11 +143,13 @@ def visualize_ccf_annotations(
         if ann_id == 0:  # Skip background
             continue
         try:
-            rgb_image[annotations == ann_id] = ImageColor.getcolor(color=terminology.loc[ann_id]['color_hex_triplet'], mode='RGB')
+            color_hex = terminology.loc[ann_id]['color_hex_triplet']
+            if len(color_hex[1:]) == 5:
+                # fixing incorrect conversion with leading 0
+                color_hex = f'#0{"".join(color_hex[1:])}'
+            rgb_image[annotations == ann_id] = ImageColor.getcolor(color=color_hex, mode='RGB')
         except KeyError:
             logger.warning(f'color for annotation {ann_id} not in terminology')
-        except ValueError as e:
-            logger.warning(e)
 
     if not return_image:
         plt.figure(figsize=(10, 10))
