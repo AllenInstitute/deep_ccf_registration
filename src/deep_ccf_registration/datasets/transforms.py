@@ -611,14 +611,16 @@ def physical_to_index_space(
     points = physical_pts.clone() if isinstance(physical_pts, torch.Tensor) else physical_pts.copy()
     for dim in range(template_parameters.dims):
         if channel_dim == 2:
-            points_slice = slice(None, None, dim)
+            points[:, :, dim] -= template_parameters.origin[dim]
+            points[:, :, dim] *= template_parameters.direction[dim]
+            points[:, :, dim] /= template_parameters.scale[dim]
         elif channel_dim == 1:
-            points_slice = slice(None, dim)
+            points[:, dim] -= template_parameters.origin[dim]
+            points[:, dim] *= template_parameters.direction[dim]
+            points[:, dim] /= template_parameters.scale[dim]
         else:
             raise NotImplementedError
-        points[points_slice] -= template_parameters.origin[dim]
-        points[points_slice] *= template_parameters.direction[dim]
-        points[points_slice] /= template_parameters.scale[dim]
+
     return points
 
 def map_points_to_right_hemisphere(
