@@ -307,7 +307,7 @@ def _eval_full_res(
     full_res_shapes = batch["eval_shapes"]
     orientations = batch["orientations"]
 
-    if predict_tissue_mask and "eval_tissue_masks" in batch:
+    if predict_tissue_mask:
         full_res_tissue_masks = batch["eval_tissue_masks"].to(device)
     else:
         full_res_tissue_masks = None
@@ -324,18 +324,18 @@ def _eval_full_res(
         valid_w = int(pad_mask_i.any(dim=0).sum())
 
         # Crop out padding from predictions before upsampling
-        pred_points = pred_points[sample_idx:sample_idx + 1, :, :valid_h, :valid_w]
+        pred_points_i = pred_points[sample_idx:sample_idx + 1, :, :valid_h, :valid_w]
         if predict_tissue_mask:
-            pred_tissue_mask = pred_tissue_mask[sample_idx:sample_idx + 1, :valid_h, :valid_w]
-            pred_tissue_mask = F.interpolate(
-                pred_tissue_mask.unsqueeze(1).float(),
+            pred_tissue_mask_i = pred_tissue_mask[sample_idx, :valid_h, :valid_w]
+            pred_tissue_mask_i = F.interpolate(
+                pred_tissue_mask_i[None, None].float(),
                 size=(full_res_h, full_res_w),
                 mode="nearest",
             )
 
         # Upsample unpadded predictions to eval resolution
-        pred_points = F.interpolate(
-            pred_points,
+        pred_points_i = F.interpolate(
+            pred_points_i,
             size=(full_res_h, full_res_w),
             mode="bilinear",
             align_corners=False
@@ -350,7 +350,7 @@ def _eval_full_res(
             gt_full_res_mask = full_res_pad_masks[sample_idx:sample_idx + 1, :full_res_h, :full_res_w]
 
         rmse_full_res = MSE(template_parameters=ls_template_parameters)(
-            pred=pred_points,
+            pred=pred_points_i,
             target=eval_target_i,
             mask=gt_full_res_mask,
             orientations=orientations,
@@ -361,9 +361,9 @@ def _eval_full_res(
             ccf_annotations=ccf_annotations,
             # [0] to remove batch index (only 1 sample)
             gt_physical_space_points=eval_target_i[0].cpu().numpy(),
-            pred_physical_space=pred_points[0].cpu().numpy(),
+            pred_physical_space=pred_points_i[0].cpu().numpy(),
             # [0] to remove channel index (only 1 channel)
-            pred_mask=pred_tissue_mask[0, 0].cpu().numpy() if predict_tissue_mask else None,
+            pred_mask=pred_tissue_mask_i[0, 0].cpu().numpy() if predict_tissue_mask else None,
             template_parameters=ls_template_parameters,
         )
 
