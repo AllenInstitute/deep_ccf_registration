@@ -52,6 +52,6 @@ if __name__ == '__main__':
         tissue_bboxes = json.load(f)
     tissue_bboxes = TissueBoundingBoxes(bounding_boxes=tissue_bboxes)
     convert_tissue_bboxes_to_parquet(
-        out_dir=Path('/tmp/'),
+        out_dir=Path('/Users/adam.amster/smartspim-registration'),
         bboxes=tissue_bboxes
     )

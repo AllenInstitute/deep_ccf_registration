@@ -37,7 +37,8 @@ def _record(main_func):
     return record(main_func)
 
 def create_dataloader(
-    metadata: list[SubjectMetadata],
+    subjects: list[SubjectMetadata],
+    samples: np.ndarray,
     tissue_bboxes_path: Path,
     rotation_angles: RotationAngles,
     config: TrainConfig,
@@ -75,7 +76,8 @@ def create_dataloader(
     )
 
     dataset = SubjectSliceDataset(
-        subjects=metadata,
+        subjects=subjects,
+        samples=samples,
         template_parameters=template_parameters,
         is_train=is_train,
         tissue_bboxes_path=tissue_bboxes_path,
@@ -200,24 +202,14 @@ def _main(config_path: Path):
     logger.info("Starting training run")
     logger.info("=" * 60)
 
-    torch.manual_seed(seed=config.seed)
-    random.seed(config.seed)
-    np.random.seed(config.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed=config.seed)
-    logger.info(f"Random seed set to: {config.seed}")
-
     # Setup DDP if running in distributed mode
     ddp_device, world_size = setup_ddp()
 
     # Offset random seeds by rank so each process has different randomness
-    # (e.g. in dataset __getitem__ which uses np.random)
     rank = int(os.environ.get('RANK', 0))
     torch.manual_seed(seed=config.seed + rank)
-    np.random.seed(config.seed + rank)
-    random.seed(config.seed + rank)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed=config.seed + rank)
+    np.random.seed(config.seed)
+    random.seed(config.seed)
 
     if ddp_device is not None:
         # DDP mode - use the assigned device
@@ -256,27 +248,21 @@ def _main(config_path: Path):
         orientation=ls_template_ants_parameters.orientation,
     )
 
-    # Load dataset metadata
     logger.info(f"Loading dataset metadata from: {config.dataset_meta_path}")
     with open(file=config.dataset_meta_path, mode='r') as f:
         subject_metadata_dicts = json.load(fp=f)
     subject_metadata = [SubjectMetadata.model_validate(x) for x in subject_metadata_dicts]
     logger.info(f"Total subjects loaded: {len(subject_metadata)}")
 
-    # Split into train/val
-    train_metadata, val_metadata, test_metadata = split_train_val_test(
-        subject_metadata=subject_metadata,
-        train_split=config.train_val_split,
-        val_split=(1 - config.train_val_split) / 2,
-    )
+    train_samples = np.load(config.train_samples_path, mmap_mode='r')
+    val_samples = np.load(config.train_samples_path, mmap_mode='r')
 
     if config.debug:
         logger.warning("Debug mode: using training metadata for validation to ensure shared subjects")
-        val_metadata = train_metadata
+        val_samples = train_samples
 
-    logger.info(f"Train subjects: {len(train_metadata)}")
-    logger.info(f"Val subjects: {len(val_metadata)}")
-    logger.info(f"Test subjects: {len(test_metadata)}")
+    logger.info(f"Train subjects: {len(np.unique(train_samples[:, 0]))}")
+    logger.info(f"Val subjects: {len(np.unique(val_samples[:, 0]))}")
 
     # Write ccf_annotations to memmap. This avoids RAM overhead of multiple workers
     # spawning with a copy of this data.
@@ -313,7 +299,8 @@ def _main(config_path: Path):
     )
 
     train_dataloader, train_sampler = create_dataloader(
-        metadata=train_metadata,
+        subjects=subject_metadata,
+        samples=train_samples,
         tissue_bboxes_path=config.tissue_bounding_boxes_path,
         rotation_angles=rotation_angles,
         config=config,
@@ -327,7 +314,8 @@ def _main(config_path: Path):
         world_size=world_size,
     )
     val_dataloader, _ = create_dataloader(
-        metadata=val_metadata,
+        subjects=subject_metadata,
+        samples=val_samples,
         tissue_bboxes_path=config.tissue_bounding_boxes_path,
         config=config,
         batch_size=config.batch_size,
@@ -340,9 +328,6 @@ def _main(config_path: Path):
         rotation_angles=rotation_angles,
         world_size=world_size,
     )
-
-    logger.info(f"Train subjects: {len(train_metadata)}")
-    logger.info(f"Val subjects: {len(val_metadata)}")
 
     model = UNetWithRegressionHeads(
         in_channels=3 if config.model.encoder_weights == 'imagenet' else 1,
@@ -504,57 +489,6 @@ def _main(config_path: Path):
     if world_size > 1:
         dist.destroy_process_group()
 
-
-def split_train_val_test(
-        subject_metadata: list[SubjectMetadata],
-        train_split: float,
-        val_split: float,
-) -> tuple[list[SubjectMetadata], list[SubjectMetadata], list[SubjectMetadata]]:
-    """
-    Parameters
-    ----------
-    subject_metadata: List of all subject metadata
-    train_split: Fraction of data for training
-    val_split: Fraction of data for validation
-    seed: Random seed for splitting
-
-    Return
-    --------
-    Tuple of (train_metadata, val_metadata, test_metadata)
-
-    Note: test_split = 1 - train_split - val_split
-    """
-    # Validate splits
-    test_split = 1 - train_split - val_split
-    if test_split < 0:
-        raise ValueError(f"train_split ({train_split}) + val_split ({val_split}) must be <= 1")
-
-    # Use random split
-    logger.info(
-        f"Using random train/val/test split: {train_split:.1%} train, "
-        f"{val_split:.1%} val, {test_split:.1%} test"
-    )
-
-    shuffled_metadata = subject_metadata.copy()
-    random.shuffle(shuffled_metadata)
-
-    # Split
-    n_train = int(len(shuffled_metadata) * train_split)
-    n_val = int(len(shuffled_metadata) * val_split)
-
-    train_metadata = shuffled_metadata[:n_train]
-    val_metadata = shuffled_metadata[n_train:n_train + n_val]
-    test_metadata = shuffled_metadata[n_train + n_val:]
-
-    # Validation
-    if len(train_metadata) == 0:
-        raise ValueError("Training set is empty!")
-    if len(val_metadata) == 0:
-        raise ValueError("Validation set is empty!")
-    if len(test_metadata) == 0:
-        raise ValueError("Test set is empty!")
-
-    return train_metadata, val_metadata, test_metadata
 
 if __name__ == "__main__":
     multiprocessing.set_start_method('spawn', force=True)   # tensorstore complains "fork" not allowed

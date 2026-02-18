@@ -77,6 +77,7 @@ class SubjectSliceDataset(Dataset):
     def __init__(
         self,
         subjects: list[SubjectMetadata],
+        samples: np.ndarray,
         template_parameters: TemplateParameters,
         is_train: bool,
         tissue_bboxes_path: Path,
@@ -107,15 +108,13 @@ class SubjectSliceDataset(Dataset):
         self._crop_size = crop_size
         self._rotate_slices = rotate_slices
         self._rotation_angles = rotation_angles
-        self._subjects = subjects
+        self._subject_id_to_subject_map = {x.subject_id: x for x in subjects}
         self._is_debug = is_debug
         self._debug_slice_idx = debug_slice_idx
         self._num_input_channels = num_input_channels
         self._aws_credentials_method = aws_credentials_method
-
-        self._subject_slice_ranges = self._build_slice_ranges()
-        self._epoch_length = sum(stop - start for _, start, stop in self._subject_slice_ranges)
-        logger.info(f"Dataset initialized with {self._epoch_length} total samples")
+        self._samples = samples
+        logger.info(f"Dataset initialized with {len(self)} total samples")
 
     @retry(tries=3, backoff=2)
     def _read_volume(self, subject: SubjectMetadata) -> tensorstore.TensorStore:
@@ -145,45 +144,17 @@ class SubjectSliceDataset(Dataset):
         ).result()
         return warp
 
-    def _build_slice_ranges(self) -> list[tuple[SubjectMetadata, int, int]]:
-        """Build (subject, start, stop) ranges of valid tissue slice indices."""
-        logger.info('building slice ranges')
-        bboxes = pd.read_parquet(self._tissue_bboxes_path)
-        slice_stats = bboxes.groupby('subject_id')['index'].agg(['min', 'max', 'median'])
-        ranges = []
-        for subject in self._subjects:
-            row = slice_stats.loc[subject.subject_id]
-            if self._is_debug:
-                if self._debug_slice_idx is not None:
-                    debug_idx = self._debug_slice_idx
-                else:
-                    debug_idx = int(row['median'])
-                ranges.append((subject, debug_idx, debug_idx + 1))
-            else:
-                ranges.append((subject, int(row['min']), int(row['max']) + 1))
-        return ranges
-
-    def _resolve_index(self, index: int) -> tuple[SubjectMetadata, int]:
-        """Map a flat dataset index to (subject, random_slice_idx)."""
-        remaining = index
-        for subject, start, stop in self._subject_slice_ranges:
-            n = stop - start
-            if remaining < n:
-                return subject, np.random.randint(start, stop)
-            remaining -= n
-        raise IndexError(f"Index {index} out of range for dataset of size {self._epoch_length}")
-
     def __len__(self) -> int:
-        return self._epoch_length
+        return self._samples.shape[0]
 
     @timed_func
     def __getitem__(self, index: int) -> PatchSample:
-        subject, slice_idx = self._resolve_index(index)
-        orientation = self._orientations[np.random.randint(len(self._orientations))]
+        sample = self._samples[index]
+        subject_id, slice_idx, orientation = str(sample[0]), int(sample[1]), SliceOrientation(sample[2])
+        subject = self._subject_id_to_subject_map[subject_id]
         spec = SliceSampleSpec(metadata=subject, slice_idx=slice_idx, orientation=orientation)
 
         metadata = spec.metadata
-
         slice_axis = metadata.get_slice_axis(spec.orientation)
 
         with timed():
