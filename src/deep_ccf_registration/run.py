@@ -255,7 +255,7 @@ def _main(config_path: Path):
     logger.info(f"Total subjects loaded: {len(subject_metadata)}")
 
     train_samples = np.load(config.train_samples_path, mmap_mode='r')
-    val_samples = np.load(config.train_samples_path, mmap_mode='r')
+    val_samples = np.load(config.val_samples_path, mmap_mode='r')
 
     if config.debug:
         logger.warning("Debug mode: using training metadata for validation to ensure shared subjects")
