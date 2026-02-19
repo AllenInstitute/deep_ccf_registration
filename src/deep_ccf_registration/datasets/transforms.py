@@ -284,7 +284,7 @@ class Resample(albumentations.DualTransform):
         acquisition_axes = data["acquisition_axes"]
         slice_axis = data["slice_axis"]
 
-        # Compute output shape so it is recorded in the replay dict
+        # Compute output shape
         img = data["image"]
         h, w = img.shape[:2]
         axes = sorted(acquisition_axes, key=lambda a: a.dimension)
@@ -517,87 +517,8 @@ def build_transform(
         ))
 
     if len(transforms) > 0:
-        return albumentations.ReplayCompose(transforms, seed=config.seed)
+        return albumentations.Compose(transforms)
     return None
-
-def apply_crop_pad_to_original(
-    template_coords: np.ndarray,
-    replay: dict,
-    original_shape: tuple[int, int],
-    resized_shape: tuple[int, int],
-    mask: np.ndarray | None = None,
-) -> tuple[np.ndarray, np.ndarray | None, tuple[int, int]]:
-    """
-    Apply crop and pad transforms to original-resolution coordinates.
-
-    Scales crop coordinates from resized space to original space, then applies
-    crop and pad. This allows evaluation at original resolution without
-    interpolating the target coordinates.
-
-    Args:
-        template_coords: Original template coordinates (H_orig, W_orig, 3)
-        replay: Transform replay dict from albumentations
-        original_shape: (H_orig, W_orig) original image shape
-        resized_shape: (H_resized, W_resized) shape after resize transforms
-        mask: Optional mask array (H_orig, W_orig)
-
-    Returns:
-        Tuple of (transformed_coords, transformed_mask, eval_shape)
-        where eval_shape is the spatial dimensions of the eval targets
-    """
-    orig_h, orig_w = original_shape
-    resized_h, resized_w = resized_shape
-
-    result_coords = template_coords.copy()
-    result_mask = mask.copy() if mask is not None else None
-
-    # Process transforms in order
-    for t in replay.get("transforms", []):
-        t_name = t.get("__class_fullname__", "")
-        params = t.get("params", {}) or {}
-
-        if "Crop" in t_name:
-            crop_coords = params.get("crop_coords")
-            if not crop_coords:
-                continue
-
-            # crop_coords is (x_min, y_min, x_max, y_max) in the padded resized image
-            x_min, y_min, x_max, y_max = crop_coords
-            pad_params_inner = params.get("pad_params")
-
-            # Determine padding offset (content starts at (pad_top, pad_left) in padded space)
-            pad_top = pad_params_inner.get("pad_top", 0) if pad_params_inner else 0
-            pad_left = pad_params_inner.get("pad_left", 0) if pad_params_inner else 0
-
-            # Convert crop coords from padded space to content (resized) space,
-            # clamped to the actual content region [0:resized_h, 0:resized_w]
-            content_y_start = max(y_min - pad_top, 0)
-            content_x_start = max(x_min - pad_left, 0)
-            content_y_end = min(y_max - pad_top, resized_h)
-            content_x_end = min(x_max - pad_left, resized_w)
-
-            # Map content region to original space
-            orig_y_start = round(content_y_start / resized_h * orig_h)
-            orig_y_end   = round(content_y_end   / resized_h * orig_h)
-            orig_x_start = round(content_x_start / resized_w * orig_w)
-            orig_x_end   = round(content_x_end   / resized_w * orig_w)
-
-            # Clamp to valid range
-            orig_y_start = max(0, orig_y_start)
-            orig_y_end   = min(orig_h, orig_y_end)
-            orig_x_start = max(0, orig_x_start)
-            orig_x_end   = min(orig_w, orig_x_end)
-
-            result_coords = result_coords[orig_y_start:orig_y_end, orig_x_start:orig_x_end]
-            if result_mask is not None:
-                result_mask = result_mask[orig_y_start:orig_y_end, orig_x_start:orig_x_end]
-
-            # Update dimensions for any subsequent transforms
-            orig_h = result_coords.shape[0]
-            orig_w = result_coords.shape[1]
-
-    eval_shape = (result_coords.shape[0], result_coords.shape[1])
-    return result_coords, result_mask, eval_shape
 
 
 def physical_to_index_space(

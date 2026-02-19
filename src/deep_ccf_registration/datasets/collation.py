@@ -67,35 +67,4 @@ def collate_patch_samples(samples: list[PatchSample]) -> dict:
     if tissue_masks is not None:
         result["tissue_masks"] = torch.from_numpy(tissue_masks)
 
-    # Handle eval template points (at original resolution, no interpolation)
-    # These may have different sizes per sample, so we pad to max size
-    has_eval_points = any(s.eval_template_points is not None for s in samples)
-    if has_eval_points:
-        eval_samples = [s for s in samples if s.eval_template_points is not None]
-        if eval_samples:
-            max_eval_h = max(s.eval_template_points.shape[0] for s in eval_samples)
-            max_eval_w = max(s.eval_template_points.shape[1] for s in eval_samples)
-            template_dtype = samples[0].template_points.dtype
-
-            eval_template_points = np.zeros((batch_size, 3, max_eval_h, max_eval_w), dtype=template_dtype)
-            eval_pad_masks = np.zeros((batch_size, max_eval_h, max_eval_w), dtype=np.uint8)
-
-            for idx, sample in enumerate(samples):
-                if sample.eval_template_points is None:
-                    continue
-                etp = np.transpose(sample.eval_template_points, (2, 0, 1))
-                eval_template_points[idx, :, :etp.shape[1], :etp.shape[2]] = etp
-                eval_pad_masks[idx, :sample.eval_template_points.shape[0], :sample.eval_template_points.shape[1]] = 1
-
-            result["eval_template_points"] = torch.from_numpy(eval_template_points)
-            result["eval_pad_masks"] = torch.from_numpy(eval_pad_masks.astype(bool))
-            result["eval_shapes"] = [s.eval_shape for s in samples]
-
-            if samples[0].eval_tissue_mask is not None:
-                eval_tissue_masks = np.zeros((batch_size, max_eval_h, max_eval_w), dtype=np.float32)
-                for idx, sample in enumerate(samples):
-                    if sample.eval_tissue_mask is not None:
-                        eval_tissue_masks[idx, :sample.eval_tissue_mask.shape[0], :sample.eval_tissue_mask.shape[1]] = sample.eval_tissue_mask
-                result["eval_tissue_masks"] = torch.from_numpy(eval_tissue_masks)
-
     return result

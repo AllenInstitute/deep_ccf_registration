@@ -340,7 +340,6 @@ def train(
                         "eval/loss": val_metrics["val_loss"],
                         "eval/point_loss": val_metrics['val_point_loss'],
                         "eval/val_rmse": val_metrics["val_rmse"],
-                        "eval/val_rmse_registration_res": val_metrics["val_rmse_registration_res"],
                         "eval/ccf_annotation_dice": val_metrics["val_ccf_annotation_dice"]
                     }
                     if predict_tissue_mask:
@@ -358,7 +357,7 @@ def train(
                     log_msg = (f"Step {global_step} | "
                               f"Train loss: {loss.item() * gradient_accumulation_steps:.6f} | Val loss: {val_metrics['val_loss']:.6f} | "
                               f"Val ccf annotation dice: {val_metrics['val_ccf_annotation_dice']:.3f} | "
-                              f"Val RMSE (downsampled): {val_metrics['val_rmse']:.6f} | Val RMSE (raw): {val_metrics['val_rmse_registration_res']:.6f}| "
+                              f"Val RMSE: {val_metrics['val_rmse']:.6f} | "
                               f"LR: {current_lr:.6e}")
 
                     if predict_tissue_mask:

@@ -12,7 +12,7 @@ from torch.utils.data import Dataset
 
 from deep_ccf_registration.datasets.aquisition_meta import AcquisitionDirection
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
-from deep_ccf_registration.datasets.transforms import apply_crop_pad_to_original, get_subject_rotation_range
+from deep_ccf_registration.datasets.transforms import get_subject_rotation_range
 from deep_ccf_registration.datasets.utils.template_points import transform_points_to_template_space, apply_transforms_to_points, Affine
 from deep_ccf_registration.datasets.utils.interpolation import map_coordinates_cropped
 from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, TissueBoundingBoxes, \
@@ -37,10 +37,6 @@ class PatchSample:
     pad_bottom: int = 0
     pad_left: int = 0
     pad_right: int = 0
-    # Eval template points at original resolution (no interpolation)
-    eval_template_points: Optional[np.ndarray] = None
-    eval_tissue_mask: Optional[np.ndarray] = None
-    eval_shape: Optional[tuple[int, int]] = None  # (H, W) of eval targets
 
     def to_dict(self) -> dict:
         """Convert to dictionary for batch collation."""
@@ -223,19 +219,7 @@ class SubjectSliceDataset(Dataset):
                 template_parameters=self._template_parameters,
             )
 
-        if not self._is_train:
-            original_template_points = template_points.copy()
-            original_tissue_mask = tissue_mask.copy() if tissue_mask is not None else None
-            original_shape = (input_slice.shape[0], input_slice.shape[1])
-        else:
-            original_template_points = None
-            original_tissue_mask = None
-            original_shape = None
-
         pad_top, pad_bottom, pad_left, pad_right = 0, 0, 0, 0
-        eval_template_points = None
-        eval_tissue_mask = None
-        eval_shape = None
         if self._transform is not None:
             transforms = self._transform(
                 image=input_slice,
@@ -252,36 +236,6 @@ class SubjectSliceDataset(Dataset):
             template_points = transforms["template_coords"]
             tissue_mask = transforms["mask"]
 
-            if not self._is_train:
-                # Get the shape after resize transforms (before crop/pad)
-                # This is needed to scale crop coordinates to original resolution
-                resized_shape = self._get_shape_after_resize(transforms["replay"], original_shape)
-
-                # Apply crop/pad to original points, scaling coordinates appropriately
-                # This allows evaluation at original resolution without interpolating targets
-                eval_template_points, eval_tissue_mask, eval_shape = apply_crop_pad_to_original(
-                    template_coords=original_template_points,
-                    replay=transforms["replay"],
-                    original_shape=original_shape,
-                    resized_shape=resized_shape,
-                    mask=original_tissue_mask,
-                )
-
-            # Extract padding info from replay
-            for t in transforms["replay"]["transforms"]:
-                if t.get('params') is None:
-                    params = {}
-                else:
-                    params = t.get("params", {})
-                if "pad_params" in params:
-                    pad_params = t["params"]["pad_params"]
-                    if pad_params is not None:
-                        pad_top = pad_params.get("pad_top", 0)
-                        pad_bottom = pad_params.get("pad_bottom", 0)
-                        pad_left = pad_params.get("pad_left", 0)
-                        pad_right = pad_params.get("pad_right", 0)
-                        break
-
         return PatchSample(
             slice_idx=spec.slice_idx,
             start_y=start_y,
@@ -296,9 +250,6 @@ class SubjectSliceDataset(Dataset):
             pad_bottom=pad_bottom,
             pad_left=pad_left,
             pad_right=pad_right,
-            eval_template_points=eval_template_points,
-            eval_tissue_mask=eval_tissue_mask,
-            eval_shape=eval_shape,
         )
 
     @retry(tries=3, backoff=2)
@@ -387,39 +338,6 @@ class SubjectSliceDataset(Dataset):
             template_points = template_points.reshape((patch_height, patch_width, 3))
 
         return template_points
-
-    def _get_shape_after_resize(self, replay: dict, original_shape: tuple[int, int]) -> tuple[int, int]:
-        """
-        Compute the image shape after resize transforms (Resample, LongestMaxSize).
-
-        This is needed to properly scale crop coordinates when applying them
-        to original-resolution targets.
-        """
-        h, w = original_shape
-
-        for t in replay.get("transforms", []):
-            t_name = t.get("__class_fullname__", "")
-            params = t.get("params", {}) or {}
-
-            if "Resample" in t_name:
-                shape = params.get("shape")
-                if shape:
-                    h, w = shape[0], shape[1]
-
-            elif "LongestMaxSize" in t_name:
-                scale = params.get("scale", 1.0)
-                new_h = params.get("height")
-                new_w = params.get("width")
-                if new_h is not None and new_w is not None:
-                    h, w = new_h, new_w
-                elif scale != 1.0:
-                    h = int(round(h * scale))
-                    w = int(round(w * scale))
-
-            elif "Crop" in t_name:
-                break
-
-        return h, w
 
     def _get_coordinate_grid(
         self,
