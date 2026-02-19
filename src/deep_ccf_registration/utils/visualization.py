@@ -65,9 +65,6 @@ def viz_sample(
     #################
     # Input image #
     #################
-    if len(input_image.shape) == 3:
-        # remove channel dim
-        input_image = input_image[0]
     input_image_no_padding = input_image.copy()
     input_image_no_padding[~pad_mask] = np.nan
     ax = fig.add_subplot(gs[0, 0])

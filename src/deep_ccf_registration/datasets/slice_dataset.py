@@ -91,7 +91,6 @@ class SubjectSliceDataset(Dataset):
         is_debug: bool = False,
         debug_slice_idx: Optional[int] = None,
         aws_credentials_method: Optional[str] = None,
-        num_input_channels: int = 1
 
     ):
         if include_tissue_mask and ccf_annotations_path is None:
@@ -111,7 +110,6 @@ class SubjectSliceDataset(Dataset):
         self._subject_id_to_subject_map = {x.subject_id: x for x in subjects}
         self._is_debug = is_debug
         self._debug_slice_idx = debug_slice_idx
-        self._num_input_channels = num_input_channels
         self._aws_credentials_method = aws_credentials_method
         self._samples = samples
         logger.info(f"Dataset initialized with {len(self)} total samples")
@@ -224,9 +222,6 @@ class SubjectSliceDataset(Dataset):
                 template_patch=template_points,
                 template_parameters=self._template_parameters,
             )
-
-        if self._num_input_channels != 1:
-            input_slice = np.stack([input_slice] * self._num_input_channels, axis=-1)
 
         if not self._is_train:
             original_template_points = template_points.copy()

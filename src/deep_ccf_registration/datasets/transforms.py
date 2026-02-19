@@ -478,9 +478,6 @@ def build_transform(
 ):
     transforms: list[Any] = [ImageNormalization()]
 
-    if config.model.encoder_weights == 'imagenet':
-        transforms.append(Normalize())
-
     if rotate_slices:
         transforms.append(Rotate(rotation_angles=rotation_angles, border_mode=cv2.BORDER_REPLICATE))
 
