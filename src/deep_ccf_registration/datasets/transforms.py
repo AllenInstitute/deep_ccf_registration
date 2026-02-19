@@ -611,10 +611,12 @@ def physical_to_index_space(
     points = physical_pts.clone() if isinstance(physical_pts, torch.Tensor) else physical_pts.copy()
     for dim in range(template_parameters.dims):
         if channel_dim == 2:
+            assert points.shape[2] == 3
             points[:, :, dim] -= template_parameters.origin[dim]
             points[:, :, dim] *= template_parameters.direction[dim]
             points[:, :, dim] /= template_parameters.scale[dim]
         elif channel_dim == 1:
+            assert points.shape[1] == 3
             points[:, dim] -= template_parameters.origin[dim]
             points[:, dim] *= template_parameters.direction[dim]
             points[:, dim] /= template_parameters.scale[dim]
@@ -665,6 +667,7 @@ def mirror_points(
     :param template_parameters:
     :return:
     """
+    assert len(points.shape) == 4 and points.shape[1] == 3
     points = points.clone() if isinstance(points, torch.Tensor) else points.copy()
 
     # 1. Convert to index space
