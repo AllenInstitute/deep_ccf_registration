@@ -98,9 +98,7 @@ def evaluate(
                     )
                     masked_bce = bce_per_pixel * pad_masks
                     tissue_mask_loss = masked_bce.sum() / pad_masks.sum().clamp(min=1.0)
-                    model_module: UNetWithRegressionHeads = model.module if hasattr(model, 'module') else model
                     loss = calc_multi_task_loss(
-                        model=model_module,
                         point_loss=point_loss,
                         tissue_mask_loss=tissue_mask_loss,
                     )

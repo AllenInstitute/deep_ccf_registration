@@ -206,10 +206,7 @@ def train(
                     orientations=orientations
                 )
                 if predict_tissue_mask:
-                    # from Kendall et al. 2018 to weight multi-task loss function with different scales
-                    model_module: UNetWithRegressionHeads = model.module if hasattr(model, 'module') else model
                     loss = calc_multi_task_loss(
-                        model=model_module,
                         point_loss=point_loss,
                         tissue_mask_loss=tissue_mask_loss,
                     )
@@ -278,9 +275,6 @@ def train(
                     train_metrics["train/grad_norm"] = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
                 if predict_tissue_mask:
                     train_metrics['train/tissue_mask_loss'] = tissue_mask_loss.item()
-                    model_module = model.module if hasattr(model, 'module') else model
-                    train_metrics['train/log_var_point'] = model_module.log_variance_point_loss.item()
-                    train_metrics['train/log_var_seg'] = model_module.log_variance_tissue_segmentation_loss.item()
 
                 if is_main_process():
                     mlflow.log_metrics(train_metrics, step=global_step)
@@ -288,7 +282,7 @@ def train(
                 if is_main_process():
                     log_msg = f'loss={loss.item() * gradient_accumulation_steps:.3f}'
                     if predict_tissue_mask:
-                        log_msg += f'; point_loss={point_loss.item():.3f}; tissue_mask_loss={tissue_mask_loss.item():.3f}; log_var_point={model_module.log_variance_point_loss.item():.3f}; log_var_seg={model_module.log_variance_tissue_segmentation_loss.item():.3f}'
+                        log_msg += f'; point_loss={point_loss.item():.3f}; tissue_mask_loss={tissue_mask_loss.item():.3f}'
                     progress_logger.log_progress(other=log_msg)
 
                 # Periodic evaluation

@@ -140,11 +140,6 @@ class UNetWithRegressionHeads(nn.Module):
         else:
             self.coord_head = None
 
-        if include_tissue_mask:
-            # from Kendall et al. 2018 to weight multi-task loss function with different scales
-            self.log_variance_point_loss = nn.Parameter(torch.zeros(1))
-            self.log_variance_tissue_segmentation_loss = nn.Parameter(torch.zeros(1))
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         Forward pass

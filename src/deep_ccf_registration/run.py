@@ -108,8 +108,6 @@ def create_dataloader(
         batch_size=batch_size,
         shuffle=shuffle,
         sampler=sampler,
-        # using 0 workers (main process) for eval,
-        # to keep mem usage lower
         num_workers=num_workers,
         collate_fn=collate_patch_samples,
         pin_memory=True,
