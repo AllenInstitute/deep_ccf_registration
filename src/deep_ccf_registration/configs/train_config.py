@@ -68,7 +68,6 @@ class TrainConfig(BaseModel):
     dataloader_prefetch_factor: Optional[int] = None
 
     load_checkpoint: Optional[Path] = None
-    resume_mlflow_run_id: Optional[str] = None
 
     max_iters: int
     learning_rate: float = Field(0.001, gt=0.0)

@@ -402,7 +402,6 @@ def _main(config_path: Path):
     if is_main_process():
         logger.info(config)
 
-    # mlflow setup - only on main process to avoid conflicts
     if is_main_process():
         if config.mlflow_tracking_uri:
             mlflow.set_tracking_uri(config.mlflow_tracking_uri)
@@ -414,19 +413,14 @@ def _main(config_path: Path):
     state = random.getstate()
     random.seed()
 
-    # Only main process creates mlflow run
     if is_main_process() and config.use_mlflow:
-        if config.resume_mlflow_run_id:
-            mlflow_run = mlflow.start_run(run_id=config.resume_mlflow_run_id)
-            logger.info(f"Resuming MLflow run: {config.resume_mlflow_run_id}")
-        else:
-            mlflow_run = mlflow.start_run()
-            logger.info(f"Started new MLflow run: {mlflow_run.info.run_id}")
+        mlflow_run = mlflow.start_run()
+        logger.info(f"Started new MLflow run: {mlflow_run.info.run_id}")
     else:
         mlflow_run = nullcontext()
 
     with mlflow_run:
-        if is_main_process() and not config.resume_mlflow_run_id:
+        if is_main_process():
             # Only log params on new runs (not resume)
             mlflow.log_params(params=config.model_dump())
             try:

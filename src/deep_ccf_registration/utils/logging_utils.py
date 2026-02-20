@@ -63,7 +63,7 @@ class ProgressLogger:
     Meant to be like tqdm except logger friendly
     """
 
-    def __init__(self, desc: str, total: int, log_every: float = 0.1):
+    def __init__(self, desc: str, total: int, log_every: float = 0.1, start_iter: int = 0):
         """
 
         Parameters
@@ -73,7 +73,7 @@ class ProgressLogger:
         """
         self._total = total
         self._start = time.time()
-        self._completed = 0
+        self._completed = start_iter
         self._desc = desc
 
         self._log_every = (
