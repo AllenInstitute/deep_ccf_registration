@@ -3,55 +3,82 @@ from typing import Optional
 
 import numpy as np
 import pandas as pd
-from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
-from aind_smartspim_transform_utils.utils.utils import convert_from_ants_space
+import torch
 from matplotlib import pyplot as plt, gridspec
 import seaborn as sns
 from matplotlib.patches import Patch
 from scipy.ndimage import map_coordinates
 
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
+from deep_ccf_registration.datasets.transforms import physical_to_index_space
+from deep_ccf_registration.metadata import SliceOrientation
+from deep_ccf_registration.utils.metrics import MSE, PerAxisError
 from deep_ccf_registration.utils.utils import visualize_ccf_annotations
 
 
 def viz_sample(
     input_image: np.ndarray,
-    predicted_template_points: np.ndarray,
-    gt_template_points: np.ndarray,
+    predicted_template_points: torch.Tensor,
+    gt_template_points: torch.Tensor,
     ls_template_info: TemplateParameters,
-    pad_mask: np.ndarray,
-    template_parameters: AntsImageParameters,
+    pad_mask: torch.Tensor,
     ccf_annotations: np.ndarray,
     terminology_path: Path,
+    orientation: SliceOrientation,
     predict_tissue_mask: bool = False,
-    tissue_mask: Optional[np.ndarray] = None,
-    predicted_tissue_masks: Optional[np.ndarray] = None,
+    tissue_mask: Optional[torch.Tensor] = None,
+    predicted_tissue_masks: Optional[torch.Tensor] = None,
 ):
     """
     Visualize predicted vs ground truth registration.
     """
-    pad_mask = pad_mask.astype('bool')
+    pad_mask = pad_mask.bool()
     predicted_tissue_mask_binary = (predicted_tissue_masks > 0.5)
 
-    gt_mask = (tissue_mask.astype('bool') & pad_mask) if tissue_mask is not None else pad_mask
+    gt_mask = (tissue_mask.bool() & pad_mask) if tissue_mask is not None else pad_mask
     pred_mask = predicted_tissue_mask_binary & pad_mask
 
-    pred_template_points_index_space = convert_from_ants_space(
-        template_parameters=template_parameters,
-        physical_pts=predicted_template_points
+    pred_template_points_index_space = physical_to_index_space(
+        template_parameters=ls_template_info,
+        physical_pts=predicted_template_points.unsqueeze(0),
+        channel_dim=1
     )
-    gt_template_points_index_space = convert_from_ants_space(
-        template_parameters=template_parameters,
-        physical_pts=gt_template_points
+    # remove batch dim and reshape to N, 3
+    pred_template_points_index_space = pred_template_points_index_space[0].moveaxis(0, -1).view(-1, 3)
+    gt_template_points_index_space = physical_to_index_space(
+        template_parameters=ls_template_info,
+        physical_pts=gt_template_points.unsqueeze(0),
+        channel_dim=1
     )
+    gt_template_points_index_space = gt_template_points_index_space[0].moveaxis(0, -1).view(-1, 3)
 
     ML_axis, AP_axis, SI_axis = 0, 1, 2
 
-    # Per-axis absolute error (microns)
-    error = np.abs(predicted_template_points - gt_template_points) * 1000
+    per_axis_error = PerAxisError(
+        template_parameters=ls_template_info,
+    )
+    error = per_axis_error(
+        pred=predicted_template_points.unsqueeze(0),
+        target=gt_template_points.unsqueeze(0),
+        mask=gt_mask.unsqueeze(0),
+        orientations=[orientation.value],
+    )[0]
 
-    # Total Euclidean error (microns)
-    total_error = np.sqrt(((predicted_template_points - gt_template_points) ** 2).sum(axis=1)) * 1000
+    total_error = error.sum(dim=0).sqrt() * 1000
+    error *= 1000
+
+    # reshape to N
+    total_error = total_error.view(-1).numpy()
+
+    # reshape to N, 3
+    error = error.permute((1, 2, 0)).view(-1, 3).numpy()
+
+    gt_mask = gt_mask.numpy()
+    predicted_tissue_masks = predicted_tissue_masks.numpy()
+    pad_mask = pad_mask.numpy()
+    pred_mask = pred_mask.numpy()
+    predicted_tissue_mask_binary = predicted_tissue_mask_binary.numpy()
+    tissue_mask = tissue_mask.numpy()
 
     ml_lim = [0, ls_template_info.shape[ML_axis]]
     si_lim = [0, ls_template_info.shape[SI_axis]]

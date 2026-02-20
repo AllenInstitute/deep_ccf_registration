@@ -15,6 +15,7 @@ from torch.nn import functional as F
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.datasets.transforms import get_template_point_normalization_inverse, \
     physical_to_index_space
+from deep_ccf_registration.metadata import SliceOrientation
 from deep_ccf_registration.utils.losses import calc_multi_task_loss
 from deep_ccf_registration.utils.metrics import MSE, SparseDiceMetric
 from deep_ccf_registration.utils.ddp import is_main_process, reduce_mean
@@ -177,6 +178,7 @@ def evaluate(
                     "patch_y": int(patch_ys[sample_idx].item()),
                     "patch_x": int(patch_xs[sample_idx].item()),
                     "subject_id": subject_ids[sample_idx],
+                    "orientation": orientations[sample_idx],
                 }
 
                 if len(viz_samples) < viz_sample_count:
@@ -202,17 +204,17 @@ def evaluate(
     iteration = global_step or 0
     for idx, sample in enumerate(viz_samples):
         fig = viz_sample(
-            predicted_template_points=sample["pred_coords"].moveaxis(0, -1).view(-1, 3).cpu().numpy(),
-            predicted_tissue_masks=sample['pred_tissue_masks'].cpu().numpy() if predict_tissue_mask else None,
-            gt_template_points=sample["gt_coords"].moveaxis(0, -1).view(-1, 3).cpu().numpy(),
+            predicted_template_points=sample["pred_coords"].cpu(),
+            predicted_tissue_masks=sample['pred_tissue_masks'].cpu() if predict_tissue_mask else None,
+            gt_template_points=sample["gt_coords"].cpu(),
             ls_template_info=ls_template_parameters,
             input_image=sample["input_image"].cpu().numpy(),
-            tissue_mask=sample['tissue_mask'].cpu().numpy() if predict_tissue_mask else None,
-            template_parameters=ls_template_parameters,
+            tissue_mask=sample['tissue_mask'].cpu() if predict_tissue_mask else None,
             predict_tissue_mask=predict_tissue_mask,
-            pad_mask=sample['pad_mask'].cpu().numpy(),
+            pad_mask=sample['pad_mask'].cpu(),
             ccf_annotations=ccf_annotations,
             terminology_path=terminology_path,
+            orientation=SliceOrientation(sample['orientation'])
         )
         fig_filename = (
             f"subject_{sample['subject_id']}_slice_{sample['slice_idx']}"

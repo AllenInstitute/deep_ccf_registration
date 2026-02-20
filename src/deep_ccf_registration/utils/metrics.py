@@ -9,6 +9,25 @@ from deep_ccf_registration.datasets.transforms import mirror_points
 from deep_ccf_registration.metadata import SliceOrientation
 
 
+def _calc_lowest_err_sagittal_orientation(
+    pred: torch.Tensor, target: torch.Tensor,
+    template_parameters: TemplateParameters,
+    orientations: list[str],
+) -> torch.Tensor:
+    """Return pred or flipped pred, whichever is closer to target.
+    """
+    flipped_pred = mirror_points(points=pred, template_parameters=template_parameters)
+    orig_mse = ((pred - target) ** 2).sum(dim=1).mean(dim=(1, 2))
+    flip_mse = ((flipped_pred - target) ** 2).sum(dim=1).mean(dim=(1, 2))
+    sagittal_mask = torch.tensor(
+        [SliceOrientation(o) == SliceOrientation.SAGITTAL for o in orientations],
+        device=pred.device, dtype=torch.bool
+    )
+    use_flipped = (flip_mse < orig_mse) & sagittal_mask
+    pred = torch.where(use_flipped[None, None, None], pred, flipped_pred)
+    return pred
+
+
 class MSE(nn.Module):
     def __init__(self,
                  template_parameters: TemplateParameters,
@@ -21,39 +40,52 @@ class MSE(nn.Module):
         self._template_parameters = template_parameters
 
     def forward(self, pred: torch.Tensor, target: torch.Tensor,
-                orientations: list[SliceOrientation],
+                orientations: list[str],
                 mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        squared_errors = (pred - target) ** 2
-        per_point_squared_distance = squared_errors.sum(dim=self.coordinate_dim)
-
-        sagittal_mask = torch.tensor(
-            [SliceOrientation(o) == SliceOrientation.SAGITTAL for o in orientations],
-            device=pred.device, dtype=torch.bool
+        assert len(pred.shape) == 4 and pred.shape[1] == 3
+        assert len(target.shape) == 4 and target.shape[1] == 3
+        assert len(mask.shape) == 3 and list(mask.shape) == [pred.shape[0]] + list(pred.shape[-2:])
+        pred = _calc_lowest_err_sagittal_orientation(
+            pred=pred, target=target, template_parameters=self._template_parameters,
+            orientations=orientations,
         )
-        if sagittal_mask.any():
-            flipped_pred = mirror_points(points=pred, template_parameters=self._template_parameters)
-            flipped_distance = ((flipped_pred - target) ** 2).sum(dim=self.coordinate_dim)
-            min_distance = torch.minimum(per_point_squared_distance, flipped_distance)
-            per_point_squared_distance = torch.where(
-                sagittal_mask[:, None, None], min_distance, per_point_squared_distance
-            )
+        per_point_squared_error = ((pred - target) ** 2).sum(dim=self.coordinate_dim)
 
         if mask is not None:
-            if mask.dim() == per_point_squared_distance.dim() + 1:
-                mask = mask.sum(dim=self.coordinate_dim)
-            if mask.dim() != per_point_squared_distance.dim():
-                raise ValueError("Mask must have same spatial dimensions as coordinates")
-
-            mask = mask.to(per_point_squared_distance.device).float()
-            squared_errors = per_point_squared_distance.float() * mask
+            mask = mask.to(per_point_squared_error.device).float()
+            per_point_squared_error = per_point_squared_error.float() * mask
             valid_points = mask.sum(dim=(1, 2)).clamp(min=1.0)
-            mse = squared_errors.sum(dim=(1, 2)) / valid_points
+            mse = per_point_squared_error.sum(dim=(1, 2)) / valid_points
         else:
-            mse = per_point_squared_distance.float().mean(dim=(1, 2))
+            mse = per_point_squared_error.float().mean(dim=(1, 2))
 
         if self._reduction == 'mean':
             mse = mse.mean()
         return mse
+
+
+class PerAxisError(nn.Module):
+    def __init__(self,
+                 template_parameters: TemplateParameters,
+                 coordinate_dim: int = 1,
+                 ):
+        super().__init__()
+        self.coordinate_dim = coordinate_dim
+        self._template_parameters = template_parameters
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor,
+                orientations: list[str],
+                mask: Optional[torch.Tensor] = None) -> torch.Tensor:
+        assert len(pred.shape) == 4 and pred.shape[1] == 3
+        assert len(target.shape) == 4 and target.shape[1] == 3
+        assert len(mask.shape) == 3 and list(mask.shape) == [pred.shape[0]] + list(pred.shape[-2:])
+
+        pred = _calc_lowest_err_sagittal_orientation(
+            pred=pred, target=target, template_parameters=self._template_parameters,
+            orientations=orientations,
+        )
+        squared_errors = (pred - target) ** 2
+        return squared_errors
 
 
 class SparseDiceMetric:
