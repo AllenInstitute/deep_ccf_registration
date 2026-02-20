@@ -19,7 +19,7 @@ from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, Ti
     AcquisitionAxis, RotationAngles, SubjectRotationAngle, TissueBoundingBox
 from deep_ccf_registration.utils.logging_utils import timed, timed_func
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
-from retry import retry
+from tenacity import retry, wait_random_exponential
 
 
 @dataclass(frozen=True)
@@ -110,7 +110,7 @@ class SubjectSliceDataset(Dataset):
         self._samples = samples
         logger.info(f"Dataset initialized with {len(self)} total samples")
 
-    @retry(tries=3, backoff=2)
+    @retry(wait=wait_random_exponential(multiplier=1, max=60), reraise=True)
     def _read_volume(self, subject: SubjectMetadata) -> tensorstore.TensorStore:
         volume = tensorstore.open(
             spec={
@@ -124,7 +124,7 @@ class SubjectSliceDataset(Dataset):
         ).result()
         return volume
 
-    @retry(tries=3, backoff=2)
+    @retry(wait=wait_random_exponential(multiplier=1, max=60), reraise=True)
     def _read_warp(self, subject: SubjectMetadata):
         warp = tensorstore.open(
             spec={
@@ -252,7 +252,7 @@ class SubjectSliceDataset(Dataset):
             pad_right=pad_right,
         )
 
-    @retry(tries=3, backoff=2)
+    @retry(wait=wait_random_exponential(multiplier=1, max=60), reraise=True)
     @timed_func
     def _get_slice(
         self,
@@ -281,7 +281,7 @@ class SubjectSliceDataset(Dataset):
             tuple(spatial_slices)].read().result().astype("float32")
         return data_patch
 
-    @retry(tries=3, backoff=2)
+    @retry(wait=wait_random_exponential(multiplier=1, max=60), reraise=True)
     @timed_func
     def _get_rotated_slice(
         self,
@@ -306,7 +306,7 @@ class SubjectSliceDataset(Dataset):
 
         return data_patch
 
-    @retry(tries=3, backoff=2)
+    @retry(wait=wait_random_exponential(multiplier=1, max=60), reraise=True)
     @timed_func
     def _get_template_points(
         self,

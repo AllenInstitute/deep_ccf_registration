@@ -68,7 +68,6 @@ class TrainConfig(BaseModel):
     dataloader_prefetch_factor: Optional[int] = None
 
     load_checkpoint: Optional[Path] = None
-    # MLflow run ID to resume (for spot instance recovery)
     resume_mlflow_run_id: Optional[str] = None
 
     max_iters: int
