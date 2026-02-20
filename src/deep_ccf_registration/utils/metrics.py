@@ -24,7 +24,7 @@ def _calc_lowest_err_sagittal_orientation(
         device=pred.device, dtype=torch.bool
     )
     use_flipped = (flip_mse < orig_mse) & sagittal_mask
-    pred = torch.where(use_flipped[None, None, None], pred, flipped_pred)
+    pred = torch.where(use_flipped[:, None, None, None], flipped_pred, pred)
     return pred
 
 
@@ -44,7 +44,8 @@ class MSE(nn.Module):
                 mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         assert len(pred.shape) == 4 and pred.shape[1] == 3
         assert len(target.shape) == 4 and target.shape[1] == 3
-        assert len(mask.shape) == 3 and list(mask.shape) == [pred.shape[0]] + list(pred.shape[-2:])
+        if mask is not None:
+            assert len(mask.shape) == 3 and list(mask.shape) == [pred.shape[0]] + list(pred.shape[-2:])
         pred = _calc_lowest_err_sagittal_orientation(
             pred=pred, target=target, template_parameters=self._template_parameters,
             orientations=orientations,
@@ -78,7 +79,8 @@ class PerAxisError(nn.Module):
                 mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         assert len(pred.shape) == 4 and pred.shape[1] == 3
         assert len(target.shape) == 4 and target.shape[1] == 3
-        assert len(mask.shape) == 3 and list(mask.shape) == [pred.shape[0]] + list(pred.shape[-2:])
+        if mask is not None:
+            assert len(mask.shape) == 3 and list(mask.shape) == [pred.shape[0]] + list(pred.shape[-2:])
 
         pred = _calc_lowest_err_sagittal_orientation(
             pred=pred, target=target, template_parameters=self._template_parameters,
