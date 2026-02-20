@@ -68,14 +68,30 @@ def sample_slices(
     tissue_bounding_boxes_path: Path,
     orientations: list[SliceOrientation],
     seed: int = 1234,
-    sample_fraction: float = 0.25
+    sample_fraction: float = 0.25,
+    tissue_bbox_percentile_threshold: float = 20.0
 ):
+    """
+
+    :param subjects:
+    :param tissue_bounding_boxes_path:
+    :param orientations:
+    :param seed:
+    :param sample_fraction: What fraction of slices to sample per subject
+    :param tissue_bbox_percentile_threshold: Reject tissue bboxes smaller in area than this
+        This prevents little pieces of tissue from appearing in dataset
+        TODO might need to revisit default threshold for other orientations
+    :return:
+    """
     samples = []
+    bboxes = pd.read_parquet(tissue_bounding_boxes_path).set_index('subject_id')
+    bboxes['area'] = bboxes['width'] * bboxes['height']
+    bbox_area_rejection_threshold = np.percentile(bboxes['area'], tissue_bbox_percentile_threshold)
+    bboxes = bboxes[bboxes['area'] > bbox_area_rejection_threshold]
     rng = np.random.default_rng(seed=seed)
     for subject in tqdm(subjects):
         for orientation in orientations:
-            subject_bboxes = pd.read_parquet(
-                tissue_bounding_boxes_path / f'subject_id={subject.subject_id}')
+            subject_bboxes = bboxes.loc[subject.subject_id]
             valid_indices = [x for x in subject_bboxes['index'].astype(int).tolist() if x is not None]
             sampled_indices = rng.choice(valid_indices, size=int(len(valid_indices) * sample_fraction))
             subject_samples = np.array(list(zip(
@@ -119,8 +135,17 @@ def sample_slices(
 @click.option(
     "--subject-sample-fraction",
     type=float,
-    default=0.25,
+    default=0.33,
     help='Fraction of slices to sample from each subject'
+)
+@click.option(
+    "--tissue-bbox-area-percentile-reject-threshold",
+    type=float,
+    default=20.0,
+    help='Reject tissue bboxes smaller in area than this '
+        'This prevents little pieces of tissue with no signal from appearing in dataset.'
+         'The default threshold of 20 was chosen based on looking at sagittal samples. TODO might '
+         'need to revisit for other orientations'
 )
 @click.option(
     "--orientations",
@@ -135,7 +160,8 @@ def main(
         seed: int,
         orientations: str,
         out_dir: Path,
-        subject_sample_fraction: float
+        subject_sample_fraction: float,
+        tissue_bbox_area_percentile_reject_threshold: float
 ):
     with open(subject_metadata_path) as f:
         subject_metadata = json.load(f)
@@ -154,6 +180,7 @@ def main(
         seed=seed,
         orientations=orientations,
         sample_fraction=subject_sample_fraction,
+        tissue_bbox_percentile_threshold=tissue_bbox_area_percentile_reject_threshold
     )
     logger.info('getting val samples')
     val_samples = sample_slices(
@@ -180,6 +207,9 @@ def main(
 
     logger.info('writing test')
     np.save(out_dir / 'test.npy', test_samples)
+
+    logger.info(f'Train: {train_samples.shape[0]} samples')
+    logger.info(f'Val: {val_samples.shape[0]} samples')
 
 if __name__ == '__main__':
     main()
