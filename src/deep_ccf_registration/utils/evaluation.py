@@ -34,6 +34,7 @@ def evaluate(
     ccf_annotations: np.ndarray,
     terminology_path: Path,
     viz_sample_count: int = 10,
+    tissue_mask_loss_weight: float = 1.0,
     ls_template_parameters: Optional[TemplateParameters] = None,
     predict_tissue_mask: bool = False,
     is_debug: bool = False,
@@ -100,6 +101,8 @@ def evaluate(
                     loss = calc_multi_task_loss(
                         point_loss=point_loss,
                         tissue_mask_loss=tissue_mask_loss,
+                        step_num=global_step,
+                        max_steps=max_iters
                     )
                 else:
                     loss = point_loss

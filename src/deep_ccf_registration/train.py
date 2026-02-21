@@ -12,7 +12,6 @@ import torch.nn.functional as F
 
 from loguru import logger
 
-from deep_ccf_registration.models import UNetWithRegressionHeads
 from deep_ccf_registration.utils.ddp import is_main_process, get_local_rank
 from deep_ccf_registration.utils.evaluation import evaluate
 
@@ -21,6 +20,7 @@ from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.utils.logging_utils import timed, ProgressLogger
 from deep_ccf_registration.utils.losses import calc_multi_task_loss
 from deep_ccf_registration.utils.metrics import MSE
+
 
 
 def train(
@@ -50,6 +50,7 @@ def train(
         gradient_accumulation_steps: int = 1,
         grad_clip_max_norm: Optional[float] = 1.0,
         warmup_steps: int = 0,
+        tissue_mask_loss_weight: float = 1.0,
         # Resume parameters for checkpoint recovery
         start_step: int = 0,
         start_best_val_loss: float = float("inf"),
@@ -206,12 +207,15 @@ def train(
                     orientations=orientations
                 )
                 if predict_tissue_mask:
-                    loss = calc_multi_task_loss(
+                    loss, tissue_mask_loss_weight = calc_multi_task_loss(
                         point_loss=point_loss,
                         tissue_mask_loss=tissue_mask_loss,
+                        step_num=global_step,
+                        max_steps=max_iters
                     )
                 else:
                     loss = point_loss
+                    tissue_mask_loss_weight = None
 
                 # Scale loss for gradient accumulation
                 loss = loss / gradient_accumulation_steps
@@ -275,6 +279,7 @@ def train(
                     train_metrics["train/grad_norm"] = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
                 if predict_tissue_mask:
                     train_metrics['train/tissue_mask_loss'] = tissue_mask_loss.item()
+                    train_metrics['train/tissue_mask_loss_weight'] = tissue_mask_loss_weight
 
                 if is_main_process():
                     mlflow.log_metrics(train_metrics, step=global_step)
@@ -311,6 +316,7 @@ def train(
                             predict_tissue_mask=predict_tissue_mask,
                             terminology_path=terminology_path,
                             is_train=True,
+                            tissue_mask_loss_weight=tissue_mask_loss_weight
                         )
                     val_metrics = evaluate(
                         dataloader=val_dataloader,
@@ -328,6 +334,7 @@ def train(
                         predict_tissue_mask=predict_tissue_mask,
                         terminology_path=terminology_path,
                         is_train=False,
+                        tissue_mask_loss_weight=tissue_mask_loss_weight
                     )
 
                     # Step ReduceLROnPlateau with reduced val loss
