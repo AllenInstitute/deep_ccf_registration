@@ -96,11 +96,11 @@ def create_dataloader(
     num_workers = num_workers if is_train else 0
 
     if world_size > 1:
-        sampler = DistributedSampler(dataset, shuffle=is_train)
+        sampler = DistributedSampler(dataset, shuffle=True)
         shuffle = False
     else:
         sampler = None
-        shuffle = is_train
+        shuffle = True
 
     dataloader = DataLoader(
         dataset=dataset,
@@ -421,7 +421,6 @@ def _main(config_path: Path):
 
     with mlflow_run:
         if is_main_process():
-            # Only log params on new runs (not resume)
             mlflow.log_params(params=config.model_dump())
             try:
                 commit, repo_url = _get_git_commit_from_package()
