@@ -98,7 +98,7 @@ def evaluate(
                     )
                     masked_bce = bce_per_pixel * pad_masks
                     tissue_mask_loss = masked_bce.sum() / pad_masks.sum().clamp(min=1.0)
-                    loss = calc_multi_task_loss(
+                    loss, _ = calc_multi_task_loss(
                         point_loss=point_loss,
                         tissue_mask_loss=tissue_mask_loss,
                         step_num=global_step,
