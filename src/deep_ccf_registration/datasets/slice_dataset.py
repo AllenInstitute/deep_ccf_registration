@@ -87,6 +87,9 @@ class SubjectSliceDataset(Dataset):
         is_debug: bool = False,
         debug_slice_idx: Optional[int] = None,
         aws_credentials_method: Optional[str] = None,
+        # exclude slices with tissue bboxes smaller in area than this percentile
+        # this only impacts slice rotation
+        tissue_bbox_area_rejection_percentile: int = 20
 
     ):
         if include_tissue_mask and ccf_annotations_path is None:
@@ -108,6 +111,10 @@ class SubjectSliceDataset(Dataset):
         self._debug_slice_idx = debug_slice_idx
         self._aws_credentials_method = aws_credentials_method
         self._samples = samples
+
+        tissue_bboxes = pd.read_parquet(self._tissue_bboxes_path)
+        tissue_bboxes['area'] = tissue_bboxes['width'] * tissue_bboxes['height']
+        self._tissue_bbox_area_rejection_threshold = np.percentile(tissue_bboxes['area'], tissue_bbox_area_rejection_percentile)
         logger.info(f"Dataset initialized with {len(self)} total samples")
 
     @retry(wait=wait_random_exponential(multiplier=1, max=60), reraise=True)
@@ -153,6 +160,8 @@ class SubjectSliceDataset(Dataset):
 
         with timed():
             subject_bboxes = pd.read_parquet(self._tissue_bboxes_path / f'subject_id={metadata.subject_id}')
+        subject_bboxes['area'] = subject_bboxes['width'] * subject_bboxes['height']
+        subject_bboxes = subject_bboxes[subject_bboxes['area'] > self._tissue_bbox_area_rejection_threshold]
         bbox = subject_bboxes[subject_bboxes['index'] == spec.slice_idx].iloc[0]
         start_y = bbox['y']
         start_x = bbox['x']
