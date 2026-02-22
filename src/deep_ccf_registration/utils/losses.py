@@ -7,7 +7,7 @@ def _calc_tissue_mask_weight(
     max_steps: int,
     alpha: float = 0.1,
     beta: float = 0.25,
-    min_weight: float = 0.1,
+    min_weight: float = 0.05,
 ):
     """decay over time since less important and easier"""
     beta *= max_steps
