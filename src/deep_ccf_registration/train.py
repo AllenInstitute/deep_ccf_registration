@@ -316,7 +316,8 @@ def train(
                             predict_tissue_mask=predict_tissue_mask,
                             terminology_path=terminology_path,
                             is_train=True,
-                            tissue_mask_loss_weight=tissue_mask_loss_weight
+                            tissue_mask_loss_weight=tissue_mask_loss_weight,
+                            train_max_iters=max_iters,
                         )
                     val_metrics = evaluate(
                         dataloader=val_dataloader,
@@ -334,7 +335,8 @@ def train(
                         predict_tissue_mask=predict_tissue_mask,
                         terminology_path=terminology_path,
                         is_train=False,
-                        tissue_mask_loss_weight=tissue_mask_loss_weight
+                        tissue_mask_loss_weight=tissue_mask_loss_weight,
+                        train_max_iters=max_iters,
                     )
 
                     # Step ReduceLROnPlateau with reduced val loss

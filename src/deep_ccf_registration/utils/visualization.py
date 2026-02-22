@@ -65,7 +65,7 @@ def viz_sample(
     )[0]
 
     total_error = error.sum(dim=0).sqrt() * 1000
-    error *= 1000
+    error = error.sqrt() * 1000
 
     # reshape to N
     total_error = total_error.view(-1).numpy()

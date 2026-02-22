@@ -38,7 +38,8 @@ def evaluate(
     ls_template_parameters: Optional[TemplateParameters] = None,
     predict_tissue_mask: bool = False,
     is_debug: bool = False,
-    is_train: bool = False
+    is_train: bool = False,
+    train_max_iters: Optional[int] = None,
 ) -> dict[str, Any]:
     """
     Evaluate model and report losses/RMSEs.
@@ -102,7 +103,7 @@ def evaluate(
                         point_loss=point_loss,
                         tissue_mask_loss=tissue_mask_loss,
                         step_num=global_step,
-                        max_steps=max_iters
+                        max_steps=train_max_iters if train_max_iters is not None else max_iters
                     )
                 else:
                     loss = point_loss
