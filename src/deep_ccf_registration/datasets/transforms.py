@@ -24,25 +24,6 @@ def _restore_grayscale_channel_last(original: np.ndarray, transformed: np.ndarra
         return transformed[..., None]
     return transformed
 
-
-def get_subject_rotation_range(subject_angle: float, valid_range: tuple[float, float]) -> tuple[float, float]:
-    """
-    want to limit rotation range to typical range. Since subject already rotated relative
-    to template, we don't want to over rotate, so we limit based on subject rotation and
-    typical alignment rotation ranges
-    :param subject_angle:
-    :param valid_range:
-    :return:
-    """
-    min_aug = valid_range[0] - subject_angle
-    max_aug = valid_range[1] - subject_angle
-    if min_aug > max_aug:
-        # Subject already outside typical range; no valid augmentation, use 0
-        return 0.0, 0.0
-    return min_aug, max_aug
-
-
-
 class Rotate(albumentations.Rotate):
 
     def __init__(
@@ -63,22 +44,17 @@ class Rotate(albumentations.Rotate):
 
     def get_params_dependent_on_data(self, params: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
         # Extract custom data from params
-        subject_rotation: SubjectRotationAngle = data["subject_rotation"]
         orientation: SliceOrientation = data["orientation"]
 
         # Determine which axis is the in-plane rotation axis based on slice orientation
         if orientation == SliceOrientation.SAGITTAL:
-            subject_angle = subject_rotation.ML_rot
             valid_range = self._rotation_angles.ML_range
         else:
             raise ValueError(f"Unknown orientation: {orientation}")
 
-        # Compute valid augmentation range
-        aug_range = get_subject_rotation_range(subject_angle=subject_angle,
-                                               valid_range=valid_range)
 
         # Sample rotation angle within valid range
-        angle = float(np.random.uniform(aug_range[0], aug_range[1]))
+        angle = float(np.random.uniform(valid_range[0], valid_range[1]))
 
         logger.debug(f'z_rot={angle:.3f}')
 

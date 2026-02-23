@@ -282,16 +282,16 @@ def _main(config_path: Path):
     rotation_angles = RotationAngles(
         rotation_angles={x.Index: SubjectRotationAngle(AP_rot=x.AP_rotation, ML_rot=x.ML_rotation, SI_rot=x.SI_rotation) for x in rotation_angles.itertuples(index=True)},
         SI_range=(
-            rotation_angles['SI_rotation'].mean() - rotation_angles['SI_rotation'].std()*2,
-            rotation_angles['SI_rotation'].mean() + rotation_angles['SI_rotation'].std()*2
+            rotation_angles['SI_rotation'].min(),
+            rotation_angles['SI_rotation'].max()
         ),
         ML_range=(
-            rotation_angles['ML_rotation'].mean() - rotation_angles['ML_rotation'].std()*2,
-            rotation_angles['ML_rotation'].mean() + rotation_angles['ML_rotation'].std()*2
+            rotation_angles['ML_rotation'].min(),
+            rotation_angles['ML_rotation'].max()
         ),
         AP_range=(
-            rotation_angles['AP_rotation'].mean() - rotation_angles['AP_rotation'].std()*2,
-            rotation_angles['AP_rotation'].mean() + rotation_angles['AP_rotation'].std()*2
+            rotation_angles['AP_rotation'].min(),
+            rotation_angles['AP_rotation'].max()
         ),
     )
 

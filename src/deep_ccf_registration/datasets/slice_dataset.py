@@ -12,11 +12,10 @@ from torch.utils.data import Dataset
 
 from deep_ccf_registration.datasets.aquisition_meta import AcquisitionDirection
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
-from deep_ccf_registration.datasets.transforms import get_subject_rotation_range
 from deep_ccf_registration.datasets.utils.template_points import transform_points_to_template_space, apply_transforms_to_points, Affine
 from deep_ccf_registration.datasets.utils.interpolation import map_coordinates_cropped
-from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, TissueBoundingBoxes, \
-    AcquisitionAxis, RotationAngles, SubjectRotationAngle, TissueBoundingBox
+from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, \
+    AcquisitionAxis, RotationAngles, TissueBoundingBox
 from deep_ccf_registration.utils.logging_utils import timed, timed_func
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
 from tenacity import retry, wait_random_exponential
@@ -426,19 +425,9 @@ class SubjectSliceDataset(Dataset):
         metadata: SubjectMetadata,
         orientation: SliceOrientation
     ) -> SliceRotationRanges:
-        subject_rotation: SubjectRotationAngle = self._rotation_angles.rotation_angles[metadata.subject_id]
-        AP_rot_range = get_subject_rotation_range(
-            subject_angle=subject_rotation.AP_rot,
-            valid_range=self._rotation_angles.AP_range
-        )
-        SI_rot_range = get_subject_rotation_range(
-            subject_angle=subject_rotation.SI_rot,
-            valid_range=self._rotation_angles.SI_range
-        )
-        ML_rot_range = get_subject_rotation_range(
-            subject_angle=subject_rotation.ML_rot,
-            valid_range=self._rotation_angles.ML_range
-        )
+        AP_rot_range = self._rotation_angles.AP_range
+        SI_rot_range = self._rotation_angles.SI_range
+        ML_rot_range = self._rotation_angles.ML_range
 
         axes = sorted(metadata.axes, key=lambda x: x.dimension)
         slice_axis = metadata.get_slice_axis(orientation=orientation)
