@@ -150,7 +150,7 @@ def train(
         for batch in train_dataloader:
             batch_counter += 1
             if progress_logger is None and is_main_process():
-                progress_logger = ProgressLogger(desc='Training', total=max_iters, log_every=log_interval)
+                progress_logger = ProgressLogger(desc='Training', total=max_iters, log_every=log_interval, start_iter=start_step)
 
             input_images = batch["input_images"].to(device)
             target_template_points = batch["target_template_points"].to(device)
