@@ -355,7 +355,6 @@ def _main(config_path: Path):
         # Extract resume state from checkpoint
         start_step = checkpoint.get('global_step', 0)
         start_best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-        start_patience_counter = checkpoint.get('patience_counter', 0)
         scheduler_state_dict = checkpoint.get('scheduler_state_dict', None)
         if is_main_process():
             logger.info(f"Resuming from step {start_step}, best_val_loss={start_best_val_loss:.6f}")
@@ -363,7 +362,6 @@ def _main(config_path: Path):
         checkpoint = None
         start_step = 0
         start_best_val_loss = float('inf')
-        start_patience_counter = 0
         scheduler_state_dict = None
 
     # Move model to device before wrapping with DDP
@@ -442,8 +440,6 @@ def _main(config_path: Path):
             model_weights_out_dir=config.model_weights_out_dir,
             learning_rate=config.learning_rate,
             eval_interval=config.eval_interval,
-            patience=config.patience,
-            min_delta=config.min_delta,
             autocast_context=autocast_context,
             scaler=scaler,
             device=device,
@@ -462,7 +458,6 @@ def _main(config_path: Path):
             # Resume state from checkpoint
             start_step=start_step,
             start_best_val_loss=start_best_val_loss,
-            start_patience_counter=start_patience_counter,
             scheduler_state_dict=scheduler_state_dict,
             terminology_path=config.terminology_path,
         )
