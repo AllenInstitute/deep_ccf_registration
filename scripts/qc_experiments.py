@@ -84,7 +84,7 @@ def main(subject_id: str,
 
     template_on_input = map_coordinates(
         input=ls_template.numpy(),
-        coordinates=output_points.reshape((-1, 3)).T
+        coordinates=output_points.reshape((-1, 3))._T
     )
 
     template_on_input = template_on_input.reshape(input_slice.shape)

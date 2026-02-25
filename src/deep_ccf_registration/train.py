@@ -12,20 +12,20 @@ import torch.nn.functional as F
 
 from loguru import logger
 
-from deep_ccf_registration.utils.ddp import is_main_process, get_local_rank
+from deep_ccf_registration.utils.ddp import is_main_process, get_local_rank, reduce_mean
 from deep_ccf_registration.utils.evaluation import evaluate
 
 from deep_ccf_registration.configs.train_config import LRScheduler
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.utils.logging_utils import timed, ProgressLogger
-from deep_ccf_registration.utils.losses import calc_multi_task_loss
+from deep_ccf_registration.utils.losses import calc_multi_task_loss, DynamicWeightAverageScheduler
 from deep_ccf_registration.utils.metrics import MSE
 
 
 
 def train(
-        train_dataloader: Iterator,
-        val_dataloader: Iterator,
+        train_dataloader,
+        val_dataloader,
         model: Unet,
         optimizer,
         max_iters: int,
@@ -50,11 +50,12 @@ def train(
         gradient_accumulation_steps: int = 1,
         grad_clip_max_norm: Optional[float] = 1.0,
         warmup_steps: int = 0,
-        tissue_mask_loss_weight: float = 1.0,
         start_step: int = 0,
         start_best_val_loss: float = float("inf"),
         scheduler_state_dict: Optional[dict] = None,
         train_sampler = None,
+        multi_task_loss_init_weights: Optional[tuple[float]] = None,
+        dwa_state_dict: Optional[dict] = None,
 ):
     """
     Train slice registration model
@@ -91,10 +92,25 @@ def train(
     os.makedirs(model_weights_out_dir, exist_ok=True)
 
     calc_coord_loss = MSE(reduction='mean', template_parameters=ls_template_parameters)
+    num_tasks = 1
+    if predict_tissue_mask:
+        num_tasks += 1
+
+    if multi_task_loss_init_weights is not None:
+        if len(multi_task_loss_init_weights) != num_tasks:
+            raise ValueError(f'expected multi_task_loss_init_weights to have {num_tasks} items')
+
+    dwa_scheduler = DynamicWeightAverageScheduler(
+        num_tasks=num_tasks,
+        w_init=multi_task_loss_init_weights,
+    )
+    if dwa_state_dict is not None:
+        dwa_scheduler.load_state_dict(dwa_state_dict)
+        logger.info(f"Restored DWA scheduler state: {dwa_state_dict}")
     best_val_loss = start_best_val_loss
     global_step = start_step
     accumulation_step = 0
-
+    steps_per_epoch = len(train_dataloader)
     model.to(device)
 
     if start_step > 0:
@@ -184,16 +200,11 @@ def train(
                     mask=mask,
                     orientations=orientations
                 )
-                if predict_tissue_mask:
-                    loss, tissue_mask_loss_weight = calc_multi_task_loss(
-                        point_loss=point_loss,
-                        tissue_mask_loss=tissue_mask_loss,
-                        step_num=global_step,
-                        max_steps=max_iters
-                    )
-                else:
-                    loss = point_loss
-                    tissue_mask_loss_weight = None
+                loss = calc_multi_task_loss(
+                    point_loss=point_loss,
+                    tissue_mask_loss=tissue_mask_loss,
+                    dwa_scheduler=dwa_scheduler,
+                )
 
                 # Scale loss for gradient accumulation
                 loss = loss / gradient_accumulation_steps
@@ -209,7 +220,6 @@ def train(
                 else:
                     loss.backward()
 
-            # Unscale for logging
             point_losses.append(point_loss.item())
             if predict_tissue_mask:
                 tissue_mask_losses.append(tissue_mask_loss.item())
@@ -253,12 +263,13 @@ def train(
                 "train/loss": loss.item() * gradient_accumulation_steps,
                 "train/point_loss": point_loss.item(),
                 "train/learning_rate": optimizer.param_groups[0]['lr'],
+                "train/point_loss_weight": dwa_scheduler.get_weights()[0],
             }
             if grad_norm is not None:
                 train_metrics["train/grad_norm"] = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
             if predict_tissue_mask:
                 train_metrics['train/tissue_mask_loss'] = tissue_mask_loss.item()
-                train_metrics['train/tissue_mask_loss_weight'] = tissue_mask_loss_weight
+                train_metrics['train/tissue_mask_loss_weight'] = dwa_scheduler.get_weights()[1]
 
             if is_main_process():
                 mlflow.log_metrics(train_metrics, step=global_step)
@@ -266,7 +277,7 @@ def train(
             if is_main_process():
                 log_msg = f'loss={loss.item() * gradient_accumulation_steps:.3f}'
                 if predict_tissue_mask:
-                    log_msg += f'; point_loss={point_loss.item():.3f}; tissue_mask_loss={tissue_mask_loss.item():.3f}'
+                    log_msg += f'; point_loss={point_loss.item():.3f}; tissue_mask_loss={tissue_mask_loss.item():.3f}, loss_weights: {dwa_scheduler.get_weights()}'
                 progress_logger.log_progress(other=log_msg)
 
             # Periodic evaluation
@@ -295,8 +306,7 @@ def train(
                         predict_tissue_mask=predict_tissue_mask,
                         terminology_path=terminology_path,
                         is_train=True,
-                        tissue_mask_loss_weight=tissue_mask_loss_weight,
-                        train_max_iters=max_iters,
+                        dwa_scheduler=dwa_scheduler,
                     )
                 val_metrics = evaluate(
                     dataloader=val_dataloader,
@@ -314,8 +324,7 @@ def train(
                     predict_tissue_mask=predict_tissue_mask,
                     terminology_path=terminology_path,
                     is_train=False,
-                    tissue_mask_loss_weight=tissue_mask_loss_weight,
-                    train_max_iters=max_iters,
+                    dwa_scheduler=dwa_scheduler,
                 )
 
                 current_lr = optimizer.param_groups[0]['lr']
@@ -359,6 +368,7 @@ def train(
                             'model_state_dict': model_state,
                             'optimizer_state_dict': optimizer.state_dict(),
                             'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+                            'dwa_state_dict': dwa_scheduler.state_dict(),
                             'best_val_loss': best_val_loss,
                             'val_rmse': val_metrics['val_rmse'],
                             'lr': scheduler.get_last_lr() if scheduler is not None else learning_rate
@@ -368,9 +378,13 @@ def train(
                 if dist.is_initialized():
                     dist.barrier(device_ids=[get_local_rank()])
 
-                # Check for improvement
-                if val_metrics['val_loss'] < best_val_loss - min_delta:
-                    best_val_loss = val_metrics['val_loss']
+                # Check for improvement using unweighted loss sum
+                # since multi-task loss weighting could be artificially lower
+                val_unweighted_loss = val_metrics['val_point_loss']
+                if predict_tissue_mask:
+                    val_unweighted_loss += val_metrics['val_tissue_mask_loss']
+                if val_unweighted_loss < best_val_loss - min_delta:
+                    best_val_loss = val_unweighted_loss
 
                     if is_main_process():
                         mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
@@ -379,10 +393,6 @@ def train(
                     if is_main_process():
                         logger.info(f"New best model saved! Val loss: {best_val_loss:.6f}")
 
-                # Reset train losses for next eval period
-                point_losses = []
-                losses = []
-                tissue_mask_losses = []
                 model.train()
 
             if global_step % save_every == 0:
@@ -396,6 +406,7 @@ def train(
                             'model_state_dict': model_state,
                             'optimizer_state_dict': optimizer.state_dict(),
                             'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+                            'dwa_state_dict': dwa_scheduler.state_dict(),
                             'best_val_loss': best_val_loss,
                             'lr': scheduler.get_last_lr() if scheduler is not None else learning_rate
                         },
@@ -408,3 +419,8 @@ def train(
                         f"\nTraining completed! Best validation RMSE: {best_val_loss:.6f}")
                     mlflow.log_metric("final_best_val_rmse", best_val_loss)
                 return best_val_loss
+
+        dwa_scheduler.update(
+            avg_point_loss=reduce_mean(sum(point_losses) / steps_per_epoch, device=device),
+            avg_tissue_mask_loss=reduce_mean(sum(tissue_mask_losses) / steps_per_epoch, device=device) if predict_tissue_mask else None,
+        )

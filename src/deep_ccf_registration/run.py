@@ -51,11 +51,6 @@ def create_dataloader(
     include_tissue_mask: bool = False,
     world_size: int = 1,
 ):
-    """
-    Create a dataloader using SubjectSliceDataset (Map-style).
-
-    Returns a DataLoader that yields collated batch dicts.
-    """
     template_parameters = TemplateParameters(
         origin=ls_template_parameters.origin,
         scale=ls_template_parameters.scale,
@@ -356,6 +351,7 @@ def _main(config_path: Path):
         start_step = checkpoint.get('global_step', 0)
         start_best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         scheduler_state_dict = checkpoint.get('scheduler_state_dict', None)
+        dwa_state_dict = checkpoint.get('dwa_state_dict', None)
         if is_main_process():
             logger.info(f"Resuming from step {start_step}, best_val_loss={start_best_val_loss:.6f}")
     else:
@@ -363,6 +359,7 @@ def _main(config_path: Path):
         start_step = 0
         start_best_val_loss = float('inf')
         scheduler_state_dict = None
+        dwa_state_dict = None
 
     # Move model to device before wrapping with DDP
     model.to(device)
@@ -455,12 +452,13 @@ def _main(config_path: Path):
             grad_clip_max_norm=config.grad_clip_max_norm,
             warmup_steps=config.warmup_steps,
             log_interval=config.log_interval,
-            # Resume state from checkpoint
             start_step=start_step,
             start_best_val_loss=start_best_val_loss,
             scheduler_state_dict=scheduler_state_dict,
             terminology_path=config.terminology_path,
             save_every=config.save_every,
+            multi_task_loss_init_weights=config.multi_task_loss_init_weights,
+            dwa_state_dict=dwa_state_dict,
         )
 
     if is_main_process():

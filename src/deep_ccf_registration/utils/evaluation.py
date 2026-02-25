@@ -16,7 +16,7 @@ from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.datasets.transforms import get_template_point_normalization_inverse, \
     physical_to_index_space
 from deep_ccf_registration.metadata import SliceOrientation
-from deep_ccf_registration.utils.losses import calc_multi_task_loss
+from deep_ccf_registration.utils.losses import calc_multi_task_loss, DynamicWeightAverageScheduler
 from deep_ccf_registration.utils.metrics import MSE, SparseDiceMetric
 from deep_ccf_registration.utils.ddp import is_main_process, reduce_mean
 from deep_ccf_registration.utils.visualization import viz_sample
@@ -33,13 +33,12 @@ def evaluate(
     global_step: int,
     ccf_annotations: np.ndarray,
     terminology_path: Path,
+    dwa_scheduler: DynamicWeightAverageScheduler,
     viz_sample_count: int = 10,
-    tissue_mask_loss_weight: float = 1.0,
     ls_template_parameters: Optional[TemplateParameters] = None,
     predict_tissue_mask: bool = False,
     is_debug: bool = False,
     is_train: bool = False,
-    train_max_iters: Optional[int] = None,
 ) -> dict[str, Any]:
     """
     Evaluate model and report losses/RMSEs.
@@ -99,11 +98,10 @@ def evaluate(
                     )
                     masked_bce = bce_per_pixel * pad_masks
                     tissue_mask_loss = masked_bce.sum() / pad_masks.sum().clamp(min=1.0)
-                    loss, _ = calc_multi_task_loss(
+                    loss = calc_multi_task_loss(
                         point_loss=point_loss,
                         tissue_mask_loss=tissue_mask_loss,
-                        step_num=global_step,
-                        max_steps=train_max_iters if train_max_iters is not None else max_iters
+                        dwa_scheduler=dwa_scheduler,
                     )
                 else:
                     loss = point_loss

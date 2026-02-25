@@ -209,7 +209,7 @@ def apply_transforms_to_points(
     )
 
     # (1, 3, N, 1, 1) -> (N, 3)
-    displacements = displacements.squeeze().T.numpy()
+    displacements = displacements.squeeze()._T.numpy()
 
     # apply displacement vector to affine transformed points
     transformed_points = affine_transformed_points + displacements

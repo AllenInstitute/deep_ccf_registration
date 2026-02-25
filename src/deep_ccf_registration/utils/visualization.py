@@ -187,7 +187,7 @@ def viz_sample(
     #################
     gt_ccf_annotations = map_coordinates(
         input=ccf_annotations,
-        coordinates=gt_template_points_index_space.T,
+        coordinates=gt_template_points_index_space._T,
         order=0,
         mode='nearest'
     )
@@ -222,7 +222,7 @@ def viz_sample(
     #################
     pred_ccf_annotations = map_coordinates(
         input=ccf_annotations,
-        coordinates=pred_template_points_index_space.T,
+        coordinates=pred_template_points_index_space._T,
         order=0,
         mode='nearest'
     )
