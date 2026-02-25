@@ -33,6 +33,7 @@ def train(
         ccf_annotations: np.ndarray,
         ls_template_parameters: TemplateParameters,
         terminology_path: Path,
+        save_every: int = 3000,
         normalize_target_points: bool = True,
         learning_rate: float = 0.0001,
         eval_iters: int = 200,
@@ -50,7 +51,6 @@ def train(
         grad_clip_max_norm: Optional[float] = 1.0,
         warmup_steps: int = 0,
         tissue_mask_loss_weight: float = 1.0,
-        # Resume parameters for checkpoint recovery
         start_step: int = 0,
         start_best_val_loss: float = float("inf"),
         scheduler_state_dict: Optional[dict] = None,
@@ -82,6 +82,7 @@ def train(
     gradient_accumulation_steps: Number of steps to accumulate gradients before optimizer step
     grad_clip_max_norm: Maximum gradient norm for clipping. Set to None to disable.
     warmup_steps: Number of steps to linearly warmup learning rate from 0 to learning_rate.
+    save_every: Save checkpoint every n iterations
 
     Returns
     -------
@@ -134,7 +135,6 @@ def train(
     scheduler = main_scheduler
 
     progress_logger = None
-    batch_counter = 0
     epoch = 0
 
     while True:
@@ -148,7 +148,6 @@ def train(
         tissue_mask_losses = []
 
         for batch in train_dataloader:
-            batch_counter += 1
             if progress_logger is None and is_main_process():
                 progress_logger = ProgressLogger(desc='Training', total=max_iters, log_every=log_interval, start_iter=start_step)
 
@@ -217,6 +216,7 @@ def train(
             losses.append(loss.item() * gradient_accumulation_steps)
 
             # Only step optimizer after accumulating enough gradients
+            grad_norm = None
             if accumulation_step % gradient_accumulation_steps == 0:
                 if scaler is not None:
                     # Unscale gradients before clipping (required for accurate clipping)
@@ -249,57 +249,38 @@ def train(
                     if lr_scheduler in (LRScheduler.CosineAnnealingWarmRestarts, LRScheduler.CosineAnnealingLR):
                         main_scheduler.step()
 
-                train_metrics = {
-                    "train/loss": loss.item() * gradient_accumulation_steps,
-                    "train/point_loss": point_loss.item(),
-                    "train/learning_rate": optimizer.param_groups[0]['lr'],
-                }
-                if grad_norm is not None:
-                    train_metrics["train/grad_norm"] = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
+            train_metrics = {
+                "train/loss": loss.item() * gradient_accumulation_steps,
+                "train/point_loss": point_loss.item(),
+                "train/learning_rate": optimizer.param_groups[0]['lr'],
+            }
+            if grad_norm is not None:
+                train_metrics["train/grad_norm"] = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
+            if predict_tissue_mask:
+                train_metrics['train/tissue_mask_loss'] = tissue_mask_loss.item()
+                train_metrics['train/tissue_mask_loss_weight'] = tissue_mask_loss_weight
+
+            if is_main_process():
+                mlflow.log_metrics(train_metrics, step=global_step)
+
+            if is_main_process():
+                log_msg = f'loss={loss.item() * gradient_accumulation_steps:.3f}'
                 if predict_tissue_mask:
-                    train_metrics['train/tissue_mask_loss'] = tissue_mask_loss.item()
-                    train_metrics['train/tissue_mask_loss_weight'] = tissue_mask_loss_weight
+                    log_msg += f'; point_loss={point_loss.item():.3f}; tissue_mask_loss={tissue_mask_loss.item():.3f}'
+                progress_logger.log_progress(other=log_msg)
+
+            # Periodic evaluation
+            if global_step % eval_interval == 0:
+                # Synchronize all processes before evaluation
+                if dist.is_initialized():
+                    dist.barrier(device_ids=[get_local_rank()])
 
                 if is_main_process():
-                    mlflow.log_metrics(train_metrics, step=global_step)
-
-                if is_main_process():
-                    log_msg = f'loss={loss.item() * gradient_accumulation_steps:.3f}'
-                    if predict_tissue_mask:
-                        log_msg += f'; point_loss={point_loss.item():.3f}; tissue_mask_loss={tissue_mask_loss.item():.3f}'
-                    progress_logger.log_progress(other=log_msg)
-
-                # Periodic evaluation
-                if global_step % eval_interval == 0:
-                    # Synchronize all processes before evaluation
-                    if dist.is_initialized():
-                        dist.barrier(device_ids=[get_local_rank()])
-
-                    if is_main_process():
-                        logger.info(f"Evaluating at step {global_step}")
-                    if is_debug:
-                        # evaluate train too
-                        evaluate(
-                            dataloader=train_dataloader,
-                            model=model,
-                            device=device,
-                            autocast_context=autocast_context,
-                            max_iters=1 if is_debug else eval_iters,
-                            denormalize_pred_template_points=normalize_target_points,
-                            viz_sample_count=val_viz_samples,
-                            ls_template_parameters=ls_template_parameters,
-                            ccf_annotations=ccf_annotations,
-                            global_step=global_step,
-                            coord_loss=calc_coord_loss,
-                            is_debug=is_debug,
-                            predict_tissue_mask=predict_tissue_mask,
-                            terminology_path=terminology_path,
-                            is_train=True,
-                            tissue_mask_loss_weight=tissue_mask_loss_weight,
-                            train_max_iters=max_iters,
-                        )
-                    val_metrics = evaluate(
-                        dataloader=val_dataloader,
+                    logger.info(f"Evaluating at step {global_step}")
+                if is_debug:
+                    # evaluate train too
+                    evaluate(
+                        dataloader=train_dataloader,
                         model=model,
                         device=device,
                         autocast_context=autocast_context,
@@ -313,81 +294,117 @@ def train(
                         is_debug=is_debug,
                         predict_tissue_mask=predict_tissue_mask,
                         terminology_path=terminology_path,
-                        is_train=False,
+                        is_train=True,
                         tissue_mask_loss_weight=tissue_mask_loss_weight,
                         train_max_iters=max_iters,
                     )
+                val_metrics = evaluate(
+                    dataloader=val_dataloader,
+                    model=model,
+                    device=device,
+                    autocast_context=autocast_context,
+                    max_iters=1 if is_debug else eval_iters,
+                    denormalize_pred_template_points=normalize_target_points,
+                    viz_sample_count=val_viz_samples,
+                    ls_template_parameters=ls_template_parameters,
+                    ccf_annotations=ccf_annotations,
+                    global_step=global_step,
+                    coord_loss=calc_coord_loss,
+                    is_debug=is_debug,
+                    predict_tissue_mask=predict_tissue_mask,
+                    terminology_path=terminology_path,
+                    is_train=False,
+                    tissue_mask_loss_weight=tissue_mask_loss_weight,
+                    train_max_iters=max_iters,
+                )
 
-                    current_lr = optimizer.param_groups[0]['lr']
+                current_lr = optimizer.param_groups[0]['lr']
 
+                metrics = {
+                    "eval/loss": val_metrics["val_loss"],
+                    "eval/point_loss": val_metrics['val_point_loss'],
+                    "eval/val_rmse": val_metrics["val_rmse"],
+                    "eval/ccf_annotation_dice": val_metrics["val_ccf_annotation_dice"]
+                }
+                if predict_tissue_mask:
                     metrics = {
-                        "eval/loss": val_metrics["val_loss"],
-                        "eval/point_loss": val_metrics['val_point_loss'],
-                        "eval/val_rmse": val_metrics["val_rmse"],
-                        "eval/ccf_annotation_dice": val_metrics["val_ccf_annotation_dice"]
+                        **metrics,
+                        "eval/tissue_mask_loss": val_metrics['val_tissue_mask_loss'],
+                        "eval/tissue_mask_dice": val_metrics['val_tissue_mask_dice'],
                     }
-                    if predict_tissue_mask:
-                        metrics = {
-                            **metrics,
-                            "eval/tissue_mask_loss": val_metrics['val_tissue_mask_loss'],
-                            "eval/tissue_mask_dice": val_metrics['val_tissue_mask_dice'],
-                        }
+                if is_main_process():
+                    mlflow.log_metrics(
+                        metrics=metrics,
+                        step=global_step
+                    )
+
+                log_msg = (f"Step {global_step} | "
+                          f"Train loss: {loss.item() * gradient_accumulation_steps:.6f} | Val loss: {val_metrics['val_loss']:.6f} | "
+                          f"Val ccf annotation dice: {val_metrics['val_ccf_annotation_dice']:.3f} | "
+                          f"Val RMSE: {val_metrics['val_rmse']:.6f} | "
+                          f"LR: {current_lr:.6e}")
+
+                if predict_tissue_mask:
+                    log_msg += f' | Train point loss: {point_loss.item():.6f} | val point loss: {val_metrics["val_point_loss"]:.6f} | Val tissue mask dice: {val_metrics["val_tissue_mask_dice"]:.6f}'
+
+                if is_main_process():
+                    logger.info(log_msg)
+
+                checkpoint_path = Path(model_weights_out_dir) / f"best.pt"
+                model_state = model.module.state_dict() if hasattr(model, 'module') else model.state_dict()
+                if is_main_process():
+                    torch.save(
+                        obj={
+                            'global_step': global_step,
+                            'model_state_dict': model_state,
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+                            'best_val_loss': best_val_loss,
+                            'val_rmse': val_metrics['val_rmse'],
+                            'lr': scheduler.get_last_lr() if scheduler is not None else learning_rate
+                        },
+                        f=checkpoint_path,
+                    )
+                if dist.is_initialized():
+                    dist.barrier(device_ids=[get_local_rank()])
+
+                # Check for improvement
+                if val_metrics['val_loss'] < best_val_loss - min_delta:
+                    best_val_loss = val_metrics['val_loss']
+
                     if is_main_process():
-                        mlflow.log_metrics(
-                            metrics=metrics,
-                            step=global_step
-                        )
-
-                    log_msg = (f"Step {global_step} | "
-                              f"Train loss: {loss.item() * gradient_accumulation_steps:.6f} | Val loss: {val_metrics['val_loss']:.6f} | "
-                              f"Val ccf annotation dice: {val_metrics['val_ccf_annotation_dice']:.3f} | "
-                              f"Val RMSE: {val_metrics['val_rmse']:.6f} | "
-                              f"LR: {current_lr:.6e}")
-
-                    if predict_tissue_mask:
-                        log_msg += f' | Train point loss: {point_loss.item():.6f} | val point loss: {val_metrics["val_point_loss"]:.6f} | Val tissue mask dice: {val_metrics["val_tissue_mask_dice"]:.6f}'
+                        mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
+                        mlflow.log_metric("best_val_loss", best_val_loss, step=global_step)
 
                     if is_main_process():
-                        logger.info(log_msg)
+                        logger.info(f"New best model saved! Val loss: {best_val_loss:.6f}")
 
-                    checkpoint_path = Path(model_weights_out_dir) / f"{global_step}.pt"
-                    model_state = model.module.state_dict() if hasattr(model, 'module') else model.state_dict()
-                    if is_main_process():
-                        torch.save(
-                            obj={
-                                'global_step': global_step,
-                                'model_state_dict': model_state,
-                                'optimizer_state_dict': optimizer.state_dict(),
-                                'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
-                                'best_val_loss': best_val_loss,
-                                'val_rmse': val_metrics['val_rmse'],
-                                'lr': scheduler.get_last_lr() if scheduler is not None else learning_rate
-                            },
-                            f=checkpoint_path,
-                        )
-                    if dist.is_initialized():
-                        dist.barrier(device_ids=[get_local_rank()])
+                # Reset train losses for next eval period
+                point_losses = []
+                losses = []
+                tissue_mask_losses = []
+                model.train()
 
-                    # Check for improvement
-                    if val_metrics['val_loss'] < best_val_loss - min_delta:
-                        best_val_loss = val_metrics['val_loss']
+            if global_step % save_every == 0:
+                checkpoint_path = Path(model_weights_out_dir) / f"{global_step}.pt"
+                logger.info(f'Saving checkpoint to {checkpoint_path}')
+                model_state = model.module.state_dict() if hasattr(model, 'module') else model.state_dict()
+                if is_main_process():
+                    torch.save(
+                        obj={
+                            'global_step': global_step,
+                            'model_state_dict': model_state,
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'scheduler_state_dict': scheduler.state_dict() if scheduler is not None else None,
+                            'best_val_loss': best_val_loss,
+                            'lr': scheduler.get_last_lr() if scheduler is not None else learning_rate
+                        },
+                        f=checkpoint_path,
+                    )
 
-                        if is_main_process():
-                            mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
-                            mlflow.log_metric("best_val_loss", best_val_loss, step=global_step)
-
-                        if is_main_process():
-                            logger.info(f"New best model saved! Val loss: {best_val_loss:.6f}")
-
-                    # Reset train losses for next eval period
-                    point_losses = []
-                    losses = []
-                    tissue_mask_losses = []
-                    model.train()
-
-                if global_step == max_iters:
-                    if is_main_process():
-                        logger.info(
-                            f"\nTraining completed! Best validation RMSE: {best_val_loss:.6f}")
-                        mlflow.log_metric("final_best_val_rmse", best_val_loss)
-                    return best_val_loss
+            if global_step == max_iters:
+                if is_main_process():
+                    logger.info(
+                        f"\nTraining completed! Best validation RMSE: {best_val_loss:.6f}")
+                    mlflow.log_metric("final_best_val_rmse", best_val_loss)
+                return best_val_loss

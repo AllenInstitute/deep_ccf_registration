@@ -460,6 +460,7 @@ def _main(config_path: Path):
             start_best_val_loss=start_best_val_loss,
             scheduler_state_dict=scheduler_state_dict,
             terminology_path=config.terminology_path,
+            save_every=config.save_every,
         )
 
     if is_main_process():

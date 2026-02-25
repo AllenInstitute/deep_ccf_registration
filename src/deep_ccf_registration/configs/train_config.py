@@ -75,8 +75,9 @@ class TrainConfig(BaseModel):
     eval_iters: int = 50
     val_viz_samples: int = Field(10, ge=0)
 
-    eval_interval: int = Field(500, gt=0)
+    eval_interval: int = Field(500, gt=0, description='Evaluate after this many iterations')
     log_interval: int = Field(20, gt=0)
+    save_every: int = Field(3000, description='Save checkpoint after this many iterations')
     region_ccf_ids_map_path: Path
 
     model_weights_out_dir: Path = Path("./checkpoints")
