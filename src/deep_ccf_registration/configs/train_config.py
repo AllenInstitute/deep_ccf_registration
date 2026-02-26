@@ -106,6 +106,8 @@ class TrainConfig(BaseModel):
 
     lr_scheduler: Optional[LRScheduler] = None
 
+    cosine_warm_restarts_T_0: int = 10000
+
     # Gradient clipping (max gradient norm). Set to None to disable.
     grad_clip_max_norm: Optional[float] = 1.0
 

@@ -46,6 +46,7 @@ def train(
         val_viz_samples: int = 0,
         predict_tissue_mask: bool = False,
         lr_scheduler: Optional[LRScheduler] = None,
+        cosine_warm_restarts_T_0: Optional[int] = None,
         gradient_accumulation_steps: int = 1,
         grad_clip_max_norm: Optional[float] = 1.0,
         warmup_steps: int = 0,
@@ -133,6 +134,20 @@ def train(
             main_scheduler.load_state_dict(scheduler_state_dict)
             logger.info("Restored scheduler state from checkpoint")
         logger.info(f"Using CosineAnnealingLR with T_max={t_max}")
+    elif lr_scheduler == LRScheduler.CosineAnnealingWarmRestarts:
+        if cosine_warm_restarts_T_0 is None:
+            raise ValueError("cosine_warm_restarts_T_0 must be set when using CosineAnnealingWarmRestarts")
+        main_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer=optimizer,
+            T_0=cosine_warm_restarts_T_0,
+            eta_min=learning_rate/10,
+        )
+        if scheduler_state_dict is not None:
+            main_scheduler.load_state_dict(scheduler_state_dict)
+            logger.info("Restored scheduler state from checkpoint")
+        logger.info(
+            f"Using CosineAnnealingWarmRestarts with T_0={cosine_warm_restarts_T_0}"
+        )
     else:
         main_scheduler = None
 

@@ -446,6 +446,7 @@ def _main(config_path: Path):
             ccf_annotations=ccf_annotations,
             val_viz_samples=config.val_viz_samples,
             lr_scheduler=config.lr_scheduler,
+            cosine_warm_restarts_T_0=config.cosine_warm_restarts_T_0,
             normalize_target_points=config.normalize_template_points,
             predict_tissue_mask=config.predict_tissue_mask,
             gradient_accumulation_steps=config.gradient_accumulation_steps,
