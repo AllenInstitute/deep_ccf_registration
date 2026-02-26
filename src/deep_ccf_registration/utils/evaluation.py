@@ -16,8 +16,9 @@ from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.datasets.transforms import get_template_point_normalization_inverse, \
     physical_to_index_space
 from deep_ccf_registration.metadata import SliceOrientation
-from deep_ccf_registration.utils.losses import calc_multi_task_loss, DynamicWeightAverageScheduler
-from deep_ccf_registration.utils.metrics import MSE, SparseDiceMetric
+from deep_ccf_registration.utils.losses import calc_multi_task_loss, calc_spatial_gradient_loss, \
+    DynamicWeightAverageScheduler, MSE
+from deep_ccf_registration.utils.metrics import SparseDiceMetric
 from deep_ccf_registration.utils.ddp import is_main_process, reduce_mean
 from deep_ccf_registration.utils.visualization import viz_sample
 
@@ -98,8 +99,13 @@ def evaluate(
                     )
                     masked_bce = bce_per_pixel * pad_masks
                     tissue_mask_loss = masked_bce.sum() / pad_masks.sum().clamp(min=1.0)
+                    grad_loss = calc_spatial_gradient_loss(
+                        pred=pred_points,
+                        mask=masks,
+                    )
                     loss = calc_multi_task_loss(
                         point_loss=point_loss,
+                        grad_loss=grad_loss,
                         tissue_mask_loss=tissue_mask_loss,
                         dwa_scheduler=dwa_scheduler,
                     )

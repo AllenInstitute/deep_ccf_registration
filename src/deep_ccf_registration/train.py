@@ -18,9 +18,8 @@ from deep_ccf_registration.utils.evaluation import evaluate
 from deep_ccf_registration.configs.train_config import LRScheduler
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.utils.logging_utils import timed, ProgressLogger
-from deep_ccf_registration.utils.losses import calc_multi_task_loss, DynamicWeightAverageScheduler
-from deep_ccf_registration.utils.metrics import MSE
-
+from deep_ccf_registration.utils.losses import calc_multi_task_loss, calc_spatial_gradient_loss, \
+    DynamicWeightAverageScheduler, MSE
 
 
 def train(
@@ -92,7 +91,7 @@ def train(
     os.makedirs(model_weights_out_dir, exist_ok=True)
 
     calc_coord_loss = MSE(reduction='mean', template_parameters=ls_template_parameters)
-    num_tasks = 1
+    num_tasks = 2
     if predict_tissue_mask:
         num_tasks += 1
 
@@ -162,6 +161,7 @@ def train(
         losses = []
         point_losses = []
         tissue_mask_losses = []
+        grad_losses = []
 
         for batch in train_dataloader:
             if progress_logger is None and is_main_process():
@@ -200,8 +200,13 @@ def train(
                     mask=mask,
                     orientations=orientations
                 )
+                grad_loss = calc_spatial_gradient_loss(
+                    pred=pred_template_points,
+                    mask=mask,
+                )
                 loss = calc_multi_task_loss(
                     point_loss=point_loss,
+                    grad_loss=grad_loss,
                     tissue_mask_loss=tissue_mask_loss,
                     dwa_scheduler=dwa_scheduler,
                 )
@@ -221,6 +226,7 @@ def train(
                     loss.backward()
 
             point_losses.append(point_loss.item())
+            grad_losses.append(grad_loss.item())
             if predict_tissue_mask:
                 tissue_mask_losses.append(tissue_mask_loss.item())
             losses.append(loss.item() * gradient_accumulation_steps)
@@ -262,6 +268,7 @@ def train(
             train_metrics = {
                 "train/loss": loss.item() * gradient_accumulation_steps,
                 "train/point_loss": point_loss.item(),
+                "train/grad_loss": grad_loss.item(),
                 "train/learning_rate": optimizer.param_groups[0]['lr'],
                 "train/point_loss_weight": dwa_scheduler.get_weights()[0],
             }
@@ -277,7 +284,7 @@ def train(
             if is_main_process():
                 log_msg = f'loss={loss.item() * gradient_accumulation_steps:.3f}'
                 if predict_tissue_mask:
-                    log_msg += f'; point_loss={point_loss.item():.3f}; tissue_mask_loss={tissue_mask_loss.item():.3f}, loss_weights: {dwa_scheduler.get_weights()}'
+                    log_msg += f'; point_loss={point_loss.item():.3f}; tissue_mask_loss={tissue_mask_loss.item():.3f}, loss_weights: {dwa_scheduler.get_weights()}; grad_loss: {grad_loss.item():.3f}'
                 progress_logger.log_progress(other=log_msg)
 
             # Periodic evaluation
@@ -423,4 +430,5 @@ def train(
         dwa_scheduler.update(
             avg_point_loss=reduce_mean(sum(point_losses) / steps_per_epoch, device=device),
             avg_tissue_mask_loss=reduce_mean(sum(tissue_mask_losses) / steps_per_epoch, device=device) if predict_tissue_mask else None,
+            avg_spatial_gradient_loss=reduce_mean(sum(grad_losses) / steps_per_epoch, device=device)
         )

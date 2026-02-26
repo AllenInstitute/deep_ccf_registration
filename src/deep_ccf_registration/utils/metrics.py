@@ -28,43 +28,6 @@ def _calc_lowest_err_sagittal_orientation(
     return pred
 
 
-class MSE(nn.Module):
-    def __init__(self,
-                 template_parameters: TemplateParameters,
-                 coordinate_dim: int = 1,
-                 reduction: Optional[str] = None,
-                 ):
-        super().__init__()
-        self.coordinate_dim = coordinate_dim
-        self._reduction = reduction
-        self._template_parameters = template_parameters
-
-    def forward(self, pred: torch.Tensor, target: torch.Tensor,
-                orientations: list[str],
-                mask: Optional[torch.Tensor] = None) -> torch.Tensor:
-        assert len(pred.shape) == 4 and pred.shape[1] == 3
-        assert len(target.shape) == 4 and target.shape[1] == 3
-        if mask is not None:
-            assert len(mask.shape) == 3 and list(mask.shape) == [pred.shape[0]] + list(pred.shape[-2:])
-        pred = _calc_lowest_err_sagittal_orientation(
-            pred=pred, target=target, template_parameters=self._template_parameters,
-            orientations=orientations,
-        )
-        per_point_squared_error = ((pred - target) ** 2).sum(dim=self.coordinate_dim)
-
-        if mask is not None:
-            mask = mask.to(per_point_squared_error.device).float()
-            per_point_squared_error = per_point_squared_error.float() * mask
-            valid_points = mask.sum(dim=(1, 2)).clamp(min=1.0)
-            mse = per_point_squared_error.sum(dim=(1, 2)) / valid_points
-        else:
-            mse = per_point_squared_error.float().mean(dim=(1, 2))
-
-        if self._reduction == 'mean':
-            mse = mse.mean()
-        return mse
-
-
 class PerAxisError(nn.Module):
     def __init__(self,
                  template_parameters: TemplateParameters,

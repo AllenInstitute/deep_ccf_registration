@@ -12,7 +12,8 @@ from scipy.ndimage import map_coordinates
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.datasets.transforms import physical_to_index_space
 from deep_ccf_registration.metadata import SliceOrientation
-from deep_ccf_registration.utils.metrics import MSE, PerAxisError
+from deep_ccf_registration.utils.metrics import PerAxisError
+from deep_ccf_registration.utils.losses import MSE
 from deep_ccf_registration.utils.utils import visualize_ccf_annotations
 
 
@@ -187,7 +188,7 @@ def viz_sample(
     #################
     gt_ccf_annotations = map_coordinates(
         input=ccf_annotations,
-        coordinates=gt_template_points_index_space._T,
+        coordinates=gt_template_points_index_space.T,
         order=0,
         mode='nearest'
     )
@@ -222,7 +223,7 @@ def viz_sample(
     #################
     pred_ccf_annotations = map_coordinates(
         input=ccf_annotations,
-        coordinates=pred_template_points_index_space._T,
+        coordinates=pred_template_points_index_space.T,
         order=0,
         mode='nearest'
     )
