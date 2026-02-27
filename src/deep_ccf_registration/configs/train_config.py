@@ -69,15 +69,16 @@ class TrainConfig(BaseModel):
 
     load_checkpoint: Optional[Path] = None
 
-    max_epochs: int
+    num_epochs: int
     learning_rate: float = Field(0.001, gt=0.0)
     weight_decay: float = Field(0.0, ge=0.0)
     eval_iters: int = 50
     val_viz_samples: int = Field(10, ge=0)
 
-    eval_interval: int = Field(500, gt=0, description='Evaluate after this many iterations')
     log_interval: int = Field(20, gt=0)
-    save_every: int = Field(3000, description='Save checkpoint after this many iterations')
+    eval_interval: int = Field(1, gt=0, description='Evaluate every N epochs')
+    save_every: int = Field(3, description='Save periodic checkpoint every N epochs')
+    steps_per_epoch: Optional[int] = Field(None, description='Steps per epoch')
     region_ccf_ids_map_path: Path
 
     model_weights_out_dir: Path = Path("./checkpoints")

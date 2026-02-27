@@ -432,11 +432,10 @@ def _main(config_path: Path):
             val_dataloader=val_dataloader,
             model=model,
             optimizer=opt,
-            max_epochs=config.max_epochs,
+            num_epochs=config.num_epochs,
             train_sampler=train_sampler,
             model_weights_out_dir=config.model_weights_out_dir,
             learning_rate=config.learning_rate,
-            eval_interval=config.eval_interval,
             autocast_context=autocast_context,
             scaler=scaler,
             device=device,
@@ -460,6 +459,8 @@ def _main(config_path: Path):
             save_every=config.save_every,
             multi_task_loss_init_weights=config.multi_task_loss_init_weights,
             dwa_state_dict=dwa_state_dict,
+            steps_per_epoch=config.steps_per_epoch,
+            eval_interval=config.eval_interval,
         )
 
     if is_main_process():
