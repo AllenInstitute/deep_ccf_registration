@@ -69,7 +69,7 @@ class TrainConfig(BaseModel):
 
     load_checkpoint: Optional[Path] = None
 
-    max_iters: int
+    max_epochs: int
     learning_rate: float = Field(0.001, gt=0.0)
     weight_decay: float = Field(0.0, ge=0.0)
     eval_iters: int = 50

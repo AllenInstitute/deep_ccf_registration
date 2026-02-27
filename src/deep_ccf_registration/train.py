@@ -27,7 +27,7 @@ def train(
         val_dataloader,
         model: Unet,
         optimizer,
-        max_iters: int,
+        max_epochs: int,
         model_weights_out_dir: Path,
         ccf_annotations: np.ndarray,
         ls_template_parameters: TemplateParameters,
@@ -50,7 +50,7 @@ def train(
         gradient_accumulation_steps: int = 1,
         grad_clip_max_norm: Optional[float] = 1.0,
         warmup_steps: int = 0,
-        start_step: int = 0,
+        start_epoch: int = 0,
         start_best_val_loss: float = float("inf"),
         scheduler_state_dict: Optional[dict] = None,
         train_sampler = None,
@@ -108,15 +108,17 @@ def train(
         dwa_scheduler.load_state_dict(dwa_state_dict)
         logger.info(f"Restored DWA scheduler state: {dwa_state_dict}")
     best_val_loss = start_best_val_loss
-    global_step = start_step
-    accumulation_step = 0
     steps_per_epoch = len(train_dataloader)
+    optimizer_steps_per_epoch = steps_per_epoch // gradient_accumulation_steps
+    global_step = start_epoch * optimizer_steps_per_epoch
+    accumulation_step = start_epoch * steps_per_epoch
+    total_optimizer_steps = max_epochs * optimizer_steps_per_epoch
     model.to(device)
 
-    if start_step > 0:
-        logger.info(f"Resuming training from step {start_step}")
+    if start_epoch > 0:
+        logger.info(f"Resuming training from epoch {start_epoch} (global_step={global_step})")
         logger.info(f"Best val loss so far: {start_best_val_loss:.6f}")
-    logger.info(f"Training for {max_iters} iters total")
+    logger.info(f"Training for {max_epochs} epochs ({total_optimizer_steps} optimizer steps)")
     logger.info(f"Device: {device}")
     logger.info(f"Gradient accumulation steps: {gradient_accumulation_steps}")
     logger.info(f"Gradient clipping max norm: {grad_clip_max_norm}")
@@ -124,7 +126,7 @@ def train(
 
     if lr_scheduler == LRScheduler.CosineAnnealingLR:
         # T_max is remaining steps after warmup
-        t_max = max(1, max_iters - warmup_steps)
+        t_max = max(1, total_optimizer_steps - warmup_steps)
         main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
             optimizer=optimizer,
             T_max=t_max,
@@ -165,9 +167,8 @@ def train(
     scheduler = main_scheduler
 
     progress_logger = None
-    epoch = int(start_step / steps_per_epoch)
 
-    while True:
+    for epoch in range(start_epoch, max_epochs):
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
 
@@ -179,7 +180,7 @@ def train(
 
         for batch in train_dataloader:
             if progress_logger is None and is_main_process():
-                progress_logger = ProgressLogger(desc='Training', total=max_iters, log_every=log_interval, start_iter=start_step)
+                progress_logger = ProgressLogger(desc='Training', total=total_optimizer_steps, log_every=log_interval, start_iter=global_step)
 
             input_images = batch["input_images"].to(device)
             target_template_points = batch["target_template_points"].to(device)
@@ -369,14 +370,14 @@ def train(
                         step=global_step
                     )
 
-                log_msg = (f"Step {global_step} | "
+                log_msg = (f"Epoch {epoch+1} | Step {global_step} | "
                           f"Train loss: {loss.item() * gradient_accumulation_steps:.6f} | Val loss: {val_metrics['val_loss']:.6f} | "
                           f"Val ccf annotation dice: {val_metrics['val_ccf_annotation_dice']:.3f} | "
                           f"Val RMSE: {val_metrics['val_rmse']:.6f} | "
                           f"LR: {current_lr:.6e}")
 
                 if predict_tissue_mask:
-                    log_msg += f'Epoch {epoch+1} | Train point loss: {point_loss.item():.6f} | val point loss: {val_metrics["val_point_loss"]:.6f} | Val tissue mask dice: {val_metrics["val_tissue_mask_dice"]:.6f}'
+                    log_msg += f' | Train point loss: {point_loss.item():.6f} | val point loss: {val_metrics["val_point_loss"]:.6f} | Val tissue mask dice: {val_metrics["val_tissue_mask_dice"]:.6f}'
 
                 if is_main_process():
                     logger.info(log_msg)
@@ -386,6 +387,7 @@ def train(
                 if is_main_process():
                     torch.save(
                         obj={
+                            'epoch': epoch,
                             'global_step': global_step,
                             'model_state_dict': model_state,
                             'optimizer_state_dict': optimizer.state_dict(),
@@ -424,6 +426,7 @@ def train(
                     logger.info(f'Saving checkpoint to {checkpoint_path}')
                     torch.save(
                         obj={
+                            'epoch': epoch,
                             'global_step': global_step,
                             'model_state_dict': model_state,
                             'optimizer_state_dict': optimizer.state_dict(),
@@ -437,18 +440,15 @@ def train(
                     mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
 
 
-            if global_step == max_iters:
-                if is_main_process():
-                    logger.info(
-                        f"\nTraining completed! Best validation RMSE: {best_val_loss:.6f}")
-                    mlflow.log_metric("final_best_val_rmse", best_val_loss)
-                return best_val_loss
-
         if is_main_process():
-            logger.info(f'epoch {epoch+1} completed')
-            logger.info('Updating DWA scheduler')
+            logger.info(f'Epoch {epoch + 1}/{max_epochs} completed')
         dwa_scheduler.update(
             avg_point_loss=reduce_mean(sum(point_losses) / steps_per_epoch, device=device),
             avg_tissue_mask_loss=reduce_mean(sum(tissue_mask_losses) / steps_per_epoch, device=device) if predict_tissue_mask else None,
             avg_spatial_gradient_loss=reduce_mean(sum(grad_losses) / steps_per_epoch, device=device)
         )
+
+    if is_main_process():
+        logger.info(f"\nTraining completed! Best validation loss: {best_val_loss:.6f}")
+        mlflow.log_metric("final_best_val_loss", best_val_loss)
+    return best_val_loss

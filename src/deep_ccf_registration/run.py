@@ -348,15 +348,15 @@ def _main(config_path: Path):
         checkpoint = torch.load(f=config.load_checkpoint, map_location=device)
         model.load_state_dict(state_dict=checkpoint['model_state_dict'])
         # Extract resume state from checkpoint
-        start_step = checkpoint.get('global_step', 0)
+        start_epoch = checkpoint.get('epoch', 0)
         start_best_val_loss = checkpoint.get('best_val_loss', float('inf'))
         scheduler_state_dict = checkpoint.get('scheduler_state_dict', None)
         dwa_state_dict = checkpoint.get('dwa_state_dict', None)
         if is_main_process():
-            logger.info(f"Resuming from step {start_step}, best_val_loss={start_best_val_loss:.6f}")
+            logger.info(f"Resuming from epoch {start_epoch}, best_val_loss={start_best_val_loss:.6f}")
     else:
         checkpoint = None
-        start_step = 0
+        start_epoch = 0
         start_best_val_loss = float('inf')
         scheduler_state_dict = None
         dwa_state_dict = None
@@ -432,7 +432,7 @@ def _main(config_path: Path):
             val_dataloader=val_dataloader,
             model=model,
             optimizer=opt,
-            max_iters=config.max_iters,
+            max_epochs=config.max_epochs,
             train_sampler=train_sampler,
             model_weights_out_dir=config.model_weights_out_dir,
             learning_rate=config.learning_rate,
@@ -453,7 +453,7 @@ def _main(config_path: Path):
             grad_clip_max_norm=config.grad_clip_max_norm,
             warmup_steps=config.warmup_steps,
             log_interval=config.log_interval,
-            start_step=start_step,
+            start_epoch=start_epoch,
             start_best_val_loss=start_best_val_loss,
             scheduler_state_dict=scheduler_state_dict,
             terminology_path=config.terminology_path,
