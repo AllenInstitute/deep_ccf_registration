@@ -149,7 +149,8 @@ def visualize_ccf_annotations(
                 color_hex = f'#0{"".join(color_hex[1:])}'
             rgb_image[annotations == ann_id] = ImageColor.getcolor(color=color_hex, mode='RGB')
         except KeyError:
-            logger.warning(f'color for annotation {ann_id} not in terminology')
+            # TODO patch bad annotation ids
+            pass
 
     if not return_image:
         plt.figure(figsize=(10, 10))

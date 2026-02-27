@@ -165,12 +165,11 @@ def train(
     scheduler = main_scheduler
 
     progress_logger = None
-    epoch = 0
+    epoch = int(start_step / steps_per_epoch)
 
     while True:
         if train_sampler is not None:
             train_sampler.set_epoch(epoch)
-        epoch += 1
 
         model.train()
         losses = []
@@ -286,6 +285,7 @@ def train(
                 "train/grad_loss": grad_loss.item(),
                 "train/learning_rate": optimizer.param_groups[0]['lr'],
                 "train/point_loss_weight": dwa_scheduler.get_weights()[0],
+                "train/grad_loss_weight": dwa_scheduler.get_weights()[2],
             }
             if grad_norm is not None:
                 train_metrics["train/grad_norm"] = grad_norm.item() if isinstance(grad_norm, torch.Tensor) else grad_norm
@@ -376,7 +376,7 @@ def train(
                           f"LR: {current_lr:.6e}")
 
                 if predict_tissue_mask:
-                    log_msg += f' | Train point loss: {point_loss.item():.6f} | val point loss: {val_metrics["val_point_loss"]:.6f} | Val tissue mask dice: {val_metrics["val_tissue_mask_dice"]:.6f}'
+                    log_msg += f'Epoch {epoch+1} | Train point loss: {point_loss.item():.6f} | val point loss: {val_metrics["val_point_loss"]:.6f} | Val tissue mask dice: {val_metrics["val_tissue_mask_dice"]:.6f}'
 
                 if is_main_process():
                     logger.info(log_msg)
@@ -419,9 +419,9 @@ def train(
 
             if global_step % save_every == 0:
                 checkpoint_path = Path(model_weights_out_dir) / f"{global_step}.pt"
-                logger.info(f'Saving checkpoint to {checkpoint_path}')
                 model_state = model.module.state_dict() if hasattr(model, 'module') else model.state_dict()
                 if is_main_process():
+                    logger.info(f'Saving checkpoint to {checkpoint_path}')
                     torch.save(
                         obj={
                             'global_step': global_step,
@@ -434,6 +434,8 @@ def train(
                         },
                         f=checkpoint_path,
                     )
+                    mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
+
 
             if global_step == max_iters:
                 if is_main_process():
@@ -442,6 +444,9 @@ def train(
                     mlflow.log_metric("final_best_val_rmse", best_val_loss)
                 return best_val_loss
 
+        if is_main_process():
+            logger.info(f'epoch {epoch+1} completed')
+            logger.info('Updating DWA scheduler')
         dwa_scheduler.update(
             avg_point_loss=reduce_mean(sum(point_losses) / steps_per_epoch, device=device),
             avg_tissue_mask_loss=reduce_mean(sum(tissue_mask_losses) / steps_per_epoch, device=device) if predict_tissue_mask else None,
