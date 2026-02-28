@@ -444,7 +444,7 @@ def _main(config_path: Path):
             ls_template_parameters=ls_template_parameters,
             ccf_annotations=ccf_annotations,
             val_viz_samples=config.val_viz_samples,
-            lr_scheduler=config.lr_scheduler,
+            lr_scheduler_type=config.lr_scheduler,
             cosine_warm_restarts_T_0=config.cosine_warm_restarts_T_0,
             normalize_target_points=config.normalize_template_points,
             predict_tissue_mask=config.predict_tissue_mask,
@@ -456,10 +456,9 @@ def _main(config_path: Path):
             start_best_val_loss=start_best_val_loss,
             scheduler_state_dict=scheduler_state_dict,
             terminology_path=config.terminology_path,
-            save_every=config.save_every,
+            checkpoint_interval=config.checkpoint_interval,
             multi_task_loss_init_weights=config.multi_task_loss_init_weights,
             dwa_state_dict=dwa_state_dict,
-            steps_per_epoch=config.steps_per_epoch,
             eval_interval=config.eval_interval,
         )
 

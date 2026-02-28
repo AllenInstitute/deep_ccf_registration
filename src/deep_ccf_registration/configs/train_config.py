@@ -76,9 +76,8 @@ class TrainConfig(BaseModel):
     val_viz_samples: int = Field(10, ge=0)
 
     log_interval: int = Field(20, gt=0)
-    eval_interval: int = Field(1, gt=0, description='Evaluate every N epochs')
-    save_every: int = Field(3, description='Save periodic checkpoint every N epochs')
-    steps_per_epoch: Optional[int] = Field(None, description='Steps per epoch')
+    eval_interval: int
+    checkpoint_interval: int
     region_ccf_ids_map_path: Path
 
     model_weights_out_dir: Path = Path("./checkpoints")
