@@ -95,9 +95,7 @@ class UNetWithRegressionHeads(nn.Module):
         self._positional_encoding_type = positional_embedding_type
         self._positional_embedding_placement = positional_embedding_placement
 
-        coord_feature_channels = feature_channels
-        tissue_mask_channels = 1 if include_tissue_mask else 0
-        coord_head_input_channels = coord_feature_channels
+        head_input_channels = feature_channels
 
         if self.use_positional_encoding:
             if positional_embedding_type == PositionalEmbeddingType.COORD_CONV:
@@ -106,7 +104,7 @@ class UNetWithRegressionHeads(nn.Module):
                 if positional_embedding_placement == PositionalEmbeddingPlacement.EARLY:
                     in_channels += 2
                 else:
-                    coord_head_input_channels += 2
+                    head_input_channels += 2
             else:
                 if pos_encoding_channels is None:
                     raise ValueError('provide pos_encoding_channels')
@@ -116,7 +114,7 @@ class UNetWithRegressionHeads(nn.Module):
                 if positional_embedding_placement == PositionalEmbeddingPlacement.EARLY:
                     in_channels += pos_encoding_channels
                 else:
-                    coord_head_input_channels += pos_encoding_channels
+                    head_input_channels += pos_encoding_channels
 
         self.feature_extractor_backbone = segmentation_models_pytorch.Unet(
             encoder_name=encoder_name,
@@ -125,12 +123,12 @@ class UNetWithRegressionHeads(nn.Module):
             decoder_channels=decoder_channels,
             decoder_use_norm=decoder_use_norm,
             in_channels=in_channels,
-            classes=coord_feature_channels + tissue_mask_channels,
+            classes=feature_channels,
         )
 
         layers = []
         if len(coord_head_channels) > 0:
-            in_ch = coord_head_input_channels
+            in_ch = head_input_channels
             for out_ch in coord_head_channels:
                 layers.append(nn.Conv2d(in_ch, out_ch, kernel_size=1))
                 layers.append(nn.ReLU())
@@ -139,6 +137,11 @@ class UNetWithRegressionHeads(nn.Module):
             self.coord_head = nn.Sequential(*layers)
         else:
             self.coord_head = None
+
+        if include_tissue_mask:
+            self.tissue_mask_segmentation_head = nn.Conv2d(in_channels=head_input_channels, out_channels=1, kernel_size=1)
+        else:
+            self.tissue_mask_segmentation_head = None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -168,24 +171,21 @@ class UNetWithRegressionHeads(nn.Module):
         else:
             pos_encoding = None
 
-        # Extract features from UNet backbone
         features = self.feature_extractor_backbone(x)
 
-        if self.include_tissue_mask:
-            coord_features, mask_logits = features[:, :-1], features[:, -1].unsqueeze(1)
-        else:
-            coord_features, mask_logits = features, None
-
         if self.use_positional_encoding and self._positional_embedding_placement == PositionalEmbeddingPlacement.LATE:
-            coord_features = torch.cat([coord_features, pos_encoding], dim=1)
+            features = torch.cat([features, pos_encoding], dim=1)
 
         if self.coord_head is not None:
-            # Predict coordinates using regression head
-            coords = self.coord_head(coord_features)
+            coords = self.coord_head(features)
         else:
-            coords = coord_features
+            coords = features
 
-        # Predict tissue mask using classification head
+        if self.tissue_mask_segmentation_head is not None:
+            mask_logits = self.tissue_mask_segmentation_head(features)
+        else:
+            mask_logits = None
+
         if self.include_tissue_mask:
             output = torch.cat([coords, mask_logits], dim=1)
         else:

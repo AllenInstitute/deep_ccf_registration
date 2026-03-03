@@ -349,7 +349,7 @@ def train_epoch(
             mlflow.log_metrics(train_metrics, step=global_step)
 
         if is_main_process():
-            log_msg = f'loss={loss.item() * gradient_accumulation_steps:.3f}'
+            log_msg = f'Epoch {epoch}: loss={loss.item() * gradient_accumulation_steps:.3f}'
             if predict_tissue_mask:
                 log_msg += f'; point_loss={point_loss.item():.3f}; tissue_mask_loss={tissue_mask_loss.item():.3f}, loss_weights: {dwa_scheduler.get_weights()}; grad_loss: {grad_loss.item():.3f}'
             progress_logger.log_progress(other=log_msg)
