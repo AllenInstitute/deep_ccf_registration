@@ -1,203 +1,157 @@
+import datetime
 import multiprocessing
 import os
 import sys
-import tempfile
+import traceback
 from importlib.metadata import distribution
 from pathlib import Path
-from typing import Optional
 
 import click
 import mlflow
 import numpy as np
+import pandas as pd
 import torch
+import torch.distributed as dist
 from aind_smartspim_transform_utils.io.file_io import AntsImageParameters
+from torch.distributed.elastic.multiprocessing.errors import record
 
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from contextlib import nullcontext
 from loguru import logger
 import json
 import ants
 import random
 
-from deep_ccf_registration.configs.train_config import TrainConfig, LRScheduler
-from deep_ccf_registration.datasets.slice_dataset_cache import (
-    PatchSample,
-    SliceDatasetCache,
-    ShardedMultiDatasetCache,
-    ShuffledBatchIterator,
-    collate_patch_samples, )
-from deep_ccf_registration.datasets.transforms import build_transform, TemplatePointsNormalization, TemplateParameters
-from deep_ccf_registration.metadata import SubjectMetadata, TissueBoundingBoxes
+from deep_ccf_registration.configs.train_config import TrainConfig
+from deep_ccf_registration.datasets.collation import collate_patch_samples
+from deep_ccf_registration.datasets.slice_dataset import SubjectSliceDataset
+from deep_ccf_registration.datasets.transforms import build_transform
+from deep_ccf_registration.datasets.template_meta import TemplateParameters
+from deep_ccf_registration.metadata import SubjectMetadata, TissueBoundingBoxes, RotationAngles, \
+    SubjectRotationAngle
 from deep_ccf_registration.models import UNetWithRegressionHeads
 from deep_ccf_registration.train import train
 
-
-def _identity_collate(batch):
-    """Pass through batch as-is (list of PatchSample)."""
-    return batch
-
-
-
-class RepeatSinglePatchIterator:
-    """Yield batches made from a single cached patch (debug helper)."""
-    shared_coords: Optional[tuple[str, int, str, int, int]] = None
-
-    def __init__(self, base_iterator, batch_size: int, is_train: bool):
-        self._base_iterator = base_iterator
-        self._batch_size = batch_size
-        self._is_train = is_train
-        self._logged = False
-        self._sample: Optional[PatchSample] = None
-
-    @staticmethod
-    def _coords(sample: PatchSample) -> tuple[str, int, str, int, int]:
-        return (
-            sample.subject_id,
-            sample.slice_idx,
-            sample.orientation,
-            sample.start_y,
-            sample.start_x,
-        )
-
-    def _locate_sample(self, coords: Optional[tuple[str, int, str, int, int]]) -> Optional[PatchSample]:
-        for batch in self._base_iterator:
-            for candidate in batch:
-                if coords is None or self._coords(candidate) == coords:
-                    return candidate
-        return None
-
-    def __iter__(self):
-        coords = RepeatSinglePatchIterator.shared_coords
-        self._sample = self._locate_sample(coords)
-
-        if self._sample is None:
-            if coords is None:
-                raise RuntimeError("Debug mode: could not locate initial reference sample")
-            raise RuntimeError(
-                "Debug mode: could not find matching sample in iterator; ensure train and val share subjects"
-            )
-
-        if coords is None:
-            RepeatSinglePatchIterator.shared_coords = self._coords(self._sample)
-
-        if not self._logged:
-            logger.info(
-                f'is_train={self._is_train}; subject_id={self._sample.subject_id}; '
-                f'slice_idx={self._sample.slice_idx}; orientation={self._sample.orientation}; '
-                f'start_y={self._sample.start_y}; start_x={self._sample.start_x}'
-            )
-            self._logged = True
-
-        while True:
-            yield [self._sample for _ in range(self._batch_size)]
-
-
-class CollatedBatchIterator:
-    """Wrap an iterator of PatchSample batches and emit collated tensors."""
-
-    def __init__(self, base_iterator, patch_size: int, is_train: bool):
-        self._base_iterator = base_iterator
-        self._patch_size = patch_size
-        self._is_train = is_train
-
-    def __iter__(self):
-        for batch in self._base_iterator:
-            if not batch:
-                continue
-            yield collate_patch_samples(batch, patch_size=self._patch_size, is_train=self._is_train)
-
+def _record(main_func):
+    return record(main_func)
 
 def create_dataloader(
-    metadata: list[SubjectMetadata],
-    tissue_bboxes: TissueBoundingBoxes,
+    subjects: list[SubjectMetadata],
+    samples: np.ndarray,
+    tissue_bboxes_path: Path,
+    rotation_angles: RotationAngles,
     config: TrainConfig,
     is_train: bool,
     batch_size: int,
     num_workers: int,
+    device: str,
     ls_template_parameters: TemplateParameters,
-    ccf_annotations: np.ndarray,
+    ccf_annotations_path: str,
     include_tissue_mask: bool = False,
-    buffer_batches: int = 8,
-    forced_coords: Optional[tuple[str, int, str, int, int]] = None,
+    world_size: int = 1,
 ):
-    """
-    Create a dataloader using SliceDatasetCache with worker sharding and batch shuffling.
-
-    Returns a ShuffledBatchIterator that yields collated batch dicts.
-    """
-    datasets = []
     template_parameters = TemplateParameters(
         origin=ls_template_parameters.origin,
         scale=ls_template_parameters.scale,
         direction=ls_template_parameters.direction,
-        shape=ls_template_parameters.shape
+        shape=ls_template_parameters.shape,
+        orientation=ls_template_parameters.orientation,
     )
 
-    for meta in metadata:
-        transform = build_transform(
-            config=config,
-            template_parameters=template_parameters,
-            is_train=is_train,
-        )
-        datasets.append(
-            SliceDatasetCache(
-                dataset_meta=meta,
-                tissue_bboxes=tissue_bboxes.bounding_boxes[meta.subject_id],
-                sample_fraction=0.1,
-                orientation=config.orientation,
-                tensorstore_aws_credentials_method=config.tensorstore_aws_credentials_method,
-                registration_downsample_factor=config.registration_downsample_factor,
-                patch_size=config.patch_size[0],
-                max_chunks_per_dataset=None if config.debug else 1,
-                transform=transform,
-                template_parameters=template_parameters,
-                is_train=is_train,
-                forced_coords=forced_coords,
-                ccf_annotations=ccf_annotations,
-                include_tissue_mask=include_tissue_mask,
-            )
-        )
+    transform = build_transform(
+        config=config,
+        template_parameters=template_parameters,
+        square_symmetry=is_train and config.data_augmentation.apply_square_symmetry_transform,
+        resample_to_fixed_resolution=config.resample_to_fixed_resolution is not None,
+        rotate_slices=config.data_augmentation.rotate_slices and is_train,
+        normalize_template_points=config.normalize_template_points,
+        apply_grid_distortion=config.data_augmentation.apply_grid_distortion and is_train,
+        rotation_angles=rotation_angles,
+    )
 
-    sharded_dataset = ShardedMultiDatasetCache(datasets=datasets)
+    dataset = SubjectSliceDataset(
+        subjects=subjects,
+        samples=samples,
+        template_parameters=template_parameters,
+        is_train=is_train,
+        tissue_bboxes_path=tissue_bboxes_path,
+        rotation_angles=rotation_angles,
+        orientations=[config.orientation] if config.orientation is not None else [],
+        crop_size=config.patch_size,
+        transform=transform,
+        include_tissue_mask=include_tissue_mask,
+        ccf_annotations_path=ccf_annotations_path,
+        rotate_slices=config.data_augmentation.rotate_slices and is_train,
+        is_debug=config.debug,
+        debug_slice_idx=config.debug_slice_idx,
+        aws_credentials_method=config.tensorstore_aws_credentials_method,
+    )
+
+    num_workers = num_workers if is_train else 0
+
+    if world_size > 1:
+        sampler = DistributedSampler(dataset, shuffle=True)
+        shuffle = False
+    else:
+        sampler = None
+        shuffle = True
 
     dataloader = DataLoader(
-        dataset=sharded_dataset,
+        dataset=dataset,
         batch_size=batch_size,
+        shuffle=shuffle,
+        sampler=sampler,
         num_workers=num_workers,
-        collate_fn=_identity_collate,
-        pin_memory=False,
+        collate_fn=collate_patch_samples,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
     )
 
-    iterator = ShuffledBatchIterator(
-        dataloader=dataloader,
-        batch_size=batch_size,
-        buffer_batches=buffer_batches,
-    )
-
-    if config.debug:
-        logger.warning("Debug mode: repeating a single cached patch for all batches")
-        if forced_coords is not None:
-            RepeatSinglePatchIterator.shared_coords = forced_coords
-        iterator = RepeatSinglePatchIterator(base_iterator=iterator, batch_size=batch_size, is_train=is_train)
-
-    return CollatedBatchIterator(iterator, patch_size=config.patch_size[0], is_train=is_train)
+    return dataloader, sampler
 
 logger.remove()
 log_level = os.getenv("LOG_LEVEL", "INFO").upper()
 logger.add(sys.stderr, level=log_level)
 
 
-def _deterministic_debug_meta(
-    train_metadata: list[SubjectMetadata],
-    tissue_bboxes: TissueBoundingBoxes,
-    orientation: str,
-) -> Optional[tuple[str, int, str, int, int]]:
-    """Pick a deterministic patch for debug mode."""
-    subject = train_metadata[0]
-    bboxes = tissue_bboxes.bounding_boxes[subject.subject_id]
-    slice_idx = 318
-    bbox = bboxes[slice_idx]
-    return subject.subject_id, slice_idx, orientation, bbox.y, bbox.x
+def is_main_process() -> bool:
+    """Check if this is the main process (rank 0) for logging/mlflow."""
+    return int(os.environ.get('RANK', 0)) == 0
+
+
+def get_world_size() -> int:
+    """Get the total number of DDP processes."""
+    return int(os.environ.get('WORLD_SIZE', 1))
+
+
+def get_local_rank() -> int:
+    """Get the local rank (GPU index on this node)."""
+    return int(os.environ.get('LOCAL_RANK', 0))
+
+
+def setup_ddp() -> tuple[str, int]:
+    """
+    Initialize DDP if running in distributed mode.
+
+    Returns:
+        tuple: (device string, world_size)
+    """
+    world_size = get_world_size()
+    local_rank = get_local_rank()
+
+    if world_size > 1:
+        # Initialize the process group with extended timeout for long validation runs
+        timeout = datetime.timedelta(minutes=60)  # Increase from default 30 min to 60 min
+        dist.init_process_group(backend='nccl', timeout=timeout, device_id=torch.device(f'cuda:{local_rank}'))
+        device = f'cuda:{local_rank}'
+        torch.cuda.set_device(local_rank)
+        if is_main_process():
+            logger.info(f"DDP initialized: world_size={world_size}, local_rank={local_rank}, timeout={timeout}")
+    else:
+        device = None  # Will be set by config
+
+    return device, world_size
 
 
 def _get_git_commit_from_package(package_name="deep-ccf-registration"):
@@ -220,7 +174,15 @@ def _get_git_commit_from_package(package_name="deep-ccf-registration"):
 )
 def main(config_path: Path):
     """Train a model to predict points in light sheet template space given a light sheet image."""
+    try:
+        _main(config_path)
+    except Exception:
+        rank = int(os.environ.get('RANK', 0))
+        logger.error(f"Rank {rank} failed with exception:\n{traceback.format_exc()}")
+        raise
 
+
+def _main(config_path: Path):
     with open(config_path) as f:
         config = json.load(f)
     config = TrainConfig.model_validate(config)
@@ -232,30 +194,39 @@ def main(config_path: Path):
     logger.info("Starting training run")
     logger.info("=" * 60)
 
-    torch.manual_seed(seed=config.seed)
-    random.seed(config.seed)
-    np.random.seed(config.seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(seed=config.seed)
-    logger.info(f"Random seed set to: {config.seed}")
+    # Setup DDP if running in distributed mode
+    ddp_device, world_size = setup_ddp()
 
-    if config.device == "auto":
+    # Offset random seeds by rank so each process has different randomness
+    rank = int(os.environ.get('RANK', 0))
+    torch.manual_seed(seed=config.seed + rank)
+    np.random.seed(config.seed)
+    random.seed(config.seed)
+
+    if ddp_device is not None:
+        # DDP mode - use the assigned device
+        device = ddp_device
+    elif config.device == "auto":
         if torch.cuda.is_available():
             device = "cuda"
         else:
             device = "cpu"
     else:
         device = config.device
-    logger.info(f"Using device: {config.device}")
+
+    if is_main_process():
+        logger.info(f"Using device: {device}")
+        if world_size > 1:
+            logger.info(f"DDP training with {world_size} GPUs")
 
     # Setup mixed precision
-    if config.mixed_precision and device == "cuda":
+    if config.mixed_precision:
         autocast_context = torch.cuda.amp.autocast()
-        logger.info("Mixed precision training enabled")
+        scaler = torch.cuda.amp.GradScaler()
+        logger.info("Mixed precision training enabled with GradScaler")
     else:
         autocast_context = nullcontext()
-        if config.mixed_precision and device != "cuda":
-            logger.warning("Mixed precision only supported on CUDA, disabling")
+        scaler = None
 
     # Load light sheet template
     logger.info(f"Loading light sheet template from: {config.ls_template_path}")
@@ -266,110 +237,150 @@ def main(config_path: Path):
         scale=ls_template_ants_parameters.scale,
         direction=ls_template_ants_parameters.direction,
         shape=ls_template.shape,
+        orientation=ls_template_ants_parameters.orientation,
     )
-    del ls_template
 
-    # Load dataset metadata
     logger.info(f"Loading dataset metadata from: {config.dataset_meta_path}")
     with open(file=config.dataset_meta_path, mode='r') as f:
         subject_metadata_dicts = json.load(fp=f)
     subject_metadata = [SubjectMetadata.model_validate(x) for x in subject_metadata_dicts]
     logger.info(f"Total subjects loaded: {len(subject_metadata)}")
 
-    # Split into train/val
-    train_metadata, val_metadata, test_metadata = split_train_val_test(
-        subject_metadata=subject_metadata,
-        train_split=config.train_val_split,
-        val_split=(1 - config.train_val_split) / 2,
-    )
+    train_samples = np.load(config.train_samples_path, mmap_mode='r')
+    val_samples = np.load(config.val_samples_path, mmap_mode='r')
 
     if config.debug:
         logger.warning("Debug mode: using training metadata for validation to ensure shared subjects")
-        val_metadata = train_metadata
+        val_samples = train_samples
 
-    logger.info(f"Train subjects: {len(train_metadata)}")
-    logger.info(f"Val subjects: {len(val_metadata)}")
-    logger.info(f"Test subjects: {len(test_metadata)}")
+    logger.info(f"Train subjects: {len(np.unique(train_samples[:, 0]))}")
+    logger.info(f"Val subjects: {len(np.unique(val_samples[:, 0]))}")
 
-    logger.info('loading ccf annotations volume')
-    ccf_annotations = ants.image_read(str(config.ccf_annotations_path)).numpy()
+    # Write ccf_annotations to memmap. This avoids RAM overhead of multiple workers
+    # spawning with a copy of this data.
+    ccf_annotations_path = config.tmp_path / 'ccf_annotations.npy'
+    if is_main_process():
+        logger.info('loading ccf annotations volume')
+        ccf_annotations = ants.image_read(str(config.ccf_annotations_path)).numpy()
+        np.save(ccf_annotations_path, ccf_annotations)
+        del ccf_annotations
+        logger.info('ccf annotations saved to memmap')
 
-    # write ccf_annotations to memmap. this avoids RAM overhead of multiple workers
-    # spawning with a copy of this data
-    ccf_annotations_path = Path(tempfile.mktemp(suffix='.npy'))
-    np.save(ccf_annotations_path, ccf_annotations)
-    del ccf_annotations
+    # Wait for rank 0 to finish writing before any rank reads
+    if dist.is_initialized():
+        dist.barrier(device_ids=[get_local_rank()])
+
+    ccf_annotations_memmap_path = str(ccf_annotations_path)
     ccf_annotations = np.load(ccf_annotations_path, mmap_mode='r')
 
-    with open(config.tissue_bounding_boxes_path) as f:
-        tissue_bboxes = json.load(f)
-    tissue_bboxes = TissueBoundingBoxes(bounding_boxes=tissue_bboxes)
+    rotation_angles = pd.read_csv(config.rotation_angles_path).set_index('subject_id')
+    rotation_angles = RotationAngles(
+        rotation_angles={x.Index: SubjectRotationAngle(AP_rot=x.AP_rotation, ML_rot=x.ML_rotation, SI_rot=x.SI_rotation) for x in rotation_angles.itertuples(index=True)},
+        SI_range=(
+            rotation_angles['SI_rotation'].min(),
+            rotation_angles['SI_rotation'].max()
+        ),
+        ML_range=(
+            rotation_angles['ML_rotation'].min(),
+            rotation_angles['ML_rotation'].max()
+        ),
+        AP_range=(
+            rotation_angles['AP_rotation'].min(),
+            rotation_angles['AP_rotation'].max()
+        ),
+    )
 
-
-    forced_coords = None
-    if config.debug:
-        forced_coords = _deterministic_debug_meta(
-            train_metadata=train_metadata,
-            tissue_bboxes=tissue_bboxes,
-            orientation=config.orientation.value
-        )
-        if forced_coords:
-            logger.info(f"Debug mode: forcing patch coords {forced_coords}")
-
-    train_dataloader = create_dataloader(
-        metadata=train_metadata,
-        tissue_bboxes=tissue_bboxes,
+    train_dataloader, train_sampler = create_dataloader(
+        subjects=subject_metadata,
+        samples=train_samples,
+        tissue_bboxes_path=config.tissue_bounding_boxes_path,
+        rotation_angles=rotation_angles,
         config=config,
         batch_size=config.batch_size,
         num_workers=config.num_workers,
-        buffer_batches=8,
         ls_template_parameters=ls_template_parameters,
         is_train=True,
-        forced_coords=forced_coords,
-        ccf_annotations=ccf_annotations,
+        ccf_annotations_path=ccf_annotations_memmap_path,
         include_tissue_mask=config.predict_tissue_mask,
+        device=device,
+        world_size=world_size,
     )
-    val_dataloader = create_dataloader(
-        metadata=val_metadata,
-        tissue_bboxes=tissue_bboxes,
+    val_dataloader, _ = create_dataloader(
+        subjects=subject_metadata,
+        samples=val_samples,
+        tissue_bboxes_path=config.tissue_bounding_boxes_path,
         config=config,
         batch_size=config.batch_size,
         num_workers=min(2, config.num_workers),
-        buffer_batches=4,
         ls_template_parameters=ls_template_parameters,
         is_train=False,
-        forced_coords=forced_coords,
-        ccf_annotations=ccf_annotations,
+        ccf_annotations_path=ccf_annotations_memmap_path,
         include_tissue_mask=config.predict_tissue_mask,
+        device=device,
+        rotation_angles=rotation_angles,
+        world_size=world_size,
     )
-
-    logger.info(f"Train subjects: {len(train_metadata)}")
-    logger.info(f"Val subjects: {len(val_metadata)}")
 
     model = UNetWithRegressionHeads(
-        spatial_dims=2,
         in_channels=1,
-        channels=config.model.unet_channels,
         out_coords=3,
-        image_height=config.patch_size[0],
-        image_width=config.patch_size[1],
         include_tissue_mask=config.predict_tissue_mask,
+        use_positional_encoding=config.use_positional_encoding,
+        feature_channels=config.model.feature_channels,
+        input_dims=config.patch_size,
+        pos_encoding_channels=config.model.pos_encoding_channels,
+        positional_embedding_type=config.model.positional_embedding_type,
+        positional_embedding_placement=config.model.positional_embedding_placement,
+        coord_head_channels=config.model.coord_head_channels,
+        encoder_name=config.model.encoder_name,
+        encoder_weights=config.model.encoder_weights,
+        encoder_depth=config.model.encoder_depth,
+        decoder_channels=config.model.decoder_channels,
+        decoder_use_norm=config.model.decoder_use_norm,
     )
 
-    logger.info(model)
+    if is_main_process():
+        logger.info(model)
 
     if config.load_checkpoint:
-        logger.info(f"Loading checkpoint from: {config.load_checkpoint}")
+        if is_main_process():
+            logger.info(f"Loading checkpoint from: {config.load_checkpoint}")
         checkpoint = torch.load(f=config.load_checkpoint, map_location=device)
         model.load_state_dict(state_dict=checkpoint['model_state_dict'])
+        # Extract resume state from checkpoint
+        start_step = checkpoint.get('global_step', 0)
+        start_best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+        scheduler_state_dict = checkpoint.get('scheduler_state_dict', None)
+        dwa_state_dict = checkpoint.get('dwa_state_dict', None)
+        if is_main_process():
+            logger.info(f"Resuming from step {start_step}, best_val_loss={start_best_val_loss:.6f}")
     else:
         checkpoint = None
+        start_step = 0
+        start_best_val_loss = float('inf')
+        scheduler_state_dict = None
+        dwa_state_dict = None
+
+    # Move model to device before wrapping with DDP
+    model.to(device)
+
+    # Wrap model with DDP if in distributed mode
+    if world_size > 1:
+        local_rank = get_local_rank()
+        model = torch.nn.parallel.DistributedDataParallel(
+            model,
+            device_ids=[local_rank],
+            output_device=local_rank,
+        )
+        if is_main_process():
+            logger.info("Model wrapped with DistributedDataParallel")
 
     # Log model info
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    logger.info(f"Total parameters: {total_params:,}")
-    logger.info(f"Trainable parameters: {trainable_params:,}")
+    if is_main_process():
+        logger.info(f"Total parameters: {total_params:,}")
+        logger.info(f"Trainable parameters: {trainable_params:,}")
 
     # Create optimizer
     opt = torch.optim.AdamW(
@@ -380,29 +391,38 @@ def main(config_path: Path):
 
     if config.load_checkpoint and 'optimizer_state_dict' in checkpoint:
         opt.load_state_dict(state_dict=checkpoint['optimizer_state_dict'])
-        logger.info("Loaded optimizer state from checkpoint")
+        if is_main_process():
+            logger.info("Loaded optimizer state from checkpoint")
 
-    logger.info(config)
+    if is_main_process():
+        logger.info(config)
 
-    if config.mlflow_tracking_uri:
-        mlflow.set_tracking_uri(config.mlflow_tracking_uri)
+    if is_main_process():
+        if config.mlflow_tracking_uri:
+            mlflow.set_tracking_uri(config.mlflow_tracking_uri)
 
-    mlflow.set_experiment(config.mlflow_experiment_name)
-    mlflow.enable_system_metrics_logging()
+        mlflow.set_experiment(config.mlflow_experiment_name)
+        mlflow.enable_system_metrics_logging()
 
     # disable seeding so mlflow run name can be unique
     state = random.getstate()
     random.seed()
 
-    mlflow_run = mlflow.start_run() if config.use_mlflow else nullcontext()
+    if is_main_process() and config.use_mlflow:
+        mlflow_run = mlflow.start_run()
+        logger.info(f"Started new MLflow run: {mlflow_run.info.run_id}")
+    else:
+        mlflow_run = nullcontext()
+
     with mlflow_run:
-        mlflow.log_params(params=config.model_dump())
-        try:
-            commit, repo_url = _get_git_commit_from_package()
-            mlflow.set_tag("mlflow.source.git.commit", commit)
-            mlflow.set_tag("mlflow.source.git.repoURL", repo_url)
-        except:
-            logger.warning('Could not parse git commit')
+        if is_main_process():
+            mlflow.log_params(params=config.model_dump())
+            try:
+                commit, repo_url = _get_git_commit_from_package()
+                mlflow.set_tag("mlflow.source.git.commit", commit)
+                mlflow.set_tag("mlflow.source.git.repoURL", repo_url)
+            except:
+                logger.warning('Could not parse git commit')
 
         # Restore original seeded state
         random.setstate(state)
@@ -413,82 +433,49 @@ def main(config_path: Path):
             model=model,
             optimizer=opt,
             max_iters=config.max_iters,
+            train_sampler=train_sampler,
             model_weights_out_dir=config.model_weights_out_dir,
             learning_rate=config.learning_rate,
             eval_interval=config.eval_interval,
-            patience=config.patience,
-            min_delta=config.min_delta,
             autocast_context=autocast_context,
+            scaler=scaler,
             device=device,
             eval_iters=config.eval_iters,
             is_debug=config.debug,
             ls_template_parameters=ls_template_parameters,
             ccf_annotations=ccf_annotations,
             val_viz_samples=config.val_viz_samples,
-            exclude_background_pixels=config.exclude_background_pixels,
             lr_scheduler=config.lr_scheduler,
+            cosine_warm_restarts_T_0=config.cosine_warm_restarts_T_0,
             normalize_target_points=config.normalize_template_points,
             predict_tissue_mask=config.predict_tissue_mask,
+            gradient_accumulation_steps=config.gradient_accumulation_steps,
+            grad_clip_max_norm=config.grad_clip_max_norm,
+            warmup_steps=config.warmup_steps,
+            log_interval=config.log_interval,
+            start_step=start_step,
+            start_best_val_loss=start_best_val_loss,
+            scheduler_state_dict=scheduler_state_dict,
+            terminology_path=config.terminology_path,
+            save_every=config.save_every,
+            multi_task_loss_init_weights=config.multi_task_loss_init_weights,
+            dwa_state_dict=dwa_state_dict,
         )
 
-    logger.info("=" * 60)
-    logger.info(f"Training completed! Best validation loss: {best_val_loss:.6f}")
-    logger.info("=" * 60)
+    if is_main_process():
+        logger.info("=" * 60)
+        logger.info(f"Training completed! Best validation loss: {best_val_loss:.6f}")
+        logger.info("=" * 60)
 
-    os.remove(ccf_annotations_path)
+    if is_main_process():
+        os.remove(ccf_annotations_path)
 
+    # Cleanup DDP
+    if world_size > 1:
+        dist.destroy_process_group()
 
-def split_train_val_test(
-        subject_metadata: list[SubjectMetadata],
-        train_split: float,
-        val_split: float,
-) -> tuple[list[SubjectMetadata], list[SubjectMetadata], list[SubjectMetadata]]:
-    """
-    Parameters
-    ----------
-    subject_metadata: List of all subject metadata
-    train_split: Fraction of data for training
-    val_split: Fraction of data for validation
-    seed: Random seed for splitting
-
-    Return
-    --------
-    Tuple of (train_metadata, val_metadata, test_metadata)
-
-    Note: test_split = 1 - train_split - val_split
-    """
-    # Validate splits
-    test_split = 1 - train_split - val_split
-    if test_split < 0:
-        raise ValueError(f"train_split ({train_split}) + val_split ({val_split}) must be <= 1")
-
-    # Use random split
-    logger.info(
-        f"Using random train/val/test split: {train_split:.1%} train, "
-        f"{val_split:.1%} val, {test_split:.1%} test"
-    )
-
-    shuffled_metadata = subject_metadata.copy()
-    random.shuffle(shuffled_metadata)
-
-    # Split
-    n_train = int(len(shuffled_metadata) * train_split)
-    n_val = int(len(shuffled_metadata) * val_split)
-
-    train_metadata = shuffled_metadata[:n_train]
-    val_metadata = shuffled_metadata[n_train:n_train + n_val]
-    test_metadata = shuffled_metadata[n_train + n_val:]
-
-    # Validation
-    if len(train_metadata) == 0:
-        raise ValueError("Training set is empty!")
-    if len(val_metadata) == 0:
-        raise ValueError("Validation set is empty!")
-    if len(test_metadata) == 0:
-        raise ValueError("Test set is empty!")
-
-    return train_metadata, val_metadata, test_metadata
 
 if __name__ == "__main__":
     multiprocessing.set_start_method('spawn', force=True)   # tensorstore complains "fork" not allowed
+    main = _record(main)
     main()

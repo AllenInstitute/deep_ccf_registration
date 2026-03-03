@@ -39,7 +39,6 @@ def iter_point_batches(
         yield start_idx, pd.DataFrame(coords, columns=columns)
 
 def create_point_map(
-    full_res_path: str,
     registered_volume_path: str,
     warp_path: Path,
     affine_path: Path,
@@ -48,17 +47,6 @@ def create_point_map(
     output_zarr_path: str,
     batch_size: int,
 ) -> None:
-    full_res = tensorstore.open(
-        spec={
-            'driver': 'auto',
-            'kvstore': create_kvstore(
-                path=full_res_path,
-                aws_credentials_method="anonymous"
-            )
-        },
-        read=True
-    ).result()
-
     registered_volume = tensorstore.open(
         spec={
             'driver': 'auto',
@@ -79,7 +67,7 @@ def create_point_map(
     spec['metadata']['shape'] = [*spec['metadata']['shape'], 3]
     spec['transform']['input_exclusive_max'] = [*spec['transform']['input_exclusive_max'], [3]]
     spec['transform']['input_inclusive_min'] = [*spec['transform']['input_inclusive_min'], 0]
-    ls_template_points_ts = tensorstore.open(spec, create=True, open=True).result()
+    ls_template_points_ts = tensorstore.open(spec, create=True, delete_existing=True).result()
 
     tmp_warp_path = f'/results/{Path(warp_path).name}'
     logger.info(f'copying warp path from {warp_path} to {tmp_warp_path}')
@@ -115,7 +103,7 @@ def create_point_map(
             ]
         },
         acquisition=acquisition,
-        image_metadata={'shape': full_res.shape[2:]},
+        image_metadata={'registered_shape': registered_volume.shape[2:]},
         ls_template_path=str(ls_template_path)
     )
     tmp_points_path = '/results/template_points.dat'
@@ -199,10 +187,8 @@ def main(
 ) -> None:
     """Generate a template point map aligned to CCF space."""
     zarr_base_path = zarr_base_path.rstrip('/')
-    full_res_path = f"{zarr_base_path}/0"
     registered_volume_path = f"{zarr_base_path}/3"
     create_point_map(
-        full_res_path=full_res_path,
         registered_volume_path=registered_volume_path,
         warp_path=warp_path,
         affine_path=affine_path,
