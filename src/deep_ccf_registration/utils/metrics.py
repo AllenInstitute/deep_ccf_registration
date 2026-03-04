@@ -56,10 +56,15 @@ class PerAxisError(nn.Module):
 class SparseDiceMetric:
     """Custom dice metric since other implementations construct dense one-hot encoding
     which blows up memory when there are 1k+ classes"""
-    def __init__(self, class_ids: np.ndarray):
-        self.num_classes = len(class_ids)
+    def __init__(self, class_ids: np.ndarray, exclude_background: bool = True):
+        self._exclude_background = exclude_background
+        if exclude_background:
+            self._label_to_idx = {label: i + 1 for i, label in enumerate(class_ids)}
+            self.num_classes = len(class_ids) + 1
+        else:
+            self._label_to_idx = {label: i for i, label in enumerate(class_ids)}
+            self.num_classes = len(class_ids)
         self._sample_scores: list[np.ndarray] = []
-        self._label_to_idx = {label: i for i, label in enumerate(class_ids)}
 
     def _remap(self, arr: np.ndarray) -> np.ndarray:
         """Mapping the noncontiguous ccf ids to contiguous ones"""
@@ -80,6 +85,8 @@ class SparseDiceMetric:
 
         denom = pred_count + target_count
         dice = np.where(denom > 0, 2.0 * intersection / (denom+1e-9), np.nan)
+        if self._exclude_background:
+            dice = dice[1:]
         self._sample_scores.append(dice)
 
     def per_class(self) -> np.ndarray:
