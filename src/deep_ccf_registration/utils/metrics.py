@@ -69,19 +69,21 @@ class SparseDiceMetric:
         terminology_path: Path,
         exclude_background: bool = True,
     ):
-        self._child_to_parent = self._construct_child_id_to_parent(terminology_path=terminology_path)
-
         self._exclude_background = exclude_background
         if exclude_background:
             self._label_to_idx = {label: i + 1 for i, label in enumerate(class_ids)}
+            self._idx_to_label = {i+1: label for i, label in enumerate(class_ids)}
             self.num_classes = len(class_ids) + 1
         else:
             self._label_to_idx = {label: i for i, label in enumerate(class_ids)}
+            self._idx_to_label = {i: label for i, label in enumerate(class_ids)}
             self.num_classes = len(class_ids)
         self._sample_scores: list[np.ndarray] = []
 
-    @staticmethod
-    def _construct_child_id_to_parent(terminology_path: Path) -> dict[int, int]:
+        self._class_ids = class_ids
+        self._child_to_parent = self._construct_child_id_to_parent(terminology_path=terminology_path)
+
+    def _construct_child_id_to_parent(self, terminology_path: Path) -> dict[int, int]:
         """
         Returns child, parent mapping
 
@@ -96,9 +98,11 @@ class SparseDiceMetric:
         child_to_parent = {}
         for _, row in annotation_descendents.iterrows():
             parent = row['annotation_value']
-            for child in row['descendant_annotation_values']:
-                child_to_parent[child] = parent
-            child_to_parent[parent] = parent
+            # only map to a parent node if it's one of the nodes we care about in self._class_ids
+            if parent in self._class_ids:
+                for child in row['descendant_annotation_values']:
+                    child_to_parent[child] = parent
+                child_to_parent[parent] = parent
         return child_to_parent
 
     def _remap(self, arr: np.ndarray) -> np.ndarray:
