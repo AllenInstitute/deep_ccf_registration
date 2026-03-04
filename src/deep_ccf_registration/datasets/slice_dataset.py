@@ -88,7 +88,7 @@ class SubjectSliceDataset(Dataset):
         aws_credentials_method: Optional[str] = None,
         # exclude slices with tissue bboxes smaller in area than this percentile
         # this only impacts slice rotation
-        tissue_bbox_area_rejection_percentile: int = 20
+        tissue_bbox_area_rejection_percentile: int = 0
 
     ):
         if include_tissue_mask and ccf_annotations_path is None:
