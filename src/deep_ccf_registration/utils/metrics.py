@@ -1,6 +1,9 @@
+import ast
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 import torch
 from torch import nn
 
@@ -55,8 +58,19 @@ class PerAxisError(nn.Module):
 
 class SparseDiceMetric:
     """Custom dice metric since other implementations construct dense one-hot encoding
-    which blows up memory when there are 1k+ classes"""
-    def __init__(self, class_ids: np.ndarray, exclude_background: bool = True):
+    which blows up memory when there are 1k+ classes.
+
+    If class_ids are not leaf nodes, then all children are pulled and dice is calculated
+    aggregated for the parent
+    """
+    def __init__(
+        self,
+        class_ids: np.ndarray,
+        terminology_path: Path,
+        exclude_background: bool = True,
+    ):
+        self._child_to_parent = self._construct_child_id_to_parent(terminology_path=terminology_path)
+
         self._exclude_background = exclude_background
         if exclude_background:
             self._label_to_idx = {label: i + 1 for i, label in enumerate(class_ids)}
@@ -66,11 +80,33 @@ class SparseDiceMetric:
             self.num_classes = len(class_ids)
         self._sample_scores: list[np.ndarray] = []
 
+    @staticmethod
+    def _construct_child_id_to_parent(terminology_path: Path) -> dict[int, int]:
+        """
+        Returns child, parent mapping
+
+        :param terminology_path:
+        :return:
+        """
+        terminology = pd.read_csv(terminology_path)
+        annotation_descendents = terminology[['annotation_value', 'descendant_annotation_values']].copy()
+        annotation_descendents['descendant_annotation_values'] = annotation_descendents[
+            'descendant_annotation_values'].apply(lambda x: ast.literal_eval(x))
+
+        child_to_parent = {}
+        for _, row in annotation_descendents.iterrows():
+            parent = row['annotation_value']
+            for child in row['descendant_annotation_values']:
+                child_to_parent[child] = parent
+            child_to_parent[parent] = parent
+        return child_to_parent
+
     def _remap(self, arr: np.ndarray) -> np.ndarray:
-        """Mapping the noncontiguous ccf ids to contiguous ones"""
+        """Mapping the noncontiguous ccf ids to contiguous ones, and maps children to their parent node ids"""
         remapped = np.zeros_like(arr)
-        for label, idx in self._label_to_idx.items():
-            remapped[arr == label] = idx
+        for child, parent in self._child_to_parent.items():
+            if parent in self._label_to_idx:
+                remapped[arr == child] = self._label_to_idx[parent]
         return remapped
 
     def update(self, pred: np.ndarray, target: np.ndarray):
