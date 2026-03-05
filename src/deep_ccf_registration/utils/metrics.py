@@ -1,4 +1,6 @@
 import ast
+import json
+from collections import defaultdict
 from pathlib import Path
 from typing import Optional
 
@@ -57,86 +59,98 @@ class PerAxisError(nn.Module):
 
 
 class SparseDiceMetric:
-    """Custom dice metric since other implementations construct dense one-hot encoding
-    which blows up memory when there are 1k+ classes.
-
-    If class_ids are not leaf nodes, then all children are pulled and dice is calculated
-    aggregated for the parent
-    """
     def __init__(
         self,
         class_ids: np.ndarray,
         terminology_path: Path,
+        terminology_correction_path: Path,
         exclude_background: bool = True,
     ):
-        self._exclude_background = exclude_background
-        if exclude_background:
-            self._label_to_idx = {label: i + 1 for i, label in enumerate(class_ids)}
-            self._idx_to_label = {i+1: label for i, label in enumerate(class_ids)}
-            self.num_classes = len(class_ids) + 1
-        else:
-            self._label_to_idx = {label: i for i, label in enumerate(class_ids)}
-            self._idx_to_label = {i: label for i, label in enumerate(class_ids)}
-            self.num_classes = len(class_ids)
-        self._sample_scores: list[np.ndarray] = []
-
-        self._class_ids = class_ids
-        self._child_to_parent = self._construct_child_id_to_parent(terminology_path=terminology_path)
-
-    def _construct_child_id_to_parent(self, terminology_path: Path) -> dict[int, int]:
         """
-        Returns child, parent mapping
 
+        :param class_ids:
         :param terminology_path:
+        :param terminology_correction_path: Due to unknown issue, some ids in annotation volume
+            are not in terminology. Ashwin Bhandiwad created this json file which maps these
+            missing ids
+        :param exclude_background:
+        """
+        self._terminology = pd.read_csv(terminology_path).set_index('annotation_value')
+        with open(terminology_correction_path) as f:
+            self._terminology_correction = json.load(f)
+        class_ids = [int(x) for x in class_ids]
+        if exclude_background:
+            class_ids = [x for x in class_ids if x != 0]
+        self._class_ids = class_ids
+
+        all_children = self._get_all_ids()
+
+        self._annotation_id_to_idx = {label: i + 1 if exclude_background else i for i, label in enumerate(sorted(all_children))}
+        self.num_classes = len(all_children) + 1 if exclude_background else len(all_children)
+
+        self._parent_to_children_ids = self._build_parent_to_children_map()
+        self._total_intersection = np.zeros(self.num_classes, dtype=np.int64)
+        self._total_pred_count = np.zeros(self.num_classes, dtype=np.int64)
+        self._total_target_count = np.zeros(self.num_classes, dtype=np.int64)
+
+    def _build_parent_to_children_map(self):
+        parent_to_children_idx = defaultdict(list)
+        for parent in self._class_ids:
+            entries = self._get_terminology_entry_for_id(id=parent)
+            for entry in entries:
+                children = ast.literal_eval(entry['descendant_annotation_values'])
+                parent_to_children_idx[parent] += [self._annotation_id_to_idx[c] for c in children]
+            parent_to_children_idx[parent] = list(set(parent_to_children_idx[parent]))
+        return parent_to_children_idx
+
+    def _get_all_ids(self):
+        """
+        For given class_ids, find all child ids
+
         :return:
         """
-        terminology = pd.read_csv(terminology_path)
-        annotation_descendents = terminology[['annotation_value', 'descendant_annotation_values']].copy()
-        annotation_descendents['descendant_annotation_values'] = annotation_descendents[
-            'descendant_annotation_values'].apply(lambda x: ast.literal_eval(x))
+        all_children = set()
+        for parent in self._class_ids:
+            entries = self._get_terminology_entry_for_id(id=parent)
+            for entry in entries:
+                children = ast.literal_eval(entry['descendant_annotation_values'])
+                all_children.update(children)
+        return all_children
 
-        child_to_parent = {}
-        for _, row in annotation_descendents.iterrows():
-            parent = row['annotation_value']
-            # only map to a parent node if it's one of the nodes we care about in self._class_ids
-            if parent in self._class_ids:
-                for child in row['descendant_annotation_values']:
-                    child_to_parent[child] = parent
-                child_to_parent[parent] = parent
-        return child_to_parent
+    def _get_terminology_entry_for_id(self, id: int) -> list[pd.Series]:
+        try:
+            entry = self._terminology.loc[id]
+            entries = [entry]
+        except KeyError:
+            ids = self._terminology_correction[str(id)]['id']
+            entries = []
+            for id in ids:
+                entry = self._terminology[self._terminology['identifier'] == id].iloc[0]
+                entries.append(entry)
+        return entries
 
     def _remap(self, arr: np.ndarray) -> np.ndarray:
-        """Mapping the noncontiguous ccf ids to contiguous ones, and maps children to their parent node ids"""
         remapped = np.zeros_like(arr)
-        for child, parent in self._child_to_parent.items():
-            if parent in self._label_to_idx:
-                remapped[arr == child] = self._label_to_idx[parent]
+        for label, idx in self._annotation_id_to_idx.items():
+            remapped[arr == label] = idx
         return remapped
 
     def update(self, pred: np.ndarray, target: np.ndarray):
         pred = self._remap(arr=pred)
         target = self._remap(arr=target)
 
-        match_mask  = pred == target
-
-        intersection = np.bincount(target[match_mask].astype('int'), minlength=self.num_classes)
-        pred_count   = np.bincount(pred.astype('int'),               minlength=self.num_classes)
-        target_count = np.bincount(target.astype('int'),             minlength=self.num_classes)
-
-        denom = pred_count + target_count
-        dice = np.where(denom > 0, 2.0 * intersection / (denom+1e-9), np.nan)
-        if self._exclude_background:
-            dice = dice[1:]
-        self._sample_scores.append(dice)
-
-    def per_class(self) -> np.ndarray:
-        """Mean Dice per class, averaged over samples. Shape: (C,)"""
-        stacked = np.stack(self._sample_scores)  # (N_samples, C)
-        return np.nanmean(stacked, axis=0)
+        match_mask = pred == target
+        self._total_intersection += np.bincount(target[match_mask].astype('int'), minlength=self.num_classes)
+        self._total_pred_count += np.bincount(pred.astype('int'), minlength=self.num_classes)
+        self._total_target_count += np.bincount(target.astype('int'), minlength=self.num_classes)
 
     def compute(self) -> float:
-        """Mean Dice averaged over classes and samples."""
-        return float(np.nanmean(self.per_class()))
-
-    def compute_for_sample_idx(self, idx: int) -> float:
-        return float(np.nanmean(self._sample_scores[idx]))
+        dice = np.empty(len(self._class_ids))
+        for i, parent in enumerate(self._class_ids):
+            idx = self._parent_to_children_ids[parent]
+            inter = self._total_intersection[idx].sum()
+            pred = self._total_pred_count[idx].sum()
+            tgt = self._total_target_count[idx].sum()
+            denom = pred + tgt
+            dice[i] = 2.0 * inter / denom if denom > 0 else np.nan
+        return float(np.nanmean(dice))

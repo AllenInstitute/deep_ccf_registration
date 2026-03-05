@@ -457,6 +457,7 @@ def _main(config_path: Path):
             start_best_val_loss=start_best_val_loss,
             scheduler_state_dict=scheduler_state_dict,
             terminology_path=config.terminology_path,
+            terminology_correction_path=config.terminology_correction_path,
             save_every=config.save_every,
             multi_task_loss_init_weights=config.multi_task_loss_init_weights,
             dwa_state_dict=dwa_state_dict,

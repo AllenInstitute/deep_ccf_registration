@@ -34,6 +34,7 @@ def evaluate(
     global_step: int,
     ccf_annotations: np.ndarray,
     terminology_path: Path,
+    terminology_correction_path: Path,
     dwa_scheduler: DynamicWeightAverageScheduler,
     viz_sample_count: int = 10,
     ls_template_parameters: Optional[TemplateParameters] = None,
@@ -53,7 +54,7 @@ def evaluate(
     total_viz_candidates = 0  # Track total samples seen for reservoir sampling
     eval_records = []
     tissue_mask_dice_metric = DiceMetric(num_classes=2, include_background=False)
-    ccf_annotations_dice_metric = SparseDiceMetric(class_ids=np.unique(ccf_annotations))
+    ccf_annotations_dice_metric = SparseDiceMetric(class_ids=np.unique(ccf_annotations), terminology_path=terminology_path, terminology_correction_path=terminology_correction_path)
 
     with torch.no_grad():
         for i, batch in enumerate(dataloader):
@@ -141,8 +142,11 @@ def evaluate(
             if predict_tissue_mask:
                 tissue_mask_dice_metric(y_pred=pred_tissue_mask.unsqueeze(1), y=tissue_masks.unsqueeze(1))
 
+            sample_dice = []
             if not is_train:
                 for sample_idx in range(pred_points.shape[0]):
+                    slice_ccf_annotations_dice_metric = SparseDiceMetric(
+                        class_ids=np.unique(ccf_annotations), terminology_path=terminology_path, terminology_correction_path=terminology_correction_path)
                     _update_dice_metric(
                         dice_metric=ccf_annotations_dice_metric,
                         ccf_annotations=ccf_annotations,
@@ -151,6 +155,15 @@ def evaluate(
                         template_parameters=ls_template_parameters,
                         pred_mask=pred_tissue_mask[sample_idx].cpu().numpy() if predict_tissue_mask else None,
                     )
+                    _update_dice_metric(
+                        dice_metric=slice_ccf_annotations_dice_metric,
+                        ccf_annotations=ccf_annotations,
+                        gt_physical_space_points=target_template_points[sample_idx].cpu().numpy(),
+                        pred_physical_space=pred_points[sample_idx].cpu().numpy(),
+                        template_parameters=ls_template_parameters,
+                        pred_mask=pred_tissue_mask[sample_idx].cpu().numpy() if predict_tissue_mask else None,
+                    )
+                    sample_dice.append(slice_ccf_annotations_dice_metric.compute())
 
             rmses += rmse.cpu().tolist()
 
@@ -164,7 +177,7 @@ def evaluate(
                     'patch_y': int(batch["patch_ys"][sample_idx].item()),
                     'patch_x': int(batch["patch_xs"][sample_idx].item()),
                     'rmse': rmses[record_idx],
-                    "ccf_annotations_dice": ccf_annotations_dice_metric.compute_for_sample_idx(idx=record_idx) if not is_train else None
+                    "ccf_annotations_dice": sample_dice[sample_idx] if not is_train else None
                 })
 
             slice_indices = batch["slice_indices"]

@@ -32,6 +32,7 @@ def train(
         ccf_annotations: np.ndarray,
         ls_template_parameters: TemplateParameters,
         terminology_path: Path,
+        terminology_correction_path: Path,
         save_every: int = 3000,
         normalize_target_points: bool = True,
         learning_rate: float = 0.0001,
@@ -329,6 +330,7 @@ def train(
                         terminology_path=terminology_path,
                         is_train=True,
                         dwa_scheduler=dwa_scheduler,
+                        terminology_correction_path=terminology_correction_path,
                     )
                 val_metrics = evaluate(
                     dataloader=val_dataloader,
@@ -347,6 +349,7 @@ def train(
                     terminology_path=terminology_path,
                     is_train=False,
                     dwa_scheduler=dwa_scheduler,
+                    terminology_correction_path=terminology_correction_path,
                 )
 
                 current_lr = optimizer.param_groups[0]['lr']
