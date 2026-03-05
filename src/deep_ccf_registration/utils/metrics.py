@@ -144,7 +144,7 @@ class SparseDiceMetric:
         self._total_pred_count += np.bincount(pred.astype('int'), minlength=self.num_classes)
         self._total_target_count += np.bincount(target.astype('int'), minlength=self.num_classes)
 
-    def compute(self) -> float:
+    def compute(self, reduce: Optional[str] = 'mean') -> float:
         dice = np.empty(len(self._class_ids))
         for i, parent in enumerate(self._class_ids):
             idx = self._parent_to_children_ids[parent]
@@ -153,4 +153,11 @@ class SparseDiceMetric:
             tgt = self._total_target_count[idx].sum()
             denom = pred + tgt
             dice[i] = 2.0 * inter / denom if denom > 0 else np.nan
-        return float(np.nanmean(dice))
+
+        if reduce == 'mean':
+            res = float(np.nanmean(dice))
+        elif reduce is None:
+            res = dice
+        else:
+            raise ValueError(f'{reduce} not supported')
+        return res
