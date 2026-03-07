@@ -68,6 +68,9 @@ def create_dataloader(
         normalize_template_points=config.normalize_template_points,
         apply_grid_distortion=config.data_augmentation.apply_grid_distortion and is_train,
         rotation_angles=rotation_angles,
+        apply_gaussian_noise=config.data_augmentation.apply_gaussian_noise and is_train,
+        apply_coarse_dropout=config.data_augmentation.apply_coarse_dropout and is_train,
+        apply_random_brightness_contrast=config.data_augmentation.apply_random_brightness_contrast and is_train,
     )
 
     dataset = SubjectSliceDataset(

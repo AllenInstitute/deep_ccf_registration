@@ -39,10 +39,12 @@ class ModelConfig(BaseModel):
         return self
 
 class DataAugmentationConfig(BaseModel):
-    # extract rotated slices
     rotate_slices: bool = False
     apply_square_symmetry_transform: bool = False
     apply_grid_distortion: bool = False
+    apply_gaussian_noise: bool = False
+    apply_coarse_dropout: bool = False
+    apply_random_brightness_contrast: bool = False
 
 class TrainConfig(BaseModel):
     model_config = ConfigDict(extra='forbid')

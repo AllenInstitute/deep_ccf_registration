@@ -5,7 +5,7 @@ import albumentations
 import cv2
 import numpy as np
 import torch
-from albumentations import Normalize
+from albumentations import Normalize, GaussNoise, CoarseDropout, RandomBrightnessContrast
 from loguru import logger
 from skimage.exposure import rescale_intensity
 
@@ -450,9 +450,21 @@ def build_transform(
     resample_to_fixed_resolution: bool = False,
     rotate_slices: bool = False,
     normalize_template_points: bool = False,
-    apply_grid_distortion: bool = False
+    apply_grid_distortion: bool = False,
+    apply_gaussian_noise: bool = False,
+    apply_coarse_dropout: bool = False,
+    apply_random_brightness_contrast: bool = False
 ):
     transforms: list[Any] = [ImageNormalization()]
+
+    if apply_gaussian_noise:
+        transforms.append(GaussNoise())
+
+    if apply_coarse_dropout:
+        transforms.append(CoarseDropout())
+
+    if apply_random_brightness_contrast:
+        transforms.append(RandomBrightnessContrast())
 
     if rotate_slices:
         transforms.append(Rotate(rotation_angles=rotation_angles, border_mode=cv2.BORDER_REPLICATE))
