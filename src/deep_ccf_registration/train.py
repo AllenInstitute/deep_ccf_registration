@@ -39,6 +39,7 @@ def _evaluation_callback(
     losses: list[float],
     ls_template_parameters: TemplateParameters,
     terminology_path: Path,
+    terminology_correction_path: Path,
     normalize_target_points: bool = True,
     learning_rate: float = 0.0001,
     eval_iters: int = 200,
@@ -66,6 +67,7 @@ def _evaluation_callback(
             terminology_path=terminology_path,
             is_train=True,
             dwa_scheduler=dwa_scheduler,
+            terminology_correction_path=terminology_correction_path
         )
     val_metrics = evaluate(
         dataloader=val_dataloader,
@@ -84,6 +86,7 @@ def _evaluation_callback(
         terminology_path=terminology_path,
         is_train=False,
         dwa_scheduler=dwa_scheduler,
+        terminology_correction_path=terminology_correction_path
     )
 
     current_lr = optimizer.param_groups[0]['lr']
@@ -208,6 +211,7 @@ def train_epoch(
         progress_logger: ProgressLogger,
         epoch: int,
         terminology_path: Path,
+        terminology_correction_path: Path,
         normalize_target_points: bool = True,
         learning_rate: float = 0.0001,
         eval_iters: int = 200,
@@ -353,7 +357,7 @@ def train_epoch(
             if predict_tissue_mask:
                 log_msg += f'; point_loss={point_loss.item():.3f}; tissue_mask_loss={tissue_mask_loss.item():.3f}, loss_weights: {dwa_scheduler.get_weights()}; grad_loss: {grad_loss.item():.3f}'
             progress_logger.log_progress(other=log_msg)
-        
+
         if global_step % eval_interval == 0:
             if dist.is_initialized():
                 dist.barrier(device_ids=[get_local_rank()])
@@ -383,7 +387,8 @@ def train_epoch(
                 autocast_context=autocast_context,
                 device=device,
                 val_viz_samples=val_viz_samples,
-                predict_tissue_mask=predict_tissue_mask
+                predict_tissue_mask=predict_tissue_mask,
+                terminology_correction_path=terminology_correction_path,
             )
 
         if global_step % checkpoint_interval == 0:

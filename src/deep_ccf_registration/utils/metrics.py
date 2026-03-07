@@ -1,6 +1,11 @@
+import ast
+import json
+from collections import defaultdict
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 import torch
 from torch import nn
 
@@ -54,42 +59,70 @@ class PerAxisError(nn.Module):
 
 
 class SparseDiceMetric:
-    """Custom dice metric since other implementations construct dense one-hot encoding
-    which blows up memory when there are 1k+ classes"""
-    def __init__(self, class_ids: np.ndarray):
-        self.num_classes = len(class_ids)
-        self._sample_scores: list[np.ndarray] = []
-        self._label_to_idx = {label: i for i, label in enumerate(class_ids)}
+    def __init__(
+            self,
+            class_ids: np.ndarray,
+            terminology_path: Path,
+            terminology_correction_path: Path,
+            exclude_background: bool = True,
+    ):
+        self._terminology = pd.read_csv(terminology_path).set_index('annotation_value')
+        with open(terminology_correction_path) as f:
+            self._terminology_correction = json.load(f)
+        class_ids = [int(x) for x in class_ids]
+        if exclude_background:
+            class_ids = [x for x in class_ids if x != 0]
+        self._class_ids = class_ids
 
-    def _remap(self, arr: np.ndarray) -> np.ndarray:
-        """Mapping the noncontiguous ccf ids to contiguous ones"""
-        remapped = np.zeros_like(arr)
-        for label, idx in self._label_to_idx.items():
-            remapped[arr == label] = idx
-        return remapped
+        self._parent_to_children_ids = self._build_parent_to_children_map()
+        self._total_intersection = np.zeros(len(class_ids), dtype=np.int64)
+        self._total_pred_count = np.zeros(len(class_ids), dtype=np.int64)
+        self._total_target_count = np.zeros(len(class_ids), dtype=np.int64)
+
+    def _build_parent_to_children_map(self):
+        parent_to_children = defaultdict(set)
+        for parent in self._class_ids:
+            entries = self._get_terminology_entry_for_id(id=parent)
+            for entry in entries:
+                children = ast.literal_eval(entry['descendant_annotation_values'])
+                parent_to_children[parent].update(children)
+        return {k: np.array(list(v)) for k, v in parent_to_children.items()}
+
+    def _get_terminology_entry_for_id(self, id: int) -> list[pd.Series]:
+        """
+        Note: this returns multiple due to bug in terminology, patched by _terminology_correction,
+        otherwise it would be just 1
+
+        :param id:
+        :return:
+        """
+        try:
+            entry = self._terminology.loc[id]
+            entries = [entry]
+        except KeyError:
+            ids = self._terminology_correction[str(id)]['id']
+            entries = []
+            for id in ids:
+                entry = self._terminology[self._terminology['identifier'] == id].iloc[0]
+                entries.append(entry)
+        return entries
 
     def update(self, pred: np.ndarray, target: np.ndarray):
-        pred = self._remap(arr=pred)
-        target = self._remap(arr=target)
+        for i, parent in enumerate(self._class_ids):
+            children = self._parent_to_children_ids[parent]
+            pred_mask = np.isin(pred, children)
+            target_mask = np.isin(target, children)
+            self._total_intersection[i] += np.sum(pred_mask & target_mask)
+            self._total_pred_count[i] += np.sum(pred_mask)
+            self._total_target_count[i] += np.sum(target_mask)
 
-        match_mask  = pred == target
+    def compute(self, reduce: Optional[str] = 'mean'):
+        denom = self._total_pred_count + self._total_target_count
+        dice = np.where(denom > 0, 2.0 * self._total_intersection / denom, np.nan)
 
-        intersection = np.bincount(target[match_mask].astype('int'), minlength=self.num_classes)
-        pred_count   = np.bincount(pred.astype('int'),               minlength=self.num_classes)
-        target_count = np.bincount(target.astype('int'),             minlength=self.num_classes)
-
-        denom = pred_count + target_count
-        dice = np.where(denom > 0, 2.0 * intersection / (denom+1e-9), np.nan)
-        self._sample_scores.append(dice)
-
-    def per_class(self) -> np.ndarray:
-        """Mean Dice per class, averaged over samples. Shape: (C,)"""
-        stacked = np.stack(self._sample_scores)  # (N_samples, C)
-        return np.nanmean(stacked, axis=0)
-
-    def compute(self) -> float:
-        """Mean Dice averaged over classes and samples."""
-        return float(np.nanmean(self.per_class()))
-
-    def compute_for_sample_idx(self, idx: int) -> float:
-        return float(np.nanmean(self._sample_scores[idx]))
+        if reduce == 'mean':
+            return float(np.nanmean(dice))
+        elif reduce is None:
+            return dice
+        else:
+            raise ValueError(f'{reduce} not supported')

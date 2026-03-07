@@ -69,7 +69,7 @@ def sample_slices(
     orientations: list[SliceOrientation],
     seed: int = 1234,
     sample_fraction: float = 0.25,
-    tissue_bbox_percentile_threshold: float = 20.0
+    tissue_bbox_percentile_threshold: float = 0.0
 ):
     """
 
@@ -93,7 +93,7 @@ def sample_slices(
         for orientation in orientations:
             subject_bboxes = bboxes.loc[subject.subject_id]
             valid_indices = [x for x in subject_bboxes['index'].astype(int).tolist() if x is not None]
-            sampled_indices = rng.choice(valid_indices, size=int(len(valid_indices) * sample_fraction))
+            sampled_indices = rng.choice(valid_indices, size=int(len(valid_indices) * sample_fraction), replace=False)
             subject_samples = np.array(list(zip(
                 [subject.subject_id]*len(sampled_indices),
                 sampled_indices.tolist(),
@@ -141,7 +141,7 @@ def sample_slices(
 @click.option(
     "--tissue-bbox-area-percentile-reject-threshold",
     type=float,
-    default=20.0,
+    default=0.0,
     help='Reject tissue bboxes smaller in area than this '
         'This prevents little pieces of tissue with no signal from appearing in dataset.'
          'The default threshold of 20 was chosen based on looking at sagittal samples. TODO might '

@@ -13,7 +13,6 @@ from deep_ccf_registration.datasets.template_meta import TemplateParameters
 from deep_ccf_registration.datasets.transforms import physical_to_index_space
 from deep_ccf_registration.metadata import SliceOrientation
 from deep_ccf_registration.utils.metrics import PerAxisError
-from deep_ccf_registration.utils.losses import MSE
 from deep_ccf_registration.utils.utils import visualize_ccf_annotations
 
 
