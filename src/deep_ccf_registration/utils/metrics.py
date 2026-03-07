@@ -60,21 +60,12 @@ class PerAxisError(nn.Module):
 
 class SparseDiceMetric:
     def __init__(
-        self,
-        class_ids: np.ndarray,
-        terminology_path: Path,
-        terminology_correction_path: Path,
-        exclude_background: bool = True,
+            self,
+            class_ids: np.ndarray,
+            terminology_path: Path,
+            terminology_correction_path: Path,
+            exclude_background: bool = True,
     ):
-        """
-
-        :param class_ids:
-        :param terminology_path:
-        :param terminology_correction_path: Due to unknown issue, some ids in annotation volume
-            are not in terminology. Ashwin Bhandiwad created this json file which maps these
-            missing ids
-        :param exclude_background:
-        """
         self._terminology = pd.read_csv(terminology_path).set_index('annotation_value')
         with open(terminology_correction_path) as f:
             self._terminology_correction = json.load(f)
@@ -83,41 +74,28 @@ class SparseDiceMetric:
             class_ids = [x for x in class_ids if x != 0]
         self._class_ids = class_ids
 
-        all_children = self._get_all_ids()
-
-        self._annotation_id_to_idx = {label: i + 1 if exclude_background else i for i, label in enumerate(sorted(all_children))}
-        self.num_classes = len(all_children) + 1 if exclude_background else len(all_children)
-
         self._parent_to_children_ids = self._build_parent_to_children_map()
-        self._total_intersection = np.zeros(self.num_classes, dtype=np.int64)
-        self._total_pred_count = np.zeros(self.num_classes, dtype=np.int64)
-        self._total_target_count = np.zeros(self.num_classes, dtype=np.int64)
+        self._total_intersection = np.zeros(len(class_ids), dtype=np.int64)
+        self._total_pred_count = np.zeros(len(class_ids), dtype=np.int64)
+        self._total_target_count = np.zeros(len(class_ids), dtype=np.int64)
 
     def _build_parent_to_children_map(self):
-        parent_to_children_idx = defaultdict(list)
+        parent_to_children = defaultdict(set)
         for parent in self._class_ids:
             entries = self._get_terminology_entry_for_id(id=parent)
             for entry in entries:
                 children = ast.literal_eval(entry['descendant_annotation_values'])
-                parent_to_children_idx[parent] += [self._annotation_id_to_idx[c] for c in children]
-            parent_to_children_idx[parent] = list(set(parent_to_children_idx[parent]))
-        return parent_to_children_idx
-
-    def _get_all_ids(self):
-        """
-        For given class_ids, find all child ids
-
-        :return:
-        """
-        all_children = set()
-        for parent in self._class_ids:
-            entries = self._get_terminology_entry_for_id(id=parent)
-            for entry in entries:
-                children = ast.literal_eval(entry['descendant_annotation_values'])
-                all_children.update(children)
-        return all_children
+                parent_to_children[parent].update(children)
+        return {k: np.array(list(v)) for k, v in parent_to_children.items()}
 
     def _get_terminology_entry_for_id(self, id: int) -> list[pd.Series]:
+        """
+        Note: this returns multiple due to bug in terminology, patched by _terminology_correction,
+        otherwise it would be just 1
+
+        :param id:
+        :return:
+        """
         try:
             entry = self._terminology.loc[id]
             entries = [entry]
@@ -129,35 +107,22 @@ class SparseDiceMetric:
                 entries.append(entry)
         return entries
 
-    def _remap(self, arr: np.ndarray) -> np.ndarray:
-        remapped = np.zeros_like(arr)
-        for label, idx in self._annotation_id_to_idx.items():
-            remapped[arr == label] = idx
-        return remapped
-
     def update(self, pred: np.ndarray, target: np.ndarray):
-        pred = self._remap(arr=pred)
-        target = self._remap(arr=target)
-
-        match_mask = pred == target
-        self._total_intersection += np.bincount(target[match_mask].astype('int'), minlength=self.num_classes)
-        self._total_pred_count += np.bincount(pred.astype('int'), minlength=self.num_classes)
-        self._total_target_count += np.bincount(target.astype('int'), minlength=self.num_classes)
-
-    def compute(self, reduce: Optional[str] = 'mean') -> float:
-        dice = np.empty(len(self._class_ids))
         for i, parent in enumerate(self._class_ids):
-            idx = self._parent_to_children_ids[parent]
-            inter = self._total_intersection[idx].sum()
-            pred = self._total_pred_count[idx].sum()
-            tgt = self._total_target_count[idx].sum()
-            denom = pred + tgt
-            dice[i] = 2.0 * inter / denom if denom > 0 else np.nan
+            children = self._parent_to_children_ids[parent]
+            pred_mask = np.isin(pred, children)
+            target_mask = np.isin(target, children)
+            self._total_intersection[i] += np.sum(pred_mask & target_mask)
+            self._total_pred_count[i] += np.sum(pred_mask)
+            self._total_target_count[i] += np.sum(target_mask)
+
+    def compute(self, reduce: Optional[str] = 'mean'):
+        denom = self._total_pred_count + self._total_target_count
+        dice = np.where(denom > 0, 2.0 * self._total_intersection / denom, np.nan)
 
         if reduce == 'mean':
-            res = float(np.nanmean(dice))
+            return float(np.nanmean(dice))
         elif reduce is None:
-            res = dice
+            return dice
         else:
             raise ValueError(f'{reduce} not supported')
-        return res
