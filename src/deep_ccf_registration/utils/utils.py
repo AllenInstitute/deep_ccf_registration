@@ -1,16 +1,19 @@
-from typing import Optional
+from typing import Optional, Callable
 
 import ants
 import numpy as np
 import pandas as pd
 import torch
 from PIL import ImageColor
-from loguru import logger
 from matplotlib import pyplot as plt
 from skimage.exposure import rescale_intensity
+from tenacity import retry, wait_exponential
 
 from deep_ccf_registration.utils.interpolation import interpolate
 
+@retry(wait=wait_exponential(multiplier=1, min=4, max=10), reraise=True)
+def retry_if_needed(func: Callable):
+    func()
 
 def visualize_alignment(
     input_slice: np.ndarray | torch.Tensor,

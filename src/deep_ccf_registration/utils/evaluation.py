@@ -20,6 +20,7 @@ from deep_ccf_registration.utils.losses import calc_multi_task_loss, calc_spatia
     DynamicWeightAverageScheduler, MSE
 from deep_ccf_registration.utils.metrics import SparseDiceMetric
 from deep_ccf_registration.utils.ddp import is_main_process, reduce_mean
+from deep_ccf_registration.utils.utils import retry_if_needed
 from deep_ccf_registration.utils.visualization import viz_sample
 
 
@@ -244,10 +245,10 @@ def evaluate(
         if is_debug:
             plt.show()
         if is_main_process():
-            mlflow.log_figure(
+            retry_if_needed(func=lambda: mlflow.log_figure(
                 fig,
                 f"validation_samples/step_{iteration}/{fig_filename}"
-            )
+            ))
         plt.close(fig)
 
     # Gather per-sample metrics from all ranks
@@ -262,7 +263,7 @@ def evaluate(
         with tempfile.NamedTemporaryFile(mode='w', suffix='.csv', delete=False) as f:
             metrics_df.to_csv(f.name, index=False)
             csv_path = f.name
-            mlflow.log_artifact(csv_path, artifact_path=f"eval_metrics/step_{global_step}")
+            retry_if_needed(func=lambda: mlflow.log_artifact(csv_path, artifact_path=f"eval_metrics/step_{global_step}"))
 
     model.train()
 

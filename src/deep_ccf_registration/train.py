@@ -20,6 +20,7 @@ from deep_ccf_registration.configs.train_config import LRScheduler
 from deep_ccf_registration.utils.logging_utils import timed, ProgressLogger
 from deep_ccf_registration.utils.losses import calc_multi_task_loss, calc_spatial_gradient_loss, \
     DynamicWeightAverageScheduler, MSE
+from deep_ccf_registration.utils.utils import retry_if_needed
 
 
 def _evaluation_callback(
@@ -103,7 +104,7 @@ def _evaluation_callback(
             "eval/tissue_mask_dice": val_metrics['val_tissue_mask_dice'],
         }
     if is_main_process():
-        mlflow.log_metrics(metrics=eval_metrics, step=global_step)
+        retry_if_needed(func=lambda: mlflow.log_metrics(metrics=eval_metrics, step=global_step))
 
     log_msg = (f"Epoch {epoch + 1} | Step {global_step} | "
                f"Train loss: {np.mean(losses):.6f} | Val loss: {val_metrics['val_loss']:.6f} | "
@@ -139,8 +140,8 @@ def _evaluation_callback(
                 },
                 f=checkpoint_path,
             )
-            mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
-            mlflow.log_metric("best_val_loss", best_val_loss, step=global_step)
+            retry_if_needed(func=lambda: mlflow.log_artifact(str(checkpoint_path), artifact_path="models"))
+            retry_if_needed(func=lambda: mlflow.log_metric("best_val_loss", best_val_loss, step=global_step))
             logger.info(f"New best model saved! Val loss: {best_val_loss:.6f}")
     return best_val_loss
 
@@ -172,7 +173,7 @@ def _checkpoint_callback(
             },
             f=checkpoint_path,
         )
-        mlflow.log_artifact(str(checkpoint_path), artifact_path="models")
+        retry_if_needed(func=lambda: mlflow.log_artifact(str(checkpoint_path), artifact_path="models"))
 
 def _epoch_callback(
     epoch: int,
@@ -350,7 +351,7 @@ def train_epoch(
             train_metrics['train/tissue_mask_loss_weight'] = dwa_scheduler.get_weights()[1]
 
         if is_main_process():
-            mlflow.log_metrics(train_metrics, step=global_step)
+            retry_if_needed(func=lambda: mlflow.log_metrics(train_metrics, step=global_step))
 
         if is_main_process():
             log_msg = f'Epoch {epoch}: loss={loss.item() * gradient_accumulation_steps:.3f}'
@@ -599,5 +600,5 @@ def train(
 
     if is_main_process():
         logger.info(f"\nTraining completed! Best validation loss: {best_val_loss:.6f}")
-        mlflow.log_metric("final_best_val_loss", best_val_loss)
+        retry_if_needed(func=lambda: mlflow.log_metric("final_best_val_loss", best_val_loss))
     return best_val_loss
