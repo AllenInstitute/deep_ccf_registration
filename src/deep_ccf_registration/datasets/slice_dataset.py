@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -18,7 +19,7 @@ from deep_ccf_registration.metadata import SubjectMetadata, SliceOrientation, \
     AcquisitionAxis, RotationAngles, TissueBoundingBox
 from deep_ccf_registration.utils.logging_utils import timed, timed_func
 from deep_ccf_registration.utils.tensorstore_utils import create_kvstore
-from tenacity import retry, wait_random_exponential
+from tenacity import retry, wait_random_exponential, after_log
 
 
 @dataclass(frozen=True)
@@ -116,7 +117,8 @@ class SubjectSliceDataset(Dataset):
         self._tissue_bbox_area_rejection_threshold = np.percentile(tissue_bboxes['area'], tissue_bbox_area_rejection_percentile)
         logger.info(f"Dataset initialized with {len(self)} total samples")
 
-    @retry(wait=wait_random_exponential(multiplier=1, max=60), reraise=True)
+    @retry(wait=wait_random_exponential(multiplier=1, max=60),
+           after=after_log(logger=logger, log_level=logging.WARNING))
     def _read_volume(self, subject: SubjectMetadata) -> tensorstore.TensorStore:
         volume = tensorstore.open(
             spec={
@@ -130,7 +132,8 @@ class SubjectSliceDataset(Dataset):
         ).result()
         return volume
 
-    @retry(wait=wait_random_exponential(multiplier=1, max=60), reraise=True)
+    @retry(wait=wait_random_exponential(multiplier=1, max=60),
+           after=after_log(logger=logger, log_level=logging.WARNING))
     def _read_warp(self, subject: SubjectMetadata):
         warp = tensorstore.open(
             spec={
@@ -260,7 +263,8 @@ class SubjectSliceDataset(Dataset):
             pad_right=pad_right,
         )
 
-    @retry(wait=wait_random_exponential(multiplier=1, max=60), reraise=True)
+    @retry(wait=wait_random_exponential(multiplier=1, max=60),
+           after=after_log(logger=logger, log_level=logging.WARNING))
     @timed_func
     def _get_slice(
         self,
@@ -289,7 +293,8 @@ class SubjectSliceDataset(Dataset):
             tuple(spatial_slices)].read().result().astype("float32")
         return data_patch
 
-    @retry(wait=wait_random_exponential(multiplier=1, max=60), reraise=True)
+    @retry(wait=wait_random_exponential(multiplier=1, max=60),
+           after=after_log(logger=logger, log_level=logging.WARNING))
     @timed_func
     def _get_rotated_slice(
         self,
@@ -314,7 +319,8 @@ class SubjectSliceDataset(Dataset):
 
         return data_patch
 
-    @retry(wait=wait_random_exponential(multiplier=1, max=60), reraise=True)
+    @retry(wait=wait_random_exponential(multiplier=1, max=60),
+           after=after_log(logger=logger, log_level=logging.WARNING))
     @timed_func
     def _get_template_points(
         self,

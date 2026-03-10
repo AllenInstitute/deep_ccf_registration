@@ -34,7 +34,7 @@ class SubjectMetadata(BaseModel):
     # obtained via `get_input_space_midline.py`
     sagittal_midline: Optional[int] = None
     ls_to_template_inverse_warp_path: Optional[str] = None
-    ls_to_template_inverse_warp_path_original: Path
+    ls_to_template_inverse_warp_path_original: Optional[Path] = None
     ls_to_template_affine_matrix_path: Path
 
     def get_slice_shape(self, orientation: SliceOrientation):
