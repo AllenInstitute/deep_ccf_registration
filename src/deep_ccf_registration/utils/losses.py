@@ -5,7 +5,7 @@ import torch
 from torch import nn
 
 from deep_ccf_registration.datasets.template_meta import TemplateParameters
-from deep_ccf_registration.utils.metrics import _calc_lowest_err_sagittal_orientation
+from deep_ccf_registration.utils.metrics import calc_lowest_err_sagittal_orientation
 
 
 class DynamicWeightAverageScheduler:
@@ -108,7 +108,7 @@ class MSE(nn.Module):
         assert len(target.shape) == 4 and target.shape[1] == 3
         if mask is not None:
             assert len(mask.shape) == 3 and list(mask.shape) == [pred.shape[0]] + list(pred.shape[-2:])
-        pred = _calc_lowest_err_sagittal_orientation(
+        pred = calc_lowest_err_sagittal_orientation(
             pred=pred, target=target, template_parameters=self._template_parameters,
             orientations=orientations,
         )

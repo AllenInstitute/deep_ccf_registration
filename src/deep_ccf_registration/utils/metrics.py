@@ -14,7 +14,7 @@ from deep_ccf_registration.datasets.transforms import mirror_points
 from deep_ccf_registration.metadata import SliceOrientation
 
 
-def _calc_lowest_err_sagittal_orientation(
+def calc_lowest_err_sagittal_orientation(
     pred: torch.Tensor, target: torch.Tensor,
     template_parameters: TemplateParameters,
     orientations: list[str],
@@ -50,7 +50,7 @@ class PerAxisError(nn.Module):
         if mask is not None:
             assert len(mask.shape) == 3 and list(mask.shape) == [pred.shape[0]] + list(pred.shape[-2:])
 
-        pred = _calc_lowest_err_sagittal_orientation(
+        pred = calc_lowest_err_sagittal_orientation(
             pred=pred, target=target, template_parameters=self._template_parameters,
             orientations=orientations,
         )
